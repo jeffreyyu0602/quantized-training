@@ -1,0 +1,14 @@
+matplotlib
+scipy
+transformers
+datasets
+accelerate
+nvidia-ml-py3
+evaluate
+scikit-learn
+peft==0.6.2
+softposit
+wandb
+librosa
+soundfile
+jiwer
