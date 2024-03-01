@@ -3,7 +3,6 @@
 *.out
 *.png
 *.pt
-*.txt
 __pycache__
 bash_scripts
 data

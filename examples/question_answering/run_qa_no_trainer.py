@@ -799,16 +799,13 @@ def main(args=None):
         device = torch.device("cpu")
     model.to(device)
 
-    if args.bf16:
-        model.bfloat16()
-
     def run_fn(model):
-        batch = {k: v.to(device) for k, v in next(iter(eval_dataloader)).items()}
+        batch = {k: v.to(device) for k, v in next(iter(train_dataloader)).items()}
         loss = model(**batch).loss
         loss.backward()
         model.zero_grad()
 
-    quantize_model(model, args, run_fn, (), device)
+    model = quantize_model(model, args, run_fn, device=device)
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

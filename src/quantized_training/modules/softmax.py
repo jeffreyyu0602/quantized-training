@@ -3,9 +3,9 @@ from torch import nn, Tensor
 from torch.autograd import Function
 
 
-POSIT_EXP_FILE = "src/posit/quantization/posit_gold/posit16_1_exp.txt"
-POSIT_EXP_SHIFTED_FILE = "src/posit/quantization/posit_gold/posit16_1_exp_shifted.txt"
-POSIT_RECIPROCAL_FILE = "src/posit/quantization/posit_gold/posit16_1_reciprocal.txt"
+POSIT_EXP_FILE = "src/quantized_training/posit_gold/posit16_1_exp.txt"
+POSIT_EXP_SHIFTED_FILE = "src/quantized_training/posit_gold/posit16_1_exp_shifted.txt"
+POSIT_RECIPROCAL_FILE = "src/quantized_training/posit_gold/posit16_1_reciprocal.txt"
 
 def _convert(input: torch.Tensor, values: torch.Tensor):
     if input.dtype == torch.float16:

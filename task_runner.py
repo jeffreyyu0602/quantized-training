@@ -188,9 +188,16 @@ def main():
                     if k == "learning_rate" and isinstance(v, int):
                         v = float(v) * training_args.learning_rate
                     setattr(sweep_args, k, v)
-                logger.info("Training/evaluation parameters %s", pformat(vars(sweep_args)))
+                logger.info(
+                    "Training/evaluation parameters %s", pformat(vars(sweep_args))
+                )
                 task_module.main(sweep_args)
-            wandb.agent(args.sweep_id, function=sweep_function, project=args.project_name, count=args.job_count)
+            wandb.agent(
+                args.sweep_id,
+                function=sweep_function,
+                project=args.project_name,
+                count=args.job_count
+            )
         else:
             if args.project_name is not None:
                 wandb.init(project=args.project_name, name=args.job_name, id=args.run_id, resume="allow")

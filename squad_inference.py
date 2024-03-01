@@ -21,18 +21,12 @@ operations = [
 dtypes = ['posit8_1', 'e4m3']
 
 template_command = (
-    'python task_runner.py --module src/posit/question_answering/run_qa_no_trainer.py '
-    '--dataset_name squad --max_seq_length 384 --pad_to_max_length '
-    '--model_name_or_path [model] --per_device_eval_batch_size 16 --bf16 '
-    '--quantize_weights --quantize_fwd [ops] --dtype [dtype] --log_file [log_file]'
+    'python task_runner.py --module examples/question_answering/run_qa_no_trainer.py'
+    ' --dataset_name squad --max_seq_length 384 --pad_to_max_length'
+    ' --model_name_or_path [model] --per_device_eval_batch_size 16 --bf16'
+    ' --quantize_weights --quantize_fwd [ops] --dtype [dtype] --log_file [log_file]'
+    ' --gpu [gpu]'
 )
-
-def execute_command(command):
-    try:
-        result = subprocess.run(command, shell=True, check=True)
-        print(f"Success: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e.stderr}")
 
 def extract_scores(filename):
     scores = []
@@ -41,13 +35,14 @@ def extract_scores(filename):
             if (match := re.search(r"'f1': (\d+\.\d+)", line)) is not None:
                 scores.append(float(match.group(1)))
     scores = [scores[i:i+10] for i in range(0, len(scores), 10)]
-    with open('accuracy.txt', 'w') as file:
+    with open('accuracy', 'w') as file:
         for batch in scores:
             file.write('\t'.join(map(str, batch)) + '\n')
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_file', type=str, default='logs/squad.log')
+    parser.add_argument('--gpu', type=str, default='0')
     args = parser.parse_args()
 
     for model in models:
@@ -57,8 +52,9 @@ def main():
                 command = command.replace('[ops]', ops)
                 command = command.replace('[dtype]', dtype)
                 command = command.replace('[log_file]', args.log_file)
+                command = command.replace('[gpu]', args.gpu)
                 print(command)
-                execute_command(command)
+                subprocess.run(command, shell=True, check=True)
                 extract_scores(args.log_file)
 
 if __name__ == "__main__":

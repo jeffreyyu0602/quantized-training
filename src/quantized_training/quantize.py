@@ -83,6 +83,9 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
         if run_fn is not None:
             run_fn(model)
 
+    if args.bf16:
+        model.bfloat16()
+
     for name, param in model.named_parameters():
         if not 'bias' in name:
             param.data = qconfig.weight(device=param.device)(param.data)

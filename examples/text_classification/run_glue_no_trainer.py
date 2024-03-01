@@ -56,7 +56,6 @@ from peft import (
     get_peft_model,
 )
 
-# from quantized_training import add_training_args, quantize_model
 from quantized_training import add_training_args, quantize_model
 
 
@@ -480,11 +479,8 @@ def main(args=None):
         device = torch.device("cpu")
     model.to(device)
 
-    if args.bf16:
-        model.bfloat16()
-
     def run_fn(model):
-        batch = {k: v.to(device) for k, v in next(iter(eval_dataloader)).items()}
+        batch = {k: v.to(device) for k, v in next(iter(train_dataloader)).items()}
         loss = model(**batch).loss
         loss.backward()
         model.zero_grad()

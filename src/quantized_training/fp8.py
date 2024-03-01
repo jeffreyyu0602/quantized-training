@@ -24,14 +24,15 @@ def quantize_to_fp8_e4m3(
     rb = (lb & gb) | (gb & sb)
 
     nf_mask_clamped = torch.clamp(nf_mask, max=23)
-    raw_bits = torch.where(rb, raw_bits + (1 << nf_mask_clamped), raw_bits)
     raw_bits &= (-1 << nf_mask_clamped)
-    output = raw_bits.view(torch.float)
+    raw_bits = torch.where(rb, raw_bits + (1 << nf_mask_clamped), raw_bits)
 
+    output = raw_bits.view(torch.float)
     output = torch.clamp(output, min=-fp8_max, max=fp8_max)
     output = torch.where(torch.abs(input) <= fp8_min * (2 ** -(mbits + 1)), 0, output)
-    output = torch.where(torch.isfinite(input), output, torch.nan)
 
+    output = torch.where(input == 0, 0, output)
+    output = torch.where(torch.isfinite(input), output, torch.nan)
     return output.to(input.dtype)
 
 def quantize_to_fp8_e5m2(
@@ -52,14 +53,15 @@ def quantize_to_fp8_e5m2(
     rb = (lb & gb) | (gb & sb)
 
     nf_mask_clamped = torch.clamp(nf_mask, max=23)
-    raw_bits = torch.where(rb, raw_bits + (1 << nf_mask_clamped), raw_bits)
     raw_bits &= (-1 << nf_mask_clamped)
-    output = raw_bits.view(torch.float)
+    raw_bits = torch.where(rb, raw_bits + (1 << nf_mask_clamped), raw_bits)
 
+    output = raw_bits.view(torch.float)
     output = torch.clamp(output, min=-fp8_max, max=fp8_max)
     output = torch.where(torch.abs(input) <= fp8_min * (2 ** -(mbits + 1)), 0, output)
-    output = torch.where(torch.isfinite(input), output, torch.nan)
 
+    output = torch.where(input == 0, 0, output)
+    output = torch.where(torch.isfinite(input), output, torch.nan)
     return output.to(input.dtype)
 
 def main():

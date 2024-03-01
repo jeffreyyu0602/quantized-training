@@ -51,6 +51,8 @@ def quantize_to_posit(
     if round_to_even:
         threshold = math.pow(2, -(nbits - 1) * (1 << es))
         output = torch.where(input.abs() <= threshold, 0, output)
+        # posit_min = math.pow(2, math.floor(-(nbits - 1) * (1 << es) + 2 ** (es - 1)))
+        # output = torch.where(input.abs() < posit_min, 0, output)
 
     # Special values: 0 and NaN
     output = torch.where(input == 0, 0, output)

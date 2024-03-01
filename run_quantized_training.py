@@ -84,9 +84,9 @@ def get_base_cmd(args):
     cmd_parts = ["python task_runner.py"]
 
     if args.task in {"mnli", "qnli", "mrpc", "sst2"}:
-        cmd_parts.append(f"--module src/posit/text_classification/run_glue_no_trainer.py --task_name {args.task} --max_length 128")
+        cmd_parts.append(f"--module examples/text_classification/run_glue_no_trainer.py --task_name {args.task} --max_length 128")
     elif args.task == "squad":
-        cmd_parts.append(f"--module src/posit/question_answering/run_qa_no_trainer.py --dataset_name {args.task} --max_seq_length 384")
+        cmd_parts.append(f"--module examples/question_answering/run_qa_no_trainer.py --dataset_name {args.task} --max_seq_length 384")
     else:
         raise ValueError(f"Invalid task: {args.task}")
 
