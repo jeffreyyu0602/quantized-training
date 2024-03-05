@@ -1,9 +1,8 @@
 matplotlib
 scipy
-transformers
-datasets
-accelerate
-nvidia-ml-py3
+transformers==4.36.2
+datasets==2.15.0
+accelerate==0.22.0
 evaluate
 scikit-learn
 peft==0.6.2

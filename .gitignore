@@ -5,6 +5,7 @@
 *.pt
 __pycache__
 bash_scripts
+build
 data
 logs
 models/*
@@ -14,4 +15,3 @@ plots
 slurm_scripts
 tmp
 wandb
-!requirements.txt

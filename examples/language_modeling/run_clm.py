@@ -450,6 +450,7 @@ def main():
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
             device_map="auto",
+            max_memory={0: "20GiB", 1: "20GiB", 2: "20GiB", 3: "20GiB"},
         )
     else:
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=model_args.trust_remote_code)
@@ -603,9 +604,10 @@ def main():
 
     quantize_model(model, args, run_fn)
 
-    # for name, module in model.named_modules():
-    #     if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-    #         module.histogram_observer_enabled[0] = 1
+    if args.plot_hist:
+        for name, module in model.named_modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.histogram_observer_enabled[0] = 1
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -660,9 +662,10 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
-        # for name, module in model.named_modules():
-        #     if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-        #         module.plot_histograms(os.path.join(training_args.output_dir, f'{name}.png'))
+        if args.plot_hist:
+            for name, module in model.named_modules():
+                if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                    module.save_hist(os.path.join(training_args.output_dir, f'{name}.png'))
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
     if data_args.dataset_name is not None:

@@ -165,7 +165,7 @@ def main():
         elif args.write_script == "bash":
             write_bash_script(args, cli_args)
     else:
-        task_module = importlib.import_module(args.module.replace('/', '.').rsplit('.', 1)[0])
+        task_module = importlib.import_module(args.module.replace('/', '.'))
         importlib.reload(task_module)
         training_args = task_module.parse_args(training_args)
 

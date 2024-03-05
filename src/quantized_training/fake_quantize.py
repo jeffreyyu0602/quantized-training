@@ -211,7 +211,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         combined_histogram = torch.histc(x_exp, 254, min=-126, max=127)
         histogram += combined_histogram
 
-    def plot_histograms(self, save_path):
+    def save_hist(self, filename):
         hist1 = self.histogram_pre_process.cpu()
         hist2 = self.histogram_post_process.cpu()
 
@@ -241,4 +241,4 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         plt.ylabel('Count')
         plt.legend()
 
-        plt.savefig(save_path)
+        plt.savefig(filename)

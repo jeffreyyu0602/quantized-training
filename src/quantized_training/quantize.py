@@ -46,18 +46,6 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
-    propagate_config(model, 'config', model.config)
-    convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
-
-    if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
-        swap_softmax(
-            model,
-            posit_exp=args.posit_exp,
-            posit_exp_shifted=args.posit_exp_shifted,
-            posit_reciprocal=args.posit_reciprocal,
-            dtype=torch.bfloat16 if args.bf16 else None,
-        )
-
     qconfig = get_default_qconfig(
         dtype=args.dtype,
         activation=args.quantize_fwd,
@@ -72,18 +60,35 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
 
     if args.quantize_model:
         model = get_quantized_model(model, qconfig=qconfig, op_fusion=args.op_fusion)
-    else:
+    elif args.quantize_fwd or args.quantize_bwd or args.quantize_weights:
+        # swap Transformer modules to track float operations
+        propagate_config(model, 'config', model.config)
+        convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
+
+        # swap softmax to use posit approximated functions
+        if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
+            swap_softmax(
+                model,
+                posit_exp=args.posit_exp,
+                posit_exp_shifted=args.posit_exp_shifted,
+                posit_reciprocal=args.posit_reciprocal,
+                dtype=torch.bfloat16 if args.bf16 else None,
+            )
+
+        # register hooks to quantize activations and errors
         propagate_config(model, 'qconfig', qconfig)
         convert(model, inplace=True)
         prepare(model, args.quantize_fwd, args.quantize_bwd, args.op_fusion, device)
 
+        # re-dispatch model to the correct device
         if hasattr(model, 'hf_device_map'):
             dispatch_model(model, device_map=model.hf_device_map)
 
+        # run the model to initialize the fake quant modules
         if run_fn is not None:
             run_fn(model)
 
-    if args.bf16:
+    if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
     for name, param in model.named_parameters():

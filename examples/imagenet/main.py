@@ -92,9 +92,9 @@ parser.add_argument('--dummy', action='store_true', help="use fake data to bench
 
 parser.add_argument('--qat', action="store_true", help="Whether to perform quantization aware training.")
 parser.add_argument('--maxpool2x2', action="store_true", help="Whether to smaller maxpool.")
-parser.add_argument('--save_data', action="store_true", help="Whether to save validation data.")
+parser.add_argument('--save_dataset', action="store_true", help="Whether to save validation data.")
 parser.add_argument('--output_dir', default=None, type=str, help="Directory to save model checkpoints.")
-parser.add_argument('--model_path', default=None, type=str, help="Model path used for evaluation.")
+parser.add_argument('--model_path', default=None, type=str, help="Model for evaluation.")
 parser.add_argument('--chunk_size', default=50000, type=int, help="Number of samples processed per epoch")
 add_training_args(parser)
 
@@ -210,25 +210,40 @@ def main_worker(gpu, ngpus_per_node, args):
         device = torch.device("cpu")
 
 # =============================================================================
-# Use 2x2 maxpool and add QAT
+# swap maxpool, fuse batch norm, and prepare qat
 # =============================================================================
 
-    def _apply(module, cls, fn, inplace=True):
+    def _apply(module, fn, inplace=True):
         if not inplace:
             module = copy.deepcopy(module)
-        reassign = {}
-        for name, mod in module.named_children():
-            if isinstance(mod, cls):
-                reassign[name] = fn(mod)
-            _apply(mod, cls, fn)
 
-        for key, value in reassign.items():
-            module._modules[key] = value
+        for name, mod in module.named_children():
+            _apply(mod, fn)
+            module._modules[name] = fn(mod)
 
         return module
 
+    def _to_float(mod):
+        if isinstance(mod, nni._FusedModule):
+            new_mod = mod.to_float()
+            for pre_hook_fn in mod._forward_pre_hooks.values():
+                new_mod.register_forward_pre_hook(pre_hook_fn)
+            return new_mod
+        return mod
+
+    def get_fused_model(model):
+        model_fused = _apply(model, _to_float, inplace=False)
+        for name, param in model_fused.named_parameters():
+            param.data = quantize_to_posit(param.data, 16 if 'bias' in name else 8, 1)
+        return model_fused
+
+    def _swap_maxpool(mod):
+        if isinstance(mod, nn.MaxPool2d):
+            return nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
+        return mod
+
     if args.maxpool2x2:
-        _apply(model, nn.MaxPool2d, lambda _: nn.MaxPool2d(kernel_size=2, stride=2, padding=0))
+        _apply(model, nn.MaxPool2d, _swap_maxpool)
 
     if args.qat:
         modules_to_fuse = get_fused_modules(model, [nn.Conv2d, nn.BatchNorm2d])
@@ -238,12 +253,11 @@ def main_worker(gpu, ngpus_per_node, args):
         qconfig = get_default_qconfig(dtype=args.dtype, activation=True, weight=True)
         propagate_config(model, 'qconfig', qconfig)
         convert(model, inplace=True)
-        prepare(model, quantize_fwd="gemm")
+        prepare(model, quantize_fwd="gemm", device=device)
 
         for m in model.modules():
             if isinstance(m,  nni._FusedModule):
                 m.update_bn_stats()
-                m._enable_slow_path_for_better_numerical_stability = True
 
     if args.bf16:
         model.bfloat16()
@@ -318,7 +332,7 @@ def main_worker(gpu, ngpus_per_node, args):
     indices = random.sample(range(len(val_dataset)), 1000)
     val_dataset = Subset(val_dataset, indices=indices)
 
-    if args.save_data:
+    if args.save_dataset:
         dest_dirs = {}
         labels = []
         for idx in indices:
@@ -352,13 +366,6 @@ def main_worker(gpu, ngpus_per_node, args):
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
-    def get_fused_model(model):
-        model_fused = _apply(model, nni._FusedModule, lambda m: m.to_float(), inplace=False)
-        prepare(model_fused, qconfig=qconfig, quantize_fwd="gemm", device=device)
-        for name, param in model_fused.named_parameters():
-            param.data = quantize_to_posit(param.data, 16 if 'bias' in name else 8, 1)
-        return model_fused
-
     if args.evaluate:
         model_eval = get_fused_model(model) if args.qat else model
         if args.model_path:
@@ -374,12 +381,14 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        # train for one epoch
+        # Pick a random subset of the training data
         indices = random.sample(range(len(train_dataset)), args.chunk_size)
         subset = Subset(train_dataset, indices=indices)
         train_loader = torch.utils.data.DataLoader(
             subset, batch_size=args.batch_size, shuffle=(train_sampler is None),
             num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+
+        # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
