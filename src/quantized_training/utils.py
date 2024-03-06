@@ -1,238 +1,142 @@
-from typing import Optional, List
-from dataclasses import dataclass, field
+import copy
+import datetime
+import json
+import logging
+import os
+import re
+import sys
+from pprint import pformat
+from typing import List
 
+import wandb
 from torch import nn
 from torch.nn.utils.parametrize import type_before_parametrizations
 
 __all__ = [
-    "add_training_args",
     "get_fused_modules",
+    "run_task",
 ]
 
-@dataclass
-class QuantizedTrainingArguments:
-    """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune or train from scratch.
-    """
-    num_hidden_layers: Optional[int] = field(
-        default=None,
-        metadata={"help": "Number of encoder layers to use."}
-    )
-    # bf16: bool = field(
-    #     default=False,
-    #     metadata={"help": "Whether to use bf16 (mixed) precision instead of 32-bit float."}
-    # )
-    # do_train: bool = field(
-    #     default=False,
-    #     metadata={"help": "Whether to run training"}
-    # )
-    gpu: Optional[int] = field(
-        default=None,
-        metadata={"help": "GPU to use."}
-    )
-    sgd: bool = field(
-        default=False,
-        metadata={"help": "Whether to use SGD optimizer."}
-    )
-    # warmup_ratio: float = field(
-    #     default=0.06,
-    #     metadata={"help": "Ratio of warmup steps in the lr scheduler."}
-    # )
-    lora_rank: int = field(
-        default=0,
-        metadata={"help": "The dimension of the low-rank matrices."}
-    )
-    lora_alpha: int = field(
-        default=8,
-        metadata={"help": "The scaling factor for the low-rank matrices."}
-    )
-    target_modules: List[str] = field(
-        default="query,value",
-        metadata={
-            "type": lambda x: x.split(','),
-            "help": "The modules (for example, attention blocks) to apply the LoRA update matrices."
-        },
-    )
-    dtype: str = field(
-        default="posit8_1",
-        metadata={"help": "Quantization data type to use. Choose between posit(nbits)_(es), FP8_(E4M3|E5M2), and FP8(.MIXED)."}
-    )
-    quantize_weights: bool = field(
-        default=False,
-        metadata={"help": "Whether to quantize model weights."}
-    )
-    quantize_fwd: Optional[str] = field(
-        default=None,
-        metadata={
-            "nargs": "?",
-            "const": "gemm",
-            "help": "Whether to quantize activations. Choose from gemm, act, norm, bn, softmax, attn_scaling, and residual."
-        }
-    )
-    quantize_bwd: Optional[str] = field(
-        default=None,
-        metadata={
-            "nargs": "?",
-            "const": "gemm",
-            "help": "Whether to quantize activation gradients. Choose from gemm, act, norm, bn, softmax, attn_scaling, and residual."
-        }
-    )
-    scaling_fwd: bool = field(
-        default=False,
-        metadata={"help": "Whether to quantize activation using per-tensor scaling."}
-    )
-    scaling_bwd: bool = field(
-        default=False,
-        metadata={"help": "Whether to quantize activation gradient using per-tensor scaling."}
-    )
-    max_fwd: float = field(
-        default=64.0,
-        metadata={"help": "Maximum value of a data type when performing scaling during forward pass."}
-    )
-    max_bwd: float = field(
-        default=64.0,
-        metadata={"help": "Maximum value of a data type when performing scaling during backward pass."}
-    )
-    amax_history_len: int = field(
-        default=10,
-        metadata={"help": "The length of the amax history window used for scaling factor computation."}
-    )
-    op_fusion: Optional[List[str]] = field(
-        default=None,
-        metadata={"help": "Fuse operation with previous GEMM to reduce quantization error."}
-    )
-    posit_exp: bool = field(
-        default=False,
-        metadata={"help": "Whether to use posit approximated exponential function in softmax."}
-    )
-    posit_exp_shifted: bool = field(
-        default=False,
-        metadata={"help": "Whether to use shifted posit approximated exponential function in softmax."}
-    )
-    posit_reciprocal: bool = field(
-        default=False,
-        metadata={"help": "Whether to use posit approximated reciprocal function in softmax."}
-    )
-    quantize_model: bool = field(
-        default=False,
-        metadata={"help": "Whether to run quantized inference using defined model file."}
-    )
-    plot_hist: bool = field(
-        default=False,
-        metadata={"help": "Whether to plot the histogram of tensor value."}
+logger = logging.getLogger(__name__)
+
+SLURM_LOG_DIR = "slurm_logs"
+SLURM_SCRIPT_DIR = "slurm_scripts"
+BASH_SCRIPT_DIR = "bash_scripts"
+ENV_SETUP_SCRIPT = "setup_shell.sh"
+
+SLURM_ARGS = {
+    "job-name": {"type": str, "default": "test"},
+    "partition": {"type": str, "default": "gpu"},
+    "nodes": {"type": int, "default": 1},
+    "time": {"type": str, "default": "48:00:00"},
+    "gres": {"type": str, "default": "1"},
+    "cpus-per-task": {"type": int, "default": 8},
+    "mem": {"type": str, "default": "16GB"},
+    "output": {"type": str, "default": None},
+    "error": {"type": str, "default": None},
+    "exclude": {"type": str, "default": None},
+    "nodelist": {"type": str, "default": None},
+}
+
+SLURM_NAME_OVERRIDES = {"gpus": "gres", "cpus": "cpus-per-task"}
+
+def write_slurm_script(args, cli_args):
+    if args.output is None:
+        args.output = os.path.join(SLURM_LOG_DIR, args.job_name + ".%j.out")
+    if args.error is None:
+        args.error = os.path.join(SLURM_LOG_DIR, args.job_name + ".%j.err")
+    args.gpus = f"gpu:{args.gpus}" if args.gpus is not None else args.gpus
+
+    filename = os.path.join(SLURM_SCRIPT_DIR, args.job_name.replace('-', '_') + ".sbatch")
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "w") as f:
+        f.write('#!/bin/bash\n')
+
+        for arg_name in SLURM_ARGS.keys():
+            arg_value = vars(args)[arg_name.replace("-", "_")]
+            # if arg_name in SLURM_NAME_OVERRIDES:
+            #     arg_name = SLURM_NAME_OVERRIDES[arg_name]
+            if arg_value is not None:
+                f.write(f"#SBATCH --{arg_name}={arg_value}\n")
+
+        f.write('\n')
+        f.write('echo "SLURM_JOBID = "$SLURM_JOBID\n')
+        f.write('echo "SLURM_JOB_NODELIST = "$SLURM_JOB_NODELIST\n')
+        f.write('echo "SLURM_JOB_NODELIST = "$SLURM_JOB_NODELIST\n')
+        f.write('echo "SLURM_NNODES = "$SLURM_NNODES\n')
+        f.write('echo "SLURMTMPDIR = "$SLURMTMPDIR\n')
+        f.write('echo "working directory = "$SLURM_SUBMIT_DIR\n')
+        f.write('\n')
+        f.write('source ' + ENV_SETUP_SCRIPT + '\n')
+        f.write('python ' + cli_args + '\n')
+        f.write('wait\n')
+
+def write_bash_script(args, cli_args):
+    filename = os.path.join(BASH_SCRIPT_DIR, args.job_name.replace('-', '_') + ".sh")
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "w") as f:
+        f.write('#!/bin/bash\n')
+        f.write('python ' + cli_args + '\n')
+
+def run_task(args, run_fn):
+    # Set up logging
+    if args.log_file == "":
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        args.log_file = f'logs/{timestamp}.log'
+
+    logging.basicConfig(
+        filename=args.log_file,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=getattr(logging, args.log_level),
     )
 
-def add_training_args(parser):
-    parser.add_argument(
-        "--num_hidden_layers",
-        type=int,
-        default=None,
-        help="Number of encoder layers to use."
-    )
-    parser.add_argument("--lora_rank", type=int, default=0, help="The dimension of the low-rank matrices.")
-    parser.add_argument("--lora_alpha", type=int, default=8, help="The scaling factor for the low-rank matrices.")
-    parser.add_argument(
-        "--target_modules",
-        type=lambda x: x.split(','),
-        default="query,value",
-        help="The modules (for example, attention blocks) to apply the LoRA update matrices."
-    )
-    parser.add_argument(
-        "--bf16",
-        action="store_true",
-        help="Whether to use bf16 (mixed) precision instead of 32-bit float."
-    )
-    parser.add_argument("--do_train", action="store_true", help="Whether to run training")
-    parser.add_argument("--gpu", type=int, default=None, help="GPU to use.")
-    parser.add_argument("--sgd", action="store_true", help="Whether to use SGD optimizer.")
-    parser.add_argument(
-        "--warmup_ratio", type=float, default=0.06, help="Ratio of warmup steps in the lr scheduler."
-    )
-    parser.add_argument(
-        "--dtype",
-        default="posit8_1",
-        help="Quantization data type to use. Choose between posit(nbits)_(es), FP8_(E4M3|E5M2), and FP8(.MIXED).",
-    )
-    parser.add_argument("--quantize_weights", action="store_true", help="Whether to quantize model weights.")
-    parser.add_argument(
-        "--quantize_fwd",
-        nargs='?',
-        const='gemm',
-        default=None,
-        help=(
-            "Whether to quantize activations. Choose from "
-            "gemm, act, norm, bn, softmax, attn_scaling, and residual."
-        ),
-    )
-    parser.add_argument(
-        "--quantize_bwd",
-        nargs='?',
-        const='gemm',
-        default=None,
-        help=(
-            "Whether to quantize activation gradients. Choose from "
-            "gemm, act, norm, bn, softmax, attn_scaling, and residual."
-        ),
-    )
-    parser.add_argument(
-        "--scaling_fwd",
-        action="store_true",
-        help="Whether to quantize activation using per-tensor scaling."
-    )
-    parser.add_argument(
-        "--scaling_bwd",
-        action="store_true",
-        help="Whether to quantize activation gradient using per-tensor scaling."
-    )
-    parser.add_argument(
-        "--max_fwd",
-        type=float,
-        default=64,
-        help="Maximum value of a data type when performing scaling during forward pass."
-    )
-    parser.add_argument(
-        "--max_bwd",
-        type=float,
-        default=64,
-        help="Maximum value of a data type when performing scaling during backward pass."
-    )
-    parser.add_argument(
-        "--amax_history_len",
-        type=int,
-        default=10,
-        help="The length of the amax history window used for scaling factor computation."
-    )
-    parser.add_argument(
-        "--op_fusion",
-        type=lambda x: x.split(','),
-        default=None,
-        help="Fuse operation with previous GEMM to reduce quantization error.",
-    )
-    parser.add_argument(
-        "--posit_exp",
-        action="store_true",
-        help="Whether to use posit approximated exponential function in softmax."
-    )
-    parser.add_argument(
-        "--posit_exp_shifted",
-        action="store_true",
-        help="Whether to use shifted posit approximated exponential function in softmax."
-    )
-    parser.add_argument(
-        "--posit_reciprocal",
-        action="store_true",
-        help="Whether to use posit approximated reciprocal function in softmax."
-    )
-    parser.add_argument(
-        "--quantize_model",
-        action="store_true",
-        help="Whether to run quantized inference using defined model file.",
-    )
-    parser.add_argument(
-        "--plot_hist",
-        action="store_true",
-        help="Whether to store and plot the histogram of tensor value.",
-    )
+    # Create W&B sweep from sweep configuration
+    if args.sweep_config:
+        with open(args.sweep_config, 'r') as file:
+            sweep_configuration = json.load(file)
+        args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
+
+    # Write script and exit if write_script is set
+    if args.write_script is not None:
+        cli_args = re.sub(r' --write_script \S+', '', ' '.join(sys.argv))
+        if args.sweep_config:
+            cli_args = re.sub(r'--sweep_config \S+', f'--sweep_id {args.sweep_id}', cli_args)
+
+        if args.write_script == "slurm":
+            write_slurm_script(args, cli_args)
+        elif args.write_script == "bash":
+            write_bash_script(args, cli_args)
+        return
+
+    def sweep_function():
+        run = wandb.init()
+        sweep_args = copy.deepcopy(args)
+        for k, v in wandb.config.items():
+            if k == "learning_rate" and isinstance(v, int):
+                v = float(v) * args.learning_rate
+            setattr(sweep_args, k, v)
+        logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
+        run_fn(sweep_args)
+
+    # Perform W&B sweep or run single job
+    if args.sweep_id is not None:
+        wandb.agent(
+            args.sweep_id,
+            function=sweep_function,
+            project=args.project,
+            count=args.job_count
+        )
+    else:
+        if args.project is not None:
+            wandb.init(
+                project=args.project,
+                name=args.job_name,
+                id=args.run_id,
+                resume="allow"
+            )
+        logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
+        run_fn(args)
 
 def get_fused_modules(model: nn.Module, modules_to_fuse: List[nn.Module]):
     module_list = []

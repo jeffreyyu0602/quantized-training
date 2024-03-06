@@ -27,16 +27,30 @@ def run_evaluation(model, dtype, ops):
         "--quantize_fwd", ops
     ]
     print("Running:", ' '.join(base_cmd))
-    subprocess.run(base_cmd)
+    subprocess.run(base_cmd, check=True)
+
+def run_perplexity(model, dtype, ops, log_file):
+    base_cmd = [
+        "python", "examples/language_modeling/perplexity.py",
+        "--model_id", model,
+        "--max_length", "1024",
+        "--dtype", dtype,
+        "--quantize_fwd", ops,
+        "--quantize_weights",
+        "--log_file", log_file,
+    ]
+    print("Running:", ' '.join(base_cmd))
+    subprocess.run(base_cmd, check=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Run language model evaluation.")
-    parser.add_argument("-m", "--model", default="meta-llama/Llama-2-7b-hf", help="Path to the model")
+    parser.add_argument("--model_id", default="meta-llama/Llama-2-7b-hf", help="Pretrained model for evaluation.")
+    parser.add_argument("--log_file", default="logs/llama2.log", help="Path to the log file.")
     args = parser.parse_args()
 
     for dtype in dtypes:
         for ops in operations:
-            run_evaluation(args.model, dtype, ops)
+            run_perplexity(args.model_id, dtype, ops, args.log_file)
 
     print("All commands executed.")
 

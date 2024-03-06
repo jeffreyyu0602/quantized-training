@@ -10,7 +10,7 @@ from quantized_training import add_training_args, quantize_model
 
 
 parser = argparse.ArgumentParser(description="Perform whisper model inference on LibriSpeech dataset.")
-parser.add_argument("--model_name_or_path", default="openai/whisper-tiny", help="Model to perform evaluation.")
+parser.add_argument("--model_id", default="openai/whisper-tiny", help="Model to perform evaluation.")
 parser.add_argument("--batch_size", type=int, default=16, help="Evaluation batch size.")
 parser.add_argument("--output_dir", type=str, default=None, help="Output directory for scores.")
 add_training_args(parser)
@@ -24,8 +24,8 @@ else:
 
 librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 
-processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
-model = WhisperForConditionalGeneration.from_pretrained(args.model_name_or_path).to(device)
+processor = WhisperProcessor.from_pretrained(args.model_id)
+model = WhisperForConditionalGeneration.from_pretrained(args.model_id).to(device)
 
 def run_fn(model):
     sample = librispeech_test_clean[0]["audio"]

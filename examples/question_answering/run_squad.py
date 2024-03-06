@@ -30,8 +30,7 @@ dtypes = ['posit8_1', 'e4m3']
 
 def run_evaluation(model, ops, dtype, log_file, gpu):
     command = [
-        'python', 'task_runner.py', 
-        '--module', 'examples/question_answering/run_qa_no_trainer.py',
+        'python', 'examples/question_answering/run_qa_no_trainer.py',
         '--model_name_or_path', model, 
         '--dataset_name', 'squad', 
         '--per_device_eval_batch_size', '16', 
@@ -56,9 +55,9 @@ def extract_scores(log_file, out_file):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--log_file', type=str, default='logs/squad.log')
-    parser.add_argument('--out_file', type=str, default='accuracy.out')
-    parser.add_argument('--gpu', type=str, default='0')
+    parser.add_argument('--log_file', default='logs/squad.log')
+    parser.add_argument('--out_file', default='accuracy.out')
+    parser.add_argument('--gpu', default=None)
     args = parser.parse_args()
 
     for model in models:

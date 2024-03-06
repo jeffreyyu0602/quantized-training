@@ -56,7 +56,7 @@ from peft import (
     get_peft_model,
 )
 
-from quantized_training import add_training_args, quantize_model
+from quantized_training import add_training_args, quantize_model, run_task
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -79,7 +79,7 @@ task_to_keys = {
 }
 
 
-def parse_args(args=None):
+def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
     parser.add_argument(
         "--task_name",
@@ -211,7 +211,7 @@ def parse_args(args=None):
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
     add_training_args(parser)
-    args = parser.parse_args(args)
+    args = parser.parse_args()
 
     # Sanity checks
     if args.task_name is None and args.train_file is None and args.validation_file is None:
@@ -230,9 +230,8 @@ def parse_args(args=None):
     return args
 
 
-def main(args=None):
-    if args is None:
-        args = parse_args()
+def main(args):
+    # args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_glue_no_trainer", args)
@@ -794,4 +793,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main()
+    run_task(parse_args(), main)

@@ -37,7 +37,7 @@ from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from .utils_qa import postprocess_qa_predictions
+from utils_qa import postprocess_qa_predictions
 
 import transformers
 from transformers import (
@@ -65,7 +65,7 @@ from peft import (
     get_peft_model,
 )
 
-from quantized_training import add_training_args, quantize_model
+from quantized_training import add_training_args, quantize_model, run_task
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -74,7 +74,6 @@ from quantized_training import add_training_args, quantize_model
 # require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/question-answering/requirements.txt")
 
 logger = logging.getLogger(__name__)
-
 # You should update this to your particular problem to have better documentation of `model_type`
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -103,7 +102,7 @@ def save_prefixed_metrics(results, output_dir, file_name: str = "all_results.jso
         json.dump(results, f, indent=4)
 
 
-def parse_args(args=None):
+def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a Question Answering task")
     parser.add_argument(
         "--dataset_name",
@@ -324,7 +323,7 @@ def parse_args(args=None):
         ),
     )
     add_training_args(parser)
-    args = parser.parse_args(args)
+    args = parser.parse_args()
 
     # Sanity checks
     if (
@@ -351,9 +350,9 @@ def parse_args(args=None):
     return args
 
 
-def main(args=None):
-    if args is None:
-        args = parse_args()
+def main(args):
+    # args = parse_args()
+
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_qa_no_trainer", args)
@@ -952,7 +951,9 @@ def main(args=None):
 
     # Evaluation
     if not args.do_train:
-        run_eval()
+        eval_metric = run_eval()
+        if wandb.run is not None:
+            wandb.log(eval_metric)
         return
 
     # Train!
@@ -1177,4 +1178,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main()
+    run_task(parse_args(), main)
