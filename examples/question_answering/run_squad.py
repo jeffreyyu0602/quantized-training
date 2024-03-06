@@ -24,7 +24,7 @@ ablation_study = [
     'gemm,norm',
     'gemm,act',
     'gemm,scaling',
-]d
+]
 
 dtypes = ['posit8_1', 'e4m3']
 
