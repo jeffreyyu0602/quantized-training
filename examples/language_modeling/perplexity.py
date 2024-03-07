@@ -23,7 +23,6 @@ def main(args):
         args.model_id,
         torch_dtype=torch.bfloat16, # torch.float16 cause overflow
         device_map="auto",
-        max_memory={0: "20GiB", 1: "20GiB", 2: "20GiB", 3: "20GiB"},
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
