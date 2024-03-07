@@ -21,10 +21,9 @@ def parse_args():
 def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        # torch_dtype="auto",
         torch_dtype=torch.bfloat16, # torch.float16 cause overflow
         device_map="auto",
-        # max_memory={0: "20GiB", 1: "20GiB", 2: "20GiB", 3: "20GiB"},
+        max_memory={0: "20GiB", 1: "20GiB", 2: "20GiB", 3: "20GiB"},
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
@@ -60,9 +59,10 @@ def main(args):
 
     ppl = torch.exp(torch.stack(nlls).mean())
 
-    logger.info(f"Model: {args.model_id}")
-    logger.info(f"Max length: {args.max_length}")
-    logger.info(f"Perplexity: {ppl.item()}")
+    logger.info(f"model:      {args.model_id}")
+    logger.info(f"max length: {args.max_length}")
+    logger.info(f"stride:     {args.stride}")
+    logger.info(f"perplexity: {ppl.item()}")
 
 if __name__ == "__main__":
     args = parse_args()

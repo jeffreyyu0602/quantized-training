@@ -450,7 +450,6 @@ def main():
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=model_args.low_cpu_mem_usage,
             device_map="auto",
-            max_memory={0: "20GiB", 1: "20GiB", 2: "20GiB", 3: "20GiB"},
         )
     else:
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=model_args.trust_remote_code)
@@ -597,12 +596,7 @@ def main():
             preds = preds[:, :-1].reshape(-1)
             return metric.compute(predictions=preds, references=labels)
 
-    def run_fn(model):
-        batch = {k: torch.tensor([v]) for k, v in eval_dataset[0].items()}
-        with torch.no_grad():
-            model(**batch)
-
-    quantize_model(model, args, run_fn)
+    quantize_model(model, args)
 
     if args.plot_hist:
         for name, module in model.named_modules():
