@@ -37,7 +37,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 
 from utils_data import save_activations, save_errors, save_weights_and_grads
 from modeling_mobilebert import MobileBertForSequenceClassification
-from quantized_training import add_training_args, quantize_model
+from quantized_training import add_training_args, quantize_model, run_task
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ task_to_keys = {
 }
 
 
-def parse_args(args=None):
+def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
     parser.add_argument(
         "--task_name",
@@ -189,7 +189,7 @@ def parse_args(args=None):
     add_training_args(parser)
     parser.add_argument("--disable_dropout", action="store_true", help="Whether to disable dropout during training.")
     parser.add_argument("--grad_scale", type=float, default=1.0, help="The scale factor for the gradients.")
-    args = parser.parse_args(args)
+    args = parser.parse_args()
 
     # Sanity checks
     if args.task_name is None and args.train_file is None and args.validation_file is None:
@@ -208,9 +208,8 @@ def parse_args(args=None):
     return args
 
 
-def main(args=None):
-    if args is None:
-        args = parse_args()
+def main(args):
+    # args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_glue_no_trainer", args)
@@ -647,4 +646,5 @@ def main(args=None):
         torch.save(histogram.cpu(), 'error_pre_process.pt')
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    run_task(args, main)
