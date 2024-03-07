@@ -30,10 +30,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 RESIDUAL_LAYERS = [
-    "query", "key", "value", "intermediate",  # bert, mobilebert
-    "bottleneck.input", "bottleneck.attention",  # mobilebert
-    "q_lin", "k_lin", "v_lin", "lin1",  # distilbert
-    "q_proj", "k_proj", "v_proj",  # whisper
+    "query", "key", "value", "intermediate", "bottleneck.input", "bottleneck.attention",
 ]
 
 def propagate_config(module, name, qconfig):
@@ -153,18 +150,17 @@ def prepare(
         if op_fusion is not None and any(layer in name for layer in op_fusion):
             return
 
-        is_residual = (
-            isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
-            or any(layer in name for layer in RESIDUAL_LAYERS)
-            and isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
-        )
-
         if isinstance(m, forward_pre_hook_module_list):
             _register_module_process_hook(m, 'activation_pre_process', device, name)
 
         if isinstance(m, backward_pre_hook_module_list):
             _register_module_process_hook(m, 'error_pre_process', device, name)
 
+        is_residual = (
+            isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
+            or any(layer in name for layer in RESIDUAL_LAYERS)
+            and isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
+        )
         if quantize_bwd is not None and "residual" in quantize_bwd and is_residual:
             _register_module_process_hook(m, 'error_post_process', device, name)
 
