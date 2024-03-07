@@ -77,7 +77,8 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
 
         # register hooks to quantize activations and errors
         propagate_config(model, 'qconfig', qconfig)
-        convert(model, inplace=True)
+        if args.do_train:
+            convert(model, inplace=True)
         prepare(model, args.quantize_fwd, args.quantize_bwd, args.op_fusion, device)
 
         # re-dispatch model to the correct device
@@ -94,7 +95,8 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
     if args.quantize_weights:
         for name, param in model.named_parameters():
             if not 'bias' in name:
-                param.data = qconfig.weight(device=param.device)(param.data)
+                weight_fake_quant = qconfig.weight(device=param.device, layer_name=name)
+                param.data = weight_fake_quant(param.data)
 
     return model
 

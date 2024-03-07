@@ -19,14 +19,12 @@ ACTFNS = [value[0] if isinstance(value, tuple) else value for value in ACT2CLS.v
 QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
     'act': get_modules(nn.modules.activation) + ACTFNS,
     'batchnorm': get_modules(nn.modules.batchnorm),
-    'gemm': [
-        *get_modules(nn.modules.conv),
+    'gemm': get_modules(nn.modules.conv)+ [
         nn.Linear,
         Conv1D,
         quantizable.MatmulFunctional,
     ],
-    'norm': [
-        *get_modules(nn.modules.normalization),
+    'norm': get_modules(nn.modules.normalization) + [
         llama.modeling_llama.LlamaRMSNorm,
         mobilebert.modeling_mobilebert.NoNorm,
     ],
