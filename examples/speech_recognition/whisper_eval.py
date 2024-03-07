@@ -27,13 +27,7 @@ librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 processor = WhisperProcessor.from_pretrained(args.model_id)
 model = WhisperForConditionalGeneration.from_pretrained(args.model_id).to(device)
 
-def run_fn(model):
-    sample = librispeech_test_clean[0]["audio"]
-    input_features = processor(sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt").input_features
-    with torch.no_grad():
-        model.generate(input_features.to(device))
-
-quantize_model(model, args, run_fn, device=device)
+quantize_model(model, args, device=device)
 
 if args.plot_hist:
     for name, module in model.named_modules():
