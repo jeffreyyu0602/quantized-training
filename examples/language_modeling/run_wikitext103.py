@@ -11,11 +11,12 @@ operations = [
     "gemm,residual,norm,act,scaling"
 ]
 
-def run_perplexity(model_id, max_length, dtype, ops, log_file):
+def run_evaluation(model_id, max_length, stide, dtype, ops, log_file):
     base_cmd = [
         "python", "examples/language_modeling/perplexity.py",
         "--model_id", model_id,
         "--max_length", str(max_length),
+        "--stride", str(stide),
         "--dtype", dtype,
         "--quantize_fwd", ops,
         "--quantize_weights",
@@ -28,12 +29,13 @@ def main():
     parser = argparse.ArgumentParser(description="Run language model evaluation.")
     parser.add_argument("--model_id", default="meta-llama/Llama-2-7b-hf", help="Pretrained model for evaluation.")
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
+    parser.add_argument('--stride', type=int, default=512, help='Stride for processing the data')
     parser.add_argument("--log_file", default="logs/llama2.log", help="Path to the log file.")
     args = parser.parse_args()
 
     for dtype in dtypes:
         for ops in operations:
-            run_perplexity(args.model_id, args.max_length, dtype, ops, args.log_file)
+            run_evaluation(args.model_id, args.max_length, args.stride, dtype, ops, args.log_file)
 
     print("All commands executed.")
 
