@@ -3,7 +3,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import sys
 from pprint import pformat
 from typing import List
@@ -21,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 SLURM_LOG_DIR = "slurm_logs"
 SLURM_SCRIPT_DIR = "slurm_scripts"
-BASH_SCRIPT_DIR = "bash_scripts"
 ENV_SETUP_SCRIPT = "setup_shell.sh"
 
 SLURM_ARGS = {
@@ -29,8 +27,8 @@ SLURM_ARGS = {
     "partition": {"type": str, "default": "gpu"},
     "nodes": {"type": int, "default": 1},
     "time": {"type": str, "default": "48:00:00"},
-    "gres": {"type": str, "default": "1"},
-    "cpus-per-task": {"type": int, "default": 8},
+    "gpus": {"type": str, "default": "1"},
+    "cpus": {"type": int, "default": 8},
     "mem": {"type": str, "default": "16GB"},
     "output": {"type": str, "default": None},
     "error": {"type": str, "default": None},
@@ -40,22 +38,22 @@ SLURM_ARGS = {
 
 SLURM_NAME_OVERRIDES = {"gpus": "gres", "cpus": "cpus-per-task"}
 
-def write_slurm_script(args, cli_args):
+def write_slurm_script(args, cmd):
+    os.makedirs(SLURM_SCRIPT_DIR, exist_ok=True)
+
     if args.output is None:
         args.output = os.path.join(SLURM_LOG_DIR, args.job_name + ".%j.out")
     if args.error is None:
         args.error = os.path.join(SLURM_LOG_DIR, args.job_name + ".%j.err")
     args.gpus = f"gpu:{args.gpus}" if args.gpus is not None else args.gpus
 
-    filename = os.path.join(SLURM_SCRIPT_DIR, args.job_name.replace('-', '_') + ".sbatch")
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "w") as f:
+    with open(os.path.join(SLURM_SCRIPT_DIR, args.job_name + ".sbatch"), "w") as f:
         f.write('#!/bin/bash\n')
 
         for arg_name in SLURM_ARGS.keys():
             arg_value = vars(args)[arg_name.replace("-", "_")]
-            # if arg_name in SLURM_NAME_OVERRIDES:
-            #     arg_name = SLURM_NAME_OVERRIDES[arg_name]
+            if arg_name in SLURM_NAME_OVERRIDES:
+                arg_name = SLURM_NAME_OVERRIDES[arg_name]
             if arg_value is not None:
                 f.write(f"#SBATCH --{arg_name}={arg_value}\n")
 
@@ -68,15 +66,14 @@ def write_slurm_script(args, cli_args):
         f.write('echo "working directory = "$SLURM_SUBMIT_DIR\n')
         f.write('\n')
         f.write('source ' + ENV_SETUP_SCRIPT + '\n')
-        f.write('python ' + cli_args + '\n')
+        f.write('python ' + ' '.join(cmd) + '\n')
         f.write('wait\n')
 
-def write_bash_script(args, cli_args):
-    filename = os.path.join(BASH_SCRIPT_DIR, args.job_name.replace('-', '_') + ".sh")
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+def write_bash_script(args, cmd):
+    filename = "run.sh" if args.run_name is None else args.run_name + ".sh"
     with open(filename, "w") as f:
         f.write('#!/bin/bash\n')
-        f.write('python ' + cli_args + '\n')
+        f.write('python ' + ' '.join(cmd) + '\n')
 
 def run_task(args, run_fn):
     # Set up logging
@@ -97,17 +94,19 @@ def run_task(args, run_fn):
             sweep_configuration = json.load(file)
         args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
 
-    # Write script and exit if write_script is set
-    if args.write_script is not None:
-        cli_args = re.sub(r' --write_script \S+', '', ' '.join(sys.argv))
+    # Write slurm or bash script
+    if args.script is not None:
+        command = ['python'] + sys.argv
         if args.sweep_config:
-            cli_args = re.sub(r'--sweep_config \S+', f'--sweep_id {args.sweep_id}', cli_args)
+            index = command.index('--sweep_config')
+            command[index:index + 2] = ['--sweep_id', args.sweep_id]
 
-        if args.write_script == "slurm":
-            write_slurm_script(args, cli_args)
-        elif args.write_script == "bash":
-            write_bash_script(args, cli_args)
-        return
+        index = command.index(args.script)
+        if args.script == "slurm":
+            write_slurm_script(args, command[:index])
+            return
+        elif args.script == "bash":
+            write_bash_script(args, command[:index])
 
     def sweep_function():
         run = wandb.init()
@@ -125,13 +124,13 @@ def run_task(args, run_fn):
             args.sweep_id,
             function=sweep_function,
             project=args.project,
-            count=args.job_count
+            count=args.max_trials,
         )
     else:
         if args.project is not None:
             wandb.init(
                 project=args.project,
-                name=args.job_name,
+                name=args.run_name,
                 id=args.run_id,
                 resume="allow"
             )
