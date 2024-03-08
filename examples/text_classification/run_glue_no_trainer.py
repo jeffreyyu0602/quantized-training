@@ -596,8 +596,7 @@ def main(args):
             }, os.path.join(output_dir, "checkpoint.tar"))
 
     def load_state(output_dir):
-        path = os.path.join(output_dir, "checkpoint.tar")
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(os.path.join(output_dir, "checkpoint.tar"))
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -605,7 +604,9 @@ def main(args):
 
     # Evaluation
     if not args.do_train:
-        run_eval()
+        eval_metric = run_eval()
+        if wandb.run is not None:
+            wandb.log(eval_metric)
         return
 
     # Train!

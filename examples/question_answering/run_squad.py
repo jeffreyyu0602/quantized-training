@@ -42,8 +42,9 @@ def run_evaluation(model, ops, dtype, log_file, gpu):
         '--quantize_fwd', ops, 
         '--dtype', dtype, 
         '--log_file', log_file,
-        '--gpu', gpu
     ]
+    if gpu is not None:
+        command += ['--gpus', gpu]
     print("Running:", ' '.join(command))
     subprocess.run(command, check=True)
 
