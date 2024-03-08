@@ -4,6 +4,8 @@ import re
 import subprocess
 from datetime import datetime
 
+import torch
+
 
 LORA_CONFIG = {
     "models/mobilebert_tiny": {
@@ -129,12 +131,12 @@ def main():
         for name in ["bf16", "posit8", "posit8-approx", "posit8-approx-shifted", "fp8"]:
             filename = os.path.join("slurm_scripts", f"{prefix}-lora-{name}.sbatch".replace('-', '_'))
             with open(filename, "r") as f:
-                lines = f.readlines()
+                content = f.read()
 
-            if (match := re.search(r'--output_dir (\S+)', lines[-2])) is not None:
+            if (match := re.search(r'--output_dir (\S+)', content)) is not None:
                 output_dir = match.group(1)
             else:
-                raise ValueError("Could not find output_dir argument in command:", lines[-2])
+                raise ValueError("Could not find output_dir argument in command:")
 
             assert os.path.isdir(output_dir), (
                 f"Checkpoint directory does not exist: {output_dir}"
@@ -142,18 +144,19 @@ def main():
 
             model_dirs = [d for d in os.listdir(output_dir) if d.startswith("step_")]
             model_dirs.sort(key=lambda x: int(x[5:]))
-            checkpoint_path = os.path.join(output_dir, model_dirs[-1]) if model_dirs else None
+            assert model_dirs, f"No checkpoints found in {output_dir}"
 
-            if 'resume_from_checkpoint' in lines[-2]:
-                lines[-2] = re.sub(r'(--resume_from_checkpoint )\S+', r'\1' + checkpoint_path, lines[-2])
+            checkpoint_path = os.path.join(output_dir, model_dirs[-1])
+            if 'resume_from_checkpoint' in content:
+                content = re.sub(r'(--resume_from_checkpoint )\S+', r'\1' + checkpoint_path, content)
             else:
-                lines[-2] = lines[-2].rstrip('\n') + f" --resume_from_checkpoint {checkpoint_path}\n"
+                content = re.sub(r'(--do_train)', r'\1' + f" --resume_from_checkpoint " + checkpoint_path, content)
 
-            # TODO: load checkpoint and read run_id from it
-            # lines[-2] = lines[-2].rstrip('\n') + f" --run_id {run_id}\n"
+            checkpoint = torch.load(os.path.join(output_dir, "checkpoint.tar"))
+            content = re.sub(r'(--run_name \S+)', r'\1' + " --run_id " + checkpoint['run_id'], content)
 
             with open(filename, "w") as f:
-                f.writelines(lines)
+                f.write(content)
     else:
         base_cmd = get_base_cmd(args)
 
@@ -186,8 +189,7 @@ def main():
                 command += extra_args
 
             command += [
-                '--project', f'{prefix}-quantized-training',
-                '--run_name', job_name,
+                '--project', f'{prefix}-quantized-training', '--run_name', job_name,
                 'slurm', '--job_name', job_name,
             ]
 
