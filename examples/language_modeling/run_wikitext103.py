@@ -26,14 +26,11 @@ def run_evaluation(model_id, max_length, stide, dtype, ops, log_file):
     print("Running:", ' '.join(base_cmd))
     subprocess.run(base_cmd, check=True)
 
-def extract_ppl(input_file, out_file):
-    with open(input_file, 'r') as file:
-        lines = file.readlines()
-
-    with open(out_file, 'w') as file:
-        for line in lines:
-            if (match := re.search(r"perplexity: (\d+\.\d+)", line)):
-                file.write(f"{match.group(1)}\n")
+def extract_ppl(log_file, out_file):
+    with open(log_file, 'r') as file, open(out_file, 'w') as out:
+        scores = (re.findall(r"perplexity: (\d+\.\d+)", file.read()))
+        for score in scores:
+            out.write(score + '\n')
 
 def main():
     parser = argparse.ArgumentParser(description="Run language model evaluation.")
@@ -48,8 +45,8 @@ def main():
         for ops in operations:
             run_evaluation(args.model_id, args.max_length, args.stride, dtype, ops, args.log_file)
 
-    if args.out_file:
-        extract_ppl(args.log_file, args.out_file)
+            if args.out_file:
+                extract_ppl(args.log_file, args.out_file)
 
     print("All commands executed.")
 
