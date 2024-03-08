@@ -59,7 +59,6 @@ def parse_args():
     parser.add_argument("--target_modules", type=str, default=None, help="LoRA layers")
     parser.add_argument("--quantized_ops", type=str, default=None, help="Quantized ops to use")
     parser.add_argument("--save_ckpt", action="store_true", help="Whether to save model")
-    parser.add_argument("--submit_jobs", action="store_true", help="Submit slurm job.")
     parser.add_argument("--resume", action="store_true", help="Resume training from stored checkpoint")
     args, extra_args = parser.parse_known_args()
 
@@ -129,7 +128,7 @@ def main():
     if args.resume:
         prefix = f"{MODEL_NAME_MAPPING.get(args.model, args.model)}-{args.task}"
         for name in ["bf16", "posit8", "posit8-approx", "posit8-approx-shifted", "fp8"]:
-            filename = os.path.join("slurm_scripts", f"{prefix}-lora-{name}.sbatch".replace('-', '_'))
+            filename = os.path.join("slurm_scripts", f"{prefix}-lora-{name}-seed-{args.seed}.sbatch")
             with open(filename, "r") as f:
                 content = f.read()
 
@@ -179,7 +178,7 @@ def main():
 
         prefix = f"{MODEL_NAME_MAPPING.get(args.model, args.model)}-{args.task}"
         for name, command in commands.items():
-            job_name = f"{prefix}-lora-{name}"
+            job_name = f"{prefix}-lora-{name}-seed-{args.seed}"
 
             if args.save_ckpt:
                 output_dir = datetime.now().strftime("run-%Y%m%d_%H%M%S")
@@ -194,10 +193,7 @@ def main():
             ]
 
             print("Running:", ' '.join(command))
-            if args.submit_jobs:
-                filename = os.path.join("slurm_scripts", f"{job_name}.sbatch")
-                subprocess.run(command, check=True)
-                subprocess.run(f"sbatch {filename}", check=True)
+            subprocess.run(command, check=True)
 
 if __name__ == "__main__":
     main()
