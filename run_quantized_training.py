@@ -187,13 +187,13 @@ def main():
 
             command += [
                 '--project', f'{prefix}-quantized-training',
-                '--job_name', job_name,
-                '--write_script', 'slurm'
+                '--run_name', job_name,
+                'slurm', '--job_name', job_name,
             ]
 
             print("Running:", ' '.join(command))
             if args.submit_jobs:
-                filename = os.path.join("slurm_scripts", f"{job_name.replace('-', '_')}.sbatch")
+                filename = os.path.join("slurm_scripts", f"{job_name}.sbatch")
                 subprocess.run(command, check=True)
                 subprocess.run(f"sbatch {filename}", check=True)
 
