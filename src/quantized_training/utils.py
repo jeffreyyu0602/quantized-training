@@ -96,7 +96,7 @@ def run_task(args, run_fn):
 
     # Write slurm or bash script
     if args.script is not None:
-        command = ['python'] + sys.argv
+        command = copy.deepcopy(sys.argv)
         if args.sweep_config:
             index = command.index('--sweep_config')
             command[index:index + 2] = ['--sweep_id', args.sweep_id]
