@@ -240,6 +240,8 @@ def main():
             if args.run_job == "all" or name in args.run_job.split(","):
                 print("Running:", ' '.join(command), "\n")
                 subprocess.run(command, check=True)
+                if args.slurm:
+                    subprocess.run(["sbatch", f"{job_name}.sbatch"], check=True)
 
 if __name__ == "__main__":
     main()
