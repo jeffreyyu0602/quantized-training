@@ -49,6 +49,7 @@ def quantize_to_posit(
     output = output.view(torch.float) * torch.sign(input)
 
     if round_to_even:
+        # |0|0000000|1|1|- only round up if exponent == 1
         threshold = math.pow(2, math.floor(-(nbits - 1) * (1 << es) + 2 ** (es - 1)))
         output = torch.where(input.abs() < threshold, 0, output)
 
