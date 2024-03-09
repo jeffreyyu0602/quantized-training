@@ -235,7 +235,7 @@ def main():
                 command += ['--project', f'{prefix}-quantized-training', '--run_name', job_name]
 
             if args.slurm:
-                command += ['slurm', '--job_name', job_name]
+                command += ['slurm', '--job-name', job_name]
 
             if args.run_job == "all" or name in args.run_job.split(","):
                 print("Running:", ' '.join(command), "\n")
