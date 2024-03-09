@@ -232,7 +232,7 @@ def main():
                 command += extra_args
 
             if args.wandb_log:
-                command += ['--project', f'{prefix}-quantized-training', '--run_name', job_name]
+                command += ['--project', f'{prefix}-quantized-training', '--run_name', f'{name}-{args.seed}']
 
             if args.slurm:
                 command += ['slurm', '--job-name', job_name]
