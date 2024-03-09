@@ -571,8 +571,7 @@ def main(args):
 
         return eval_metric
 
-    def save_state(output_dir):
-        nonlocal best_metric, train_loss
+    def save_state(output_dir, best_metric, train_loss):
         eval_metric = run_eval()
         if best_metric is None or eval_metric['accuracy'] > best_metric['accuracy']:
             best_metric = eval_metric
@@ -594,13 +593,13 @@ def main(args):
                 'run_id': wandb.run.id if wandb.run is not None else None,
             }, os.path.join(output_dir, "checkpoint.tar"))
 
+        return best_metric
+
     def load_state(output_dir):
-        nonlocal best_metric
         checkpoint = torch.load(os.path.join(output_dir, "checkpoint.tar"))
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        best_metric = checkpoint['best_metric']
         return checkpoint
 
     # Evaluation
@@ -642,7 +641,7 @@ def main(args):
         # accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
         # accelerator.load_state(checkpoint_path)
         logger.info(f"Resumed from checkpoint: {checkpoint_path}")
-        load_state(checkpoint_path)
+        best_metric = load_state(checkpoint_path)['best_metric']
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(path)[0]
 
@@ -691,7 +690,7 @@ def main(args):
                     # accelerator.save_state(output_dir)
                     train_loss = total_loss.item() / checkpointing_steps
                     logger.info(f"loss: {train_loss:>8f}\t[{completed_steps:>5}/{args.max_train_steps}]")
-                    save_state(output_dir)
+                    best_metric = save_state(output_dir, best_metric, train_loss)
                     model.train()
                     total_loss = 0
 
@@ -748,9 +747,11 @@ def main(args):
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             # accelerator.save_state(output_dir)
+
             train_loss = total_loss.item() / len(train_dataloader)
             logger.info(f"loss: {train_loss:>8f}\t[{epoch}/{args.num_train_epochs}]")
-            save_state(output_dir)
+            best_metric = save_state(output_dir, best_metric, train_loss)
+
             model.train()
             total_loss = 0
 
