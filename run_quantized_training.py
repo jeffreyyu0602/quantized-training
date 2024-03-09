@@ -172,7 +172,7 @@ def main():
     if args.resume:
         prefix = f"{MODEL_NAME_MAPPING.get(args.model, args.model)}-{args.task}"
         for name in ["bf16", "posit8", "posit8-approx", "posit8-approx-shifted", "fp8"]:
-            filename = os.path.join("slurm_scripts", f"{prefix}-lora-{name}-seed-{args.seed}.sbatch")
+            filename = os.path.join("slurm_scripts", f"{prefix}-{name}-{args.seed}.sbatch")
             with open(filename, "r") as f:
                 content = f.read()
 
@@ -222,7 +222,7 @@ def main():
 
         prefix = f"{MODEL_NAME_MAPPING.get(args.model, args.model)}-{args.task}"
         for name, command in commands.items():
-            job_name = f"{prefix}-lora-{name}-seed-{args.seed}"
+            job_name = f"{prefix}-{name}-{args.seed}"
 
             if args.save_ckpt:
                 output_dir = datetime.now().strftime("run-%Y%m%d_%H%M%S")
@@ -241,7 +241,8 @@ def main():
                 print("Running:", ' '.join(command), "\n")
                 subprocess.run(command, check=True)
                 if args.slurm:
-                    subprocess.run(["sbatch", f"{job_name}.sbatch"], check=True)
+                    filename = os.path.join("slurm_scripts", f"{job_name}.sbatch")
+                    subprocess.run(["sbatch", filename], check=True)
 
 if __name__ == "__main__":
     main()
