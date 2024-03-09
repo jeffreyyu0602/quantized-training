@@ -914,9 +914,8 @@ def main(args):
         return eval_metric
 
     def save_state(output_dir):
-        eval_metric = run_eval()
         nonlocal best_metric, train_loss
-
+        eval_metric = run_eval()
         if best_metric is None or eval_metric['f1'] > best_metric['f1']:
             best_metric = eval_metric
             if args.output_dir is not None:
@@ -938,10 +937,12 @@ def main(args):
             }, os.path.join(output_dir, "checkpoint.tar"))
 
     def load_state(output_dir):
+        nonlocal best_metric
         checkpoint = torch.load(os.path.join(output_dir, "checkpoint.tar"))
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        best_metric = checkpoint['best_metric']
         return checkpoint
 
     # Make directory for post processing function
@@ -988,8 +989,7 @@ def main(args):
         # accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
         # accelerator.load_state(checkpoint_path)
         logger.info(f"Resumed from checkpoint: {checkpoint_path}")
-        checkpoint = load_state(checkpoint_path)
-        best_metric = checkpoint["best_metric"]
+        load_state(checkpoint_path)
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(path)[0]
 
