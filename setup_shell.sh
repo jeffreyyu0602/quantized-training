@@ -10,7 +10,7 @@ WANDB_API_KEY="" # If you want to use wandb, set this to your API key.
 
 # Setup Conda
 conda activate $ENV_NAME
-cd $REPO_PATH/posit
+
 unset DISPLAY # Make sure display is not set or it will prevent scripts from running in headless mode.
 
 if [ -n "$WANDB_API_KEY" ]; then
