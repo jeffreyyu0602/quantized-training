@@ -6,6 +6,40 @@ from datetime import datetime
 
 import torch
 
+HYPERPARAMETERS = {
+    'models/mobilebert_tiny': {
+        'mnli': [16, 12e-4, 30],
+        'qnli': [16, 8e-4, 50],
+        'mrpc': [16, 11e-4, 30],
+        'sst2': [16, 10e-4, 60],
+        'squad': [16, 10e-2, 30],
+    },
+    'google/mobilebert-uncased': {
+        'mnli': [16, 12e-4, 30],
+        'qnli': [16, 8e-4, 50],
+        'mrpc': [16, 8e-4, 30],
+        'sst2': [16, 10e-4, 60],
+        'squad': [16, 10e-2, 30],
+    },
+    'roberta-base': {
+        'mnli': [16, 14e-4, 30],
+        'qnli': [32, 7e-4, 25],
+        'mrpc': [16, 5e-4, 50],
+        'sst2': [16, 9e-4, 60],
+        'squad': [16, 10e-4, 30]
+    },
+    'roberta-large': {
+        'mnli': [4, 7e-4, 10],
+        'qnli': [4, 4e-4, 10],
+        'mrpc': [4, 5e-4, 20],
+        'sst2': [4, 5e-4, 10],
+        'squad': [4, 5e-4, 10]
+    },
+    'roberta-large-mnli': {
+        'mrpc': [4, 5e-4, 20],
+    },
+}
+
 
 LORA_CONFIG = {
     "models/mobilebert_tiny": {
@@ -48,11 +82,11 @@ MODEL_NAME_MAPPING = {
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate training commands with different quantization data types.")
-    parser.add_argument("--task", required=True, help="Task name")
+    parser.add_argument("--task", required=True, help="GLUE or SQuAD task to run.")
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("-bs", "--batch_size", type=int, required=True)
-    parser.add_argument("-lr", "--learning_rate", type=float, required=True)
-    parser.add_argument("-epochs", "--num_train_epochs", type=int, required=True)
+    parser.add_argument("-bs", "--batch_size", type=int, default=None)
+    parser.add_argument("-lr", "--learning_rate", type=float, default=None)
+    parser.add_argument("-epochs", "--num_train_epochs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     parser.add_argument("--lora_rank", type=int, default=None, help="LoRA rank to use")
     parser.add_argument("--lora_alpha", type=int, default=None, help="Scaling factor for LoRA")
@@ -60,24 +94,34 @@ def parse_args():
     parser.add_argument("--quantized_ops", type=str, default=None, help="Quantized ops to use")
     parser.add_argument("--save_ckpt", action="store_true", help="Whether to save model")
     parser.add_argument("--resume", action="store_true", help="Resume training from stored checkpoint")
+    parser.add_argument("--wandb_log", action="store_true", help="Setup W&B logging.")
+    parser.add_argument("--slurm", action="store_true", help="Submit slurm job.")
+    parser.add_argument("--run_job", nargs="?", const="all", default="", help="Run generated command.")
     args, extra_args = parser.parse_known_args()
 
     # Remove trailing slash from model path
     args.model = args.model.rstrip('/')
 
-    if not args.resume and (args.batch_size is None or args.learning_rate is None or args.num_train_epochs is None):
-        raise ValueError("Must specify batch size, learning rate, and number of epochs if not resuming from a previous checkpoint")
+    params = {}
+    if (configs := HYPERPARAMETERS.get(args.model)) and (config := configs.get(args.task)):
+        params = {
+            "batch_size": config[0],
+            "learning_rate": config[1],
+            "num_train_epochs": config[2]
+        }
 
     if (config := LORA_CONFIG.get(args.model)):
-        for k, v in config.items():
-            if getattr(args, k) is None:
-                setattr(args, k, v)
-    else:
-        config_keys = ["lora_rank", "lora_alpha", "target_modules", "quantized_ops"]
-        missing_keys = [key for key in config_keys if getattr(args, key) is None]
-        assert not missing_keys, (
-            f"The following keys must be specified for {args.model}: {', '.join(missing_keys)}"
-        )
+        params = {**params, **config}
+
+    for k, v in params.items():
+        if getattr(args, k) is None:
+            setattr(args, k, v)
+
+    config_keys = ["batch_size", "learning_rate", "num_train_epochs", "lora_rank", "lora_alpha", "target_modules", "quantized_ops"]
+    missing_keys = [key for key in config_keys if getattr(args, key) is None]
+    assert not missing_keys, (
+        f"The following keys must be specified for {args.model}: {', '.join(missing_keys)}"
+    )
 
     return args, extra_args
 
@@ -187,13 +231,15 @@ def main():
             if extra_args:
                 command += extra_args
 
-            command += [
-                '--project', f'{prefix}-quantized-training', '--run_name', job_name,
-                'slurm', '--job_name', job_name,
-            ]
+            if args.wandb_log:
+                command += ['--project', f'{prefix}-quantized-training', '--run_name', job_name]
 
-            print("Running:", ' '.join(command))
-            subprocess.run(command, check=True)
+            if args.slurm:
+                command += ['slurm', '--job_name', job_name]
+
+            if args.run_job == "all" or name in args.run_job.split(","):
+                print("Running:", ' '.join(command), "\n")
+                subprocess.run(command, check=True)
 
 if __name__ == "__main__":
     main()

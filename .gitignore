@@ -8,9 +8,7 @@ bash_scripts
 build
 data
 logs
-models/*
-!models/mobilebert_tiny
-!models/mobilebert_tiny_squad
+models
 plots
 slurm_scripts
 tmp

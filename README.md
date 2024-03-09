@@ -32,14 +32,15 @@ from quantized_training import quantize_model
 ```
 
 Initialize your Transformer model from Huggingface's implementation
+```python
 from transformers import AutoModel
 model = AutoModel.from_pretrained('bert-base-uncased')
+```
 
 Initialize the quantizer for your model with the desired quantization type
-quantizer = Quantizer(model, quantization_type='FP8')
-
-Apply quantization
-quantized_model = quantizer.quantize()
+```python
+quantized_model = quantize_model(model, args)
+```
 
 Your model is now quantized and ready for training or inference
 css
@@ -47,13 +48,18 @@ Copy code
 
 For users interested in adding support for their own models, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
 
-## Documentation
+## Results and Reproduction
 
-For more comprehensive documentation, including API details and advanced usage scenarios, please refer to [Documentation link if available].
+##### SQuAD Inference
+
+##### GLUE and SQuAD Fine-Tuning
+
+##### LLaMA2
+To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
 
 ## Contributing
 
-We welcome contributions to Quantized-Training! If you have suggestions for improvements or new features, please feel free to contribute. Check out the CONTRIBUTING.md file for guidelines on how to submit contributions.
+We welcome contributions to quantized-Training! If you have suggestions for improvements or new features, please feel free to contribute. Check out the CONTRIBUTING.md file for guidelines on how to submit contributions.
 
 ## License
 
@@ -61,4 +67,4 @@ Quantized-Training is released under the [LICENSE NAME] License. See the LICENSE
 
 ## Contact
 
-If you have any questions or feedback regarding Quantized-Training, please contact [Your Na
+If you have any questions or feedback regarding Quantized-Training, please contact [Jeffrey Yu](jeffreyy@stanford.edu)
