@@ -139,7 +139,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.amax_compute_algo = amax_compute_algo
         self.quantize_per_tensor = quantize_per_tensor
         self.enable_observer(quantize_per_tensor)
-        self.layer_name = kwargs.get("layer_name", None)
+        self.name = kwargs.get("name", None)
         device = kwargs.get("device", None)
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.zeros(amax_history_len, **factory_kwargs))

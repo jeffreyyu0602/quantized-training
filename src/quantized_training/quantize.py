@@ -59,7 +59,8 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
         model = get_quantized_model(model, qconfig=qconfig, op_fusion=args.op_fusion)
     elif args.quantize_fwd or args.quantize_bwd or args.quantize_weights:
         # swap Transformer modules to track float operations
-        propagate_config(model, 'config', model.config)
+        if hasattr(model, 'config'):
+            propagate_config(model, 'config', model.config)
         convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
 
         # swap softmax to use posit approximated functions
@@ -119,7 +120,7 @@ def _register_module_process_hook(module, hook_name, device, mod_name):
                 if (idx := str(i)) not in module_dict:
                     obs_cls = getattr(self.qconfig, hook_name.split('_')[0])
                     module_dict.update({
-                        idx: obs_cls(device=device, layer_name=mod_name)
+                        idx: obs_cls(device=device, name=mod_name)
                     })
                 new_inputs.append(module_dict[idx](input))
             else:

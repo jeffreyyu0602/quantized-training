@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import dataclass, field
 from typing import Optional, List
 
@@ -121,7 +122,9 @@ class QuantizedTrainingArguments:
         metadata={"help": "Whether to plot the histogram of tensor value."}
     )
 
-def add_training_args(parser):
+def add_training_args(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser(description="Run quantized inference or training.")
     # =============================================================================
     # ================= W&B RELATED ARGUMENTS SECTION =============================
     # =============================================================================
@@ -296,3 +299,4 @@ def add_training_args(parser):
     for k, v in SLURM_ARGS.items():
         parser_slurm.add_argument("--" + k, **v)
     parser_bash = subparsers.add_parser("bash", help="bash command help")
+    return parser
