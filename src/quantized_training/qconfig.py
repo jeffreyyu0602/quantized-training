@@ -60,12 +60,12 @@ def get_default_qconfig(
     default_fake_quant = FusedAmaxObsFakeQuantize.with_args(dtype=dtype_fwd,
                                                             quant_max=max_fwd,
                                                             amax_history_len=amax_history_len,
-                                                            is_per_tensor=scaling_fwd)
+                                                            quantize_per_tensor=scaling_fwd)
 
     error_fake_quant = FusedAmaxObsFakeQuantize.with_args(dtype=dtype_bwd,
                                                           quant_max=max_bwd,
                                                           amax_history_len=amax_history_len,
-                                                          is_per_tensor=scaling_bwd)
+                                                          quantize_per_tensor=scaling_bwd)
 
     return QConfig(
         activation=default_fake_quant if activation else nn.Identity,

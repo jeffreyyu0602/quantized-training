@@ -95,17 +95,17 @@ def run_task(args, run_fn):
         args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
 
     # Write slurm or bash script
-    if args.script is not None:
+    if args.action is not None:
         command = copy.deepcopy(sys.argv)
         if args.sweep_config:
             index = command.index('--sweep_config')
             command[index:index + 2] = ['--sweep_id', args.sweep_id]
 
-        index = command.index(args.script)
-        if args.script == "slurm":
+        index = command.index(args.action)
+        if args.action == "slurm":
             write_slurm_script(args, command[:index])
             return
-        elif args.script == "bash":
+        elif args.action == "bash":
             write_bash_script(args, command[:index])
 
     def sweep_function():

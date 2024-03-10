@@ -291,7 +291,7 @@ def add_training_args(parser):
     # =============================================================================
     # ================= SLURM RELATED ARGUMENTS SECTION ===========================
     # =============================================================================
-    subparsers = parser.add_subparsers(help='sub-command help', dest='script')
+    subparsers = parser.add_subparsers(help='sub-command help', dest='action')
     parser_slurm = subparsers.add_parser("slurm", help="slurm command help")
     for k, v in SLURM_ARGS.items():
         parser_slurm.add_argument("--" + k, **v)

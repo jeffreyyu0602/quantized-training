@@ -128,7 +128,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         quant_max: float = None,
         amax_history_len: int = 50,
         amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max",
-        is_per_tensor: bool = False,
+        quantize_per_tensor: bool = False,
+        histogram_observer_enabled: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -136,8 +137,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
         self.amax_compute_algo = amax_compute_algo
-        self.is_per_tensor = is_per_tensor
-        if not is_per_tensor:
+        self.quantize_per_tensor = quantize_per_tensor
+        if not quantize_per_tensor:
             self.disable_observer()
         self.layer_name = kwargs.get("layer_name", None)
         device = kwargs.get("device", None)
@@ -153,7 +154,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.fake_quant_function = quantization_dtype_to_function(dtype)
         self.register_buffer("value_map", self.fake_quant_function(input), persistent=False)
         # Records the histogram of the input and quantized input values
-        self.register_buffer('histogram_observer_enabled', torch.tensor([0], dtype=torch.uint8))
+        self.register_buffer('histogram_observer_enabled', torch.tensor([histogram_observer_enabled], dtype=torch.uint8))
         self.register_buffer("histogram_pre_process", torch.zeros(254, **factory_kwargs))
         self.register_buffer("histogram_post_process", torch.zeros(254, **factory_kwargs))
 
@@ -164,12 +165,12 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     @torch.jit.export
     def extra_repr(self):
         return (
-            "fake_quant_enabled={}, observer_enabled={}, scale={}, is_per_tensor={}, "
+            "fake_quant_enabled={}, observer_enabled={}, scale={}, quantize_per_tensor={}, "
             "dtype={}, quant_max={}, amax_history_len={}, amax_compute_algo={}".format(
                 self.fake_quant_enabled,
                 self.observer_enabled,
                 self.scale,
-                self.is_per_tensor,
+                self.quantize_per_tensor,
                 self.dtype,
                 self.quant_max,
                 self.amax_history_len,
@@ -195,7 +196,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self._combine_histograms(self.histogram_pre_process, X)
 
         if self.fake_quant_enabled[0] == 1:
-            if self.is_per_tensor:
+            if self.quantize_per_tensor:
                 X = FakeQuantFunction.apply(X, self.value_map, self.scale.to(X.dtype))
             else:
                 X = FakeQuantFunction.apply(X, self.value_map)

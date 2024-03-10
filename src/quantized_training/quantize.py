@@ -23,7 +23,7 @@ __all__ = [
     "quantize_model",
     "prepare",
     "convert",
-    "swap_softmax",
+    "replace_softmax",
     "get_quantized_model",
 ]
 
@@ -64,7 +64,7 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
 
         # swap softmax to use posit approximated functions
         if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
-            swap_softmax(
+            replace_softmax(
                 model,
                 posit_exp=args.posit_exp,
                 posit_exp_shifted=args.posit_exp_shifted,
@@ -265,7 +265,7 @@ def swap_module(mod, mapping, custom_module_class_mapping):
             new_mod.to(device)
     return new_mod
 
-def swap_softmax(
+def replace_softmax(
     module: Module,
     posit_exp: bool,
     posit_exp_shifted: bool,
@@ -284,7 +284,7 @@ def swap_softmax(
             )
             setattr(module, name, new_mod)
         else:
-            swap_softmax(mod, posit_exp, posit_exp_shifted, posit_reciprocal, dtype, device)
+            replace_softmax(mod, posit_exp, posit_exp_shifted, posit_reciprocal, dtype, device)
 
 def get_quantized_model(model, qconfig, op_fusion=None, device=None):
     logger.info(f"Fusing operations: {op_fusion}")

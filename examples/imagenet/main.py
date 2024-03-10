@@ -91,11 +91,11 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
 
 parser.add_argument('--qat', action="store_true", help="Whether to perform quantization aware training.")
-parser.add_argument('--maxpool2x2', action="store_true", help="Whether to smaller maxpool.")
+parser.add_argument('--replace_maxpool', action="store_true", help="Whether to replace ResNet maxpool with 2x2 maxpool.")
 parser.add_argument('--save_dataset', action="store_true", help="Whether to save validation data.")
-parser.add_argument('--output_dir', default=None, type=str, help="Directory to save model checkpoints.")
-parser.add_argument('--model_path', default=None, type=str, help="Model for evaluation.")
-parser.add_argument('--chunk_size', default=50000, type=int, help="Number of samples processed per epoch")
+parser.add_argument('--output_dir', default=None, help="Directory to save model checkpoints.")
+parser.add_argument('--model_eval', default=None, help="Model for evaluation.")
+parser.add_argument('--chunk_size', default=50000, help="Number of samples processed per epoch")
 add_training_args(parser)
 
 best_acc1 = 0
@@ -210,54 +210,47 @@ def main_worker(gpu, ngpus_per_node, args):
         device = torch.device("cpu")
 
 # =============================================================================
-# swap maxpool, fuse batch norm, and prepare qat
+# replace maxpool, fuse batch norm, and prepare qat
 # =============================================================================
 
-    def _apply(module, fn, inplace=True):
+    def replace_pattern(module, pattern, fn, inplace=True):
         if not inplace:
             module = copy.deepcopy(module)
 
         for name, mod in module.named_children():
-            _apply(mod, fn)
-            module._modules[name] = fn(mod)
+            replace_pattern(mod, pattern, fn)
+            if isinstance(mod, pattern):
+                module._modules[name] = fn(mod)
 
         return module
 
     def _to_float(mod):
-        if isinstance(mod, nni._FusedModule):
-            new_mod = mod.to_float()
-            for pre_hook_fn in mod._forward_pre_hooks.values():
-                new_mod.register_forward_pre_hook(pre_hook_fn)
-            return new_mod
-        return mod
+        new_mod = mod.to_float()
+        for pre_hook_fn in mod._forward_pre_hooks.values():
+            new_mod.register_forward_pre_hook(pre_hook_fn)
+        return new_mod
 
     def get_fused_model(model):
-        model_fused = _apply(model, _to_float, inplace=False)
+        model_fused = replace_pattern(model, nni._FusedModule, _to_float, inplace=False)
         for name, param in model_fused.named_parameters():
             param.data = quantize_to_posit(param.data, 16 if 'bias' in name else 8, 1)
         return model_fused
 
-    def _swap_maxpool(mod):
-        if isinstance(mod, nn.MaxPool2d):
-            return nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
-        return mod
+    def _replace_maxpool(_m):
+        return nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
 
-    if args.maxpool2x2:
-        _apply(model, nn.MaxPool2d, _swap_maxpool)
+    if args.replace_maxpool:
+        replace_pattern(model, nn.MaxPool2d, _replace_maxpool)
 
     if args.qat:
-        modules_to_fuse = get_fused_modules(model, [nn.Conv2d, nn.BatchNorm2d])
-        print(f"Fusing modules: {modules_to_fuse}")
-        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
+        modules = get_fused_modules(model, [nn.Conv2d, nn.BatchNorm2d])
+        print(f"Fusing modules: {modules}")
+        model = torch.ao.quantization.fuse_modules_qat(model, modules)
 
         qconfig = get_default_qconfig(dtype=args.dtype, activation=True, weight=True)
         propagate_config(model, 'qconfig', qconfig)
         convert(model, inplace=True)
         prepare(model, quantize_fwd="gemm", device=device)
-
-        for m in model.modules():
-            if isinstance(m,  nni._FusedModule):
-                m.update_bn_stats()
 
     if args.bf16:
         model.bfloat16()
@@ -368,9 +361,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if args.evaluate:
         model_eval = get_fused_model(model) if args.qat else model
-        if args.model_path:
-            print("=> loading checkpoint '{}'".format(args.model_path))
-            checkpoint = torch.load(args.model_path, map_location=device)
+        if args.model_eval:
+            checkpoint = torch.load(args.model_eval, map_location=device)
             model_eval.load_state_dict(checkpoint['state_dict'])
             print(f"best acc1: {checkpoint['best_acc1']}")
 
