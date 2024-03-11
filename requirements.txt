@@ -11,3 +11,4 @@ wandb
 librosa
 soundfile
 jiwer
+tabulate

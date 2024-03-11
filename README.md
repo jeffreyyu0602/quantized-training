@@ -28,23 +28,31 @@ pip install -e .
 After installation, Quantized-Training can be easily used in your projects. Here's a quick start example:
 
 ```python
-from quantized_training import quantize_model
+from quantized_training import add_training_args, quantize_model
+```
+
+Create an argument parser and add quantized training relevant arguments by calling add_training_args
+```python
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--model_id', type=str, required=True, help='Pretrained model identifier')
+add_training_args(parser)
+args= parser.parse_args()
+
 ```
 
 Initialize your Transformer model from Huggingface's implementation
 ```python
 from transformers import AutoModel
-model = AutoModel.from_pretrained('bert-base-uncased')
+model = AutoModel.from_pretrained(model_id)
 ```
 
 Initialize the quantizer for your model with the desired quantization type
 ```python
-quantized_model = quantize_model(model, args)
+quantize_model(model, args)
 ```
 
 Your model is now quantized and ready for training or inference
-css
-Copy code
 
 For users interested in adding support for their own models, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
 
@@ -52,10 +60,32 @@ For users interested in adding support for their own models, please refer to the
 
 ##### SQuAD Inference
 
+To reproduce the Table 1 results in the paper, run
+```python
+python example/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
+```
+
 ##### GLUE and SQuAD Fine-Tuning
 
+To run quantized fine-tuning experiments
+```python
+python run_quantized_training.py \
+    --model <MODEL_ID> \
+    --task <TASK> \
+    --batch_size <BATCH_SIZE> \
+    --learning_rate <LEARNING_RATE> \
+    --num_train_epochs <EPOCHS> \
+    --log_file <LOG_FILE> \
+    --out_file <OUTPUT> \
+```
+
 ##### LLaMA2
+
 To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
+
+##### Whisper
+
+To run whisper
 
 ## Contributing
 
