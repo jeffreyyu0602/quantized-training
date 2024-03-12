@@ -1,6 +1,7 @@
 import argparse
 import re
 import subprocess
+import pandas as pd
 
 models = [
     'models/mobilebert_tiny_squad',
@@ -16,14 +17,6 @@ operations = [
     'gemm,residual,norm',
     'gemm,residual,norm,act',
     'gemm,residual,norm,act,scaling',
-]
-
-ablation_study = [
-    'gemm',
-    'gemm,residual',
-    'gemm,norm',
-    'gemm,act',
-    'gemm,scaling',
 ]
 
 dtypes = ['posit8_1', 'e4m3']
@@ -53,21 +46,55 @@ def extract_scores(log_file, out_file):
         scores = (re.findall(r"'f1': (\d+\.\d+)", file.read()))
         for i in range(0, len(scores), 10):
             out.write('\t'.join(scores[i:i+10]) + '\n')
+        return scores
 
-def main():
+# def main():
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--log_file', default='logs/squad.log')
+#     parser.add_argument('--out_file', default='accuracy.out')
+#     parser.add_argument('--gpu', default=None)
+#     args = parser.parse_args()
+
+#     for model in models:
+#         for ops in operations:
+#             for dtype in dtypes:
+#                 run_evaluation(model, ops, dtype, args.log_file, args.gpu)
+#                 extract_scores(args.log_file, args.out_file)
+
+#     print("All commands executed.")
+
+def run_asplos_experiments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_file', default='logs/squad.log')
     parser.add_argument('--out_file', default='accuracy.out')
     parser.add_argument('--gpu', default=None)
     args = parser.parse_args()
 
-    for model in models:
-        for ops in operations:
+    operations.reverse()
+    for ops in operations:
+        for model in models:
             for dtype in dtypes:
                 run_evaluation(model, ops, dtype, args.log_file, args.gpu)
-                extract_scores(args.log_file, args.out_file)
+                scores = extract_scores(args.log_file, args.out_file)
 
     print("All commands executed.")
 
+    rows = [
+        "no fusion", 
+        "fuse gemm + attention scaling", 
+        "+ activation fusion", 
+        "+ layernorm fusion", 
+        "+ residual fusion"
+    ]
+
+    columns = pd.MultiIndex.from_product([
+        ['MobileBERT-tiny', 'MobileBERT', 'BERT-base', 'BERT-large', 'DistillBERT-base'],  # Main headers
+        ['Posit8', 'FP8']  # Sub-headers
+    ], names=['Model', 'Precision'])
+
+    scores_matrix = [scores[i:i+10] for i in range(0, len(scores), 10)]
+    df = pd.DataFrame(scores_matrix, index=rows, columns=columns)
+    df.to_csv('squad_f1.csv')
+
 if __name__ == "__main__":
-    main()
+    run_asplos_experiments()
