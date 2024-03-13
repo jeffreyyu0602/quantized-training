@@ -1,6 +1,8 @@
 import argparse
+import os
 import re
 import subprocess
+import sys
 import pandas as pd
 
 models = [
@@ -69,6 +71,10 @@ def run_asplos_experiments():
     parser.add_argument('--out_file', default='accuracy.out')
     parser.add_argument('--gpu', default=None)
     args = parser.parse_args()
+
+    if os.path.exists(args.log_file) and os.path.getsize(args.log_file) > 0:
+        print("Log file exists and is not empty. Exiting program.")
+        sys.exit(1)
 
     operations.reverse()
     for ops in operations:
