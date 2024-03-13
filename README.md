@@ -4,23 +4,25 @@ Quantized-Training is a Python package designed to facilitate the efficient quan
 
 ## Features
 
-- **Support for Custom Models:** Provides flexibility by allowing users to add their own model implementations for quantization, broadening its applicability.
-- **Quantization Data Types:** Supports FP8 and Posit8, offering choices in quantization precision to balance between performance and accuracy.
+- **Support for Custom Models:** Provides flexibility by allowing users to add their own model implementations for quantization.
+- **Quantization Data Types:** Supports FP8 (E4M3 and E5M2) and posit with arbitrary nbits and es
 - **Ease of Use:** Comes in a packaged format for simple installation and includes example usage to help users get started quickly.
 
 ## Prerequisites
 
 - **Python Version:** Python 3.9 or newer.
-- **PyTorch:** Version 2.0 or greater.
+- **PyTorch:** Version 2.0 or newer.
 
 ## Installation
 
 Ensure you meet the prerequisites above. To install Quantized-Training directly from the source using pip, follow these steps:
 
 ```bash
-git clone https://github.com/yourusername/quantized-training.git
+git clone https://github.com/jeffreyyu0602/quantized-training.git
 cd quantized-training
+mkdir logs
 pip install -e .
+pip install -r requirements.txt
 ```
 
 ## Usage
@@ -64,28 +66,30 @@ To reproduce the Table 1 results in the paper, run
 ```python
 python example/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
 ```
+The outputs are stored in squad_f1.csv which has the same format as Table 1.
 
 ##### GLUE and SQuAD Fine-Tuning
 
-To run quantized fine-tuning experiments
+Fine-tuning the Transformer models for sequence classification on the GLUE benchmark and question answering on the SQuAD v1.1. GLUE is made up of a total of 9 different tasks. In our paper, we conduct evaluations on three benchmarks: SST-2, MRPC, and QNLI. All commands required to reproduce the results presented in Table 4 are provided in the script named `asplos_training.sh`. The experiments are divided into multiple groups, with each group consisting of four experiments. Specifically, the first set of experiments involves four distinct tasks with different data types: BF16, Posit8, Posit8 with approximation, and FP8 on the MobileBERT-tiny model for the QNLI task. This corresponds to the results shown in the first major row (MobileBERT-tiny) and the first column (QNLI) of Table 4. The structure for the remaining groups of experiments follows this same organizational pattern.
+
+##### Whisper Evaluation
+
+Whisper is a pre-trained model for automatic speech recognition (ASR) and speech translation. To evaluate Whisper models on LibriSpeech test-clean:
 ```python
-python run_quantized_training.py \
-    --model <MODEL_ID> \
-    --task <TASK> \
-    --batch_size <BATCH_SIZE> \
-    --learning_rate <LEARNING_RATE> \
-    --num_train_epochs <EPOCHS> \
-    --log_file <LOG_FILE> \
-    --out_file <OUTPUT> \
+python examples/speech_recognition/whisper_eval.py --model_id openai/whisper-tiny [--quantize_weights] [--quantize_fwd <OPERATIONS>]
+```
+where model_id could be any Whisper model in the [Whisper Release](https://huggingface.co/collections/openai/whisper-release-6501bba2cf999715fd953013).
+
+The user can perform quantized inference by passing quantize_weights and quantize_fwd arguments. OPERATIONS could be any combination of "gemm", "act", "norm", "attn_scaling", and "residual", separated by comma.
+
+##### LLM Evaluation
+
+To run language models evaluation on WikiText-103:
+```python
+python examples/language_modeling/perplexity.py --model_id [--max_length <LENGTH>] [--stride <STRIDE>]
 ```
 
-##### LLaMA2
-
 To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
-
-##### Whisper
-
-To run whisper
 
 ## Contributing
 
@@ -93,7 +97,7 @@ We welcome contributions to quantized-Training! If you have suggestions for impr
 
 ## License
 
-Quantized-Training is released under the [LICENSE NAME] License. See the LICENSE file for more details.
+Quantized-Training is released under the MIT License. See the LICENSE file for more details.
 
 ## Contact
 

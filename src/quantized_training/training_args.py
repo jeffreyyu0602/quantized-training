@@ -219,7 +219,7 @@ def add_training_args(parser=None):
         default=None,
         help=(
             "Whether to quantize activations. Choose from "
-            "gemm, act, norm, bn, softmax, attn_scaling, and residual."
+            "gemm, act, norm, bn, attn_scaling, and residual."
         ),
     )
     parser.add_argument(
@@ -229,7 +229,7 @@ def add_training_args(parser=None):
         default=None,
         help=(
             "Whether to quantize activation gradients. Choose from "
-            "gemm, act, norm, bn, softmax, attn_scaling, and residual."
+            "gemm, act, norm, bn, attn_scaling, and residual."
         ),
     )
     parser.add_argument(

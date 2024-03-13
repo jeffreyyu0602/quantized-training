@@ -18,7 +18,7 @@ HYPERPARAMETERS = {
         'mnli': [16, 12e-4, 30],
         'qnli': [16, 8e-4, 50],
         'mrpc': [16, 8e-4, 30],
-        'sst2': [16, 10e-4, 60],
+        'sst2': [16, 8e-4, 60],
         'squad': [16, 10e-2, 30],
     },
     'roberta-base': {
@@ -39,7 +39,6 @@ HYPERPARAMETERS = {
         'mrpc': [4, 5e-4, 20],
     },
 }
-
 
 LORA_CONFIG = {
     "models/mobilebert_tiny": {
@@ -207,7 +206,8 @@ def main():
             '--quantize_fwd', args.quantized_ops,
             '--quantize_bwd', args.quantized_ops,
             '--quantize_weights',
-            '--scaling_bwd'
+            '--scaling_bwd',
+            '--amax_history_len', '5',
         ]
         posit_args = ['--dtype', 'posit8_1', '--max_fwd', '64', '--max_bwd', '64']
         fp8_args = ['--dtype', 'FP8', '--max_fwd', '448', '--max_bwd', '57344']
