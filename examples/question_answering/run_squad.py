@@ -88,9 +88,9 @@ def run_asplos_experiments():
     rows = [
         "no fusion", 
         "fuse gemm + attention scaling", 
-        "+ activation fusion", 
-        "+ layernorm fusion", 
-        "+ residual fusion"
+        "plus activation fusion",
+        "plus layernorm fusion",
+        "plus residual fusion"
     ]
 
     columns = pd.MultiIndex.from_product([

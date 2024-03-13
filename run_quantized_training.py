@@ -207,7 +207,7 @@ def main():
             '--quantize_bwd', args.quantized_ops,
             '--quantize_weights',
             '--scaling_bwd',
-            '--amax_history_len', '5',
+            '--amax_history_len', '10',
         ]
         posit_args = ['--dtype', 'posit8_1', '--max_fwd', '64', '--max_bwd', '64']
         fp8_args = ['--dtype', 'FP8', '--max_fwd', '448', '--max_bwd', '57344']
