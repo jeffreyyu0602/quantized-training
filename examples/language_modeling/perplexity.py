@@ -19,10 +19,11 @@ def parse_args():
     return parser.parse_args()
 
 def main(args):
+    device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch.bfloat16, # torch.float16 cause overflow
-        device_map="auto",
+        device_map=args.gpu or "auto",
         attn_implementation="eager", # flash attention is not supported
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
@@ -39,7 +40,7 @@ def main(args):
     for begin_loc in tqdm(range(0, seq_len, args.stride)):
         end_loc = min(begin_loc + args.max_length, seq_len)
         trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to("cuda")
+        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100
 
