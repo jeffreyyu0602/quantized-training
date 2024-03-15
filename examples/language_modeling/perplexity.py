@@ -1,12 +1,20 @@
 import argparse
 import logging
+import os
 
 import torch
+import wandb
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from quantized_training import add_training_args, quantize_model, run_task
+from quantized_training import (
+    add_training_args,
+    quantize,
+    run_task,
+    plot_layer_distribution,
+    plot_layer_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +23,7 @@ def parse_args():
     parser.add_argument('--model_id', type=str, required=True, help='Pretrained model identifier')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--stride', type=int, default=512, help='Stride for processing the data')
+    parser.add_argument('--output_dir', default=None, help='Output directory for histograms')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -28,10 +37,20 @@ def main(args):
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
-    quantize_model(model, args)
-
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+
+    def calibrate(model):
+        train = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        train_datasets = tokenizer("\n\n".join(train["text"][:10]), return_tensors="pt")
+        seq_len = train_datasets.input_ids.size(1)
+        for begin_loc in tqdm(range(0, seq_len, args.stride)):
+            end_loc = min(begin_loc + args.max_length, seq_len)
+            input_ids = train_datasets.input_ids[:, begin_loc:end_loc].to(device)
+            with torch.no_grad():
+                model(input_ids)
+
+    quantize(model, args, calibrate)
 
     seq_len = encodings.input_ids.size(1)
 
@@ -64,6 +83,14 @@ def main(args):
     logger.info(f"max length: {args.max_length}")
     logger.info(f"stride:     {args.stride}")
     logger.info(f"perplexity: {ppl.item()}")
+
+    if wandb.run is not None:
+        wandb.log({"perplexity": ppl.item()})
+
+    if args.record_histogram:
+        os.makedirs(args.output_dir, exist_ok=True)
+        plot_layer_distribution(model, r'transformer.h.(\d+).', args.output_dir)
+        plot_layer_range(model, r'transformer.h.(\d+).', args.output_dir)
 
 if __name__ == "__main__":
     args = parse_args()

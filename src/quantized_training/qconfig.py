@@ -1,7 +1,6 @@
 import re
 from collections import namedtuple
 
-import torch
 import torch.nn as nn
 
 from .fake_quantize import FusedAmaxObsFakeQuantize
@@ -57,15 +56,19 @@ def get_default_qconfig(
 ) -> QConfig:
     dtype_fwd, dtype_bwd = parse_dtype(dtype)
 
-    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(dtype=dtype_fwd,
-                                                            quant_max=max_fwd,
-                                                            amax_history_len=amax_history_len,
-                                                            quantize_per_tensor=scaling_fwd)
+    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_fwd,
+        quant_max=max_fwd,
+        amax_history_len=amax_history_len,
+        quantize_per_tensor=scaling_fwd
+    )
 
-    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(dtype=dtype_bwd,
-                                                          quant_max=max_bwd,
-                                                          amax_history_len=amax_history_len,
-                                                          quantize_per_tensor=scaling_bwd)
+    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_bwd,
+        quant_max=max_bwd,
+        amax_history_len=amax_history_len,
+        quantize_per_tensor=scaling_bwd
+    )
 
     return QConfig(
         activation=default_fake_quant if activation else nn.Identity,

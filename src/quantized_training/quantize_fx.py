@@ -8,7 +8,7 @@ from functorch.compile import aot_function
 
 from transformers import AutoModelForSequenceClassification, AutoModelForCausalLM
 
-from quantized_training import quantize_to_posit, add_training_args, quantize_model
+from quantized_training import quantize_to_posit, add_training_args, quantize
 
 QUANTIZATION_OPERATORS = {
     "gemm": [
@@ -49,7 +49,7 @@ class Observer(torch.ao.quantization.FakeQuantizeBase):
     def calculate_qparams(self, **kwargs):
         raise NotImplementedError
 
-def quantize_fx(model: GraphModule, patterns):
+def prepare(model: GraphModule, patterns):
     named_modules = {}
     # Go through all the nodes in the Graph
     for node in model.graph.nodes:
@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
     parser = add_training_args()
     args = parser.parse_args()
-    quantized_model = quantize_model(model, args, inplace=False)
+    quantized_model = quantize(model, args, inplace=False)
 
     start_time = time.time()
     orig_output = quantized_model(example_inputs[0])
@@ -121,9 +121,9 @@ if __name__ == "__main__":
     patterns = tuple(mod for op in ops for mod in QUANTIZATION_OPERATORS[op])
 
     start_time = time.time()
-    exported_program = quantize_fx(exported_program.module(), patterns)
+    exported_program = prepare(exported_program.module(), patterns)
     time_taken = time.time() - start_time
-    print(f"quantize_fx takes: {time_taken} seconds")
+    print(f"prepare takes: {time_taken} seconds")
 
     print(exported_program.graph.print_tabular())
 

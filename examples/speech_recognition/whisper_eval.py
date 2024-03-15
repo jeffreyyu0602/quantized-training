@@ -29,11 +29,6 @@ model = WhisperForConditionalGeneration.from_pretrained(args.model_id).to(device
 
 quantize_model(model, args, device=device)
 
-if args.plot_hist:
-    for name, module in model.named_modules():
-        if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-            module.histogram_observer_enabled[0] = 1
-
 def map_to_pred(batch):
     input_features = torch.cat([
         processor(
@@ -64,8 +59,3 @@ if args.output_dir is not None:
 
     with open(os.path.join(args.output_dir, "reference.txt"), "w") as f:
         f.write('\n'.join(result["reference"]) + '\n')
-
-if args.plot_hist:
-    for name, module in model.named_modules():
-        if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-            module.save_hist(os.path.join(args.output_dir, f'{name}.png'))

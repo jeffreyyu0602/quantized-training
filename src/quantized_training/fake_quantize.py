@@ -210,35 +210,3 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         x_exp = torch.floor(torch.log2(x[x != 0].abs()))
         combined_histogram = torch.histc(x_exp, 254, min=-126, max=127)
         histogram += combined_histogram
-
-    def save_hist(self, filename):
-        hist1 = self.histogram_pre_process.cpu()
-        hist2 = self.histogram_post_process.cpu()
-
-        non_empty_bins1 = torch.nonzero(hist1).flatten()
-        non_empty_bins2 = torch.nonzero(hist2).flatten()
-
-        if len(non_empty_bins1) == 0 or len(non_empty_bins2) == 0:
-            logger.warn("One or both histograms are empty. Skipping plotting.")
-            return
-
-        first_non_zero = min(non_empty_bins1[0], non_empty_bins2[0])
-        last_non_zero = max(non_empty_bins1[-1], non_empty_bins2[-1])
-
-        hist1 = hist1[first_non_zero:last_non_zero + 1]
-        hist2 = hist2[first_non_zero:last_non_zero + 1]
-
-        bins = torch.linspace(-126, 127, 255)
-        bins = bins[first_non_zero:last_non_zero + 2]
-        bar_width = (bins[1] - bins[0]) * 0.4
-
-        plt.figure(figsize=(10, 6))
-        plt.bar(bins[:-1] - bar_width/2, hist1, width=bar_width, label='Before quantization')
-        plt.bar(bins[:-1] + bar_width/2, hist2, width=bar_width, label='After quantization')
-
-        plt.title('Activation Distribution')
-        plt.xlabel('Exponent Value')
-        plt.ylabel('Count')
-        plt.legend()
-
-        plt.savefig(filename)

@@ -54,7 +54,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-from quantized_training import QuantizedTrainingArguments, quantize_model
+from quantized_training import QuantizedTrainingArguments, quantize
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -596,12 +596,7 @@ def main():
             preds = preds[:, :-1].reshape(-1)
             return metric.compute(predictions=preds, references=labels)
 
-    quantize_model(model, args)
-
-    if args.plot_hist:
-        for name, module in model.named_modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                module.histogram_observer_enabled[0] = 1
+    quantize(model, args)
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -655,11 +650,6 @@ def main():
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
-
-        if args.plot_hist:
-            for name, module in model.named_modules():
-                if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                    module.save_hist(os.path.join(training_args.output_dir, f'{name}.png'))
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
     if data_args.dataset_name is not None:

@@ -113,11 +113,7 @@ class QuantizedTrainingArguments:
         default=False,
         metadata={"help": "Whether to use posit approximated reciprocal function in softmax."}
     )
-    quantize_model: bool = field(
-        default=False,
-        metadata={"help": "Whether to run quantized inference using defined model file."}
-    )
-    plot_hist: bool = field(
+    record_histogram: bool = field(
         default=False,
         metadata={"help": "Whether to plot the histogram of tensor value."}
     )
@@ -282,12 +278,7 @@ def add_training_args(parser=None):
         help="Whether to use posit approximated reciprocal function in softmax."
     )
     parser.add_argument(
-        "--quantize_model",
-        action="store_true",
-        help="Whether to run quantized inference using defined model file.",
-    )
-    parser.add_argument(
-        "--plot_hist",
+        "--record_histogram",
         action="store_true",
         help="Whether to store and plot the histogram of tensor value.",
     )

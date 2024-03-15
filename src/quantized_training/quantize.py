@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from typing import List
 
 import torch
@@ -10,8 +11,9 @@ from torch.nn.utils.parametrize import type_before_parametrizations
 
 from accelerate import dispatch_model
 
+from .fake_quantize import FusedAmaxObsFakeQuantize
 from .modules import Softmax, modeling_bert, modeling_mobilebert
-from .qconfig import get_default_qconfig
+from .qconfig import QConfig, get_default_qconfig
 from .quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
@@ -20,7 +22,7 @@ from .quantization_mappings import (
 
 __all__ = [
     "propagate_config",
-    "quantize_model",
+    "quantize",
     "prepare",
     "convert",
     "replace_softmax",
@@ -39,31 +41,61 @@ def propagate_config(module, name, qconfig):
     for child in module.children():
         propagate_config(child, name, qconfig)
 
-def quantize_model(model, args, run_fn=None, device=None, inplace=True):
+def quantize(model, args, run_fn=None, device=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
-    qconfig = get_default_qconfig(
-        dtype=args.dtype,
-        activation=args.quantize_fwd,
-        weight=args.quantize_weights,
-        error=args.quantize_bwd,
-        scaling_fwd=args.scaling_fwd,
-        scaling_bwd=args.scaling_bwd,
-        max_fwd=args.max_fwd,
-        max_bwd=args.max_bwd,
-        amax_history_len=args.amax_history_len
+    # qconfig = get_default_qconfig(
+    #     dtype=args.dtype,
+    #     activation=args.quantize_fwd,
+    #     weight=args.quantize_weights,
+    #     error=args.quantize_bwd,
+    #     scaling_fwd=args.scaling_fwd,
+    #     scaling_bwd=args.scaling_bwd,
+    #     max_fwd=args.max_fwd,
+    #     max_bwd=args.max_bwd,
+    #     amax_history_len=args.amax_history_len
+    # )
+
+    if "," in args.dtype:
+        dtype_fwd, dtype_bwd = args.dtype.split(",")
+    elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
+        dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
+    else:
+        dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
+
+    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_fwd,
+        quant_max=args.max_fwd,
+        amax_history_len=args.amax_history_len,
+        quantize_per_tensor=args.scaling_fwd,
+        histogram_observer_enabled=args.record_histogram
     )
 
-    if args.quantize_model:
-        model = get_quantized_model(model, qconfig=qconfig, op_fusion=args.op_fusion)
-    elif args.quantize_fwd or args.quantize_bwd or args.quantize_weights:
+    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_bwd,
+        quant_max=args.max_bwd,
+        amax_history_len=args.amax_history_len,
+        quantize_per_tensor=args.scaling_bwd,
+        histogram_observer_enabled=args.record_histogram
+    )
+
+    qconfig = QConfig(
+        activation=default_fake_quant if args.quantize_fwd else nn.Identity,
+        weight=default_fake_quant if args.quantize_weights else nn.Identity,
+        error=error_fake_quant if args.quantize_bwd else nn.Identity,
+    )
+
+    if args.quantize_fwd or args.quantize_bwd or args.quantize_weights:
         # swap Transformer modules to track float operations
         if hasattr(model, 'config'):
             propagate_config(model, 'config', model.config)
         convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
 
-        # swap softmax to use posit approximated functions
+        # re-dispatch model to the correct device
+        if hasattr(model, 'hf_device_map'):
+            dispatch_model(model, device_map=model.hf_device_map)
+
         if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
             replace_softmax(
                 model,
@@ -79,11 +111,6 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
             convert(model, inplace=True)
         prepare(model, args.quantize_fwd, args.quantize_bwd, args.op_fusion, device)
 
-        # re-dispatch model to the correct device
-        if hasattr(model, 'hf_device_map'):
-            dispatch_model(model, device_map=model.hf_device_map)
-
-        # run the model to initialize the fake quant modules
         if run_fn is not None:
             run_fn(model)
 
@@ -93,7 +120,7 @@ def quantize_model(model, args, run_fn=None, device=None, inplace=True):
     if args.quantize_weights:
         for name, param in model.named_parameters():
             if not 'bias' in name:
-                weight_fake_quant = qconfig.weight(device=param.device, layer_name=name)
+                weight_fake_quant = qconfig.weight(device=param.device, name=name)
                 param.data = weight_fake_quant(param.data)
 
     return model
