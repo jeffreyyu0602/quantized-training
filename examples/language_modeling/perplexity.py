@@ -24,14 +24,29 @@ def parse_args():
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--stride', type=int, default=512, help='Stride for processing the data')
     parser.add_argument('--output_dir', default=None, help='Output directory for histograms')
+    parser.add_argument(
+        '--torch_dtype',
+        default="bfloat16",
+        choices=["auto", "bfloat16", "float16", "float32"],
+        help=(
+            "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
+            "dtype will be automatically derived from the model's weights."
+        )
+    )
+
     add_training_args(parser)
     return parser.parse_args()
 
 def main(args):
     device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
+    torch_dtype = (
+        args.torch_dtype
+        if args.torch_dtype in ["auto", None]
+        else getattr(torch, args.torch_dtype)
+    )
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        torch_dtype=torch.bfloat16, # torch.float16 cause overflow
+        torch_dtype=torch_dtype,
         device_map=args.gpu or "auto",
         attn_implementation="eager", # flash attention is not supported
     )
