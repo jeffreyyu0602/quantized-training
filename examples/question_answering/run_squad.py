@@ -33,9 +33,9 @@ def run_evaluation(model, ops, dtype, log_file, gpu):
         '--doc_stride', '128',
         '--pad_to_max_length',
         '--bf16',
-        '--quantize_weights', 
-        '--quantize_fwd', ops, 
         '--dtype', dtype, 
+        '--quantize_fwd', ops,
+        '--quantize_weights',
         '--log_file', log_file,
     ]
     if gpu is not None:

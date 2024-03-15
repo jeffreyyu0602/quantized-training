@@ -37,7 +37,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 
 from utils_data import save_activations, save_errors, save_weights_and_grads
 from modeling_mobilebert import MobileBertForSequenceClassification
-from quantized_training import add_training_args, quantize_model, run_task
+from quantized_training import add_training_args, quantize, run_task
 
 
 logger = logging.getLogger(__name__)
@@ -490,7 +490,7 @@ def main(args):
         loss.backward()
         model.zero_grad()
 
-    quantize_model(model, args, run_fn, device=device)
+    quantize(model, args, run_fn, device=device)
 
     # Quantize model output logits
     if hasattr(model, "qconfig") and model.qconfig.activation != torch.nn.Identity:
@@ -589,11 +589,6 @@ def main(args):
             model.train()
         total_loss = 0
         for step, batch in enumerate(train_dataloader):
-            if args.plot_hist and epoch >= 4:
-                for name, module in model.named_modules():
-                    if isinstance(module, torch.ao.quantization.FakeQuantizeBase) and "error_pre_process" in name:
-                        module.histogram_observer_enabled[0] = 1
-
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
@@ -637,13 +632,6 @@ def main(args):
             wandb.run.summary["accuracy"] = best_metric['accuracy']
 
     logger.info(f"Best metric:  {best_metric}")
-
-    if args.plot_hist:
-        histogram = torch.zeros(254, dtype=torch.float, device=device)
-        for name, module in model.named_modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase) and "error_pre_process" in name:
-                histogram += module.histogram_pre_process
-        torch.save(histogram.cpu(), 'error_pre_process.pt')
 
 if __name__ == "__main__":
     args = parse_args()

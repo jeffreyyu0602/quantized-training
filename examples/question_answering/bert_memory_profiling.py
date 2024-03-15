@@ -65,7 +65,12 @@ from peft import (
     get_peft_model,
 )
 
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import add_training_args, quantize_model, run_task
+import socket
+from datetime import datetime, timedelta
+
+from torch.autograd.profiler import record_function
+from torchvision import models
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -804,7 +809,7 @@ def main(args):
         loss.backward()
         model.zero_grad()
 
-    model = quantize(model, args, run_fn, device=device)
+    model = quantize_model(model, args, run_fn, device=device)
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1179,3 +1184,9 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
     run_task(args, main)
+    # torch.cuda.memory._record_memory_history()
+    # try:
+    #     run_task(args, main)
+    # except KeyboardInterrupt:
+    #     print("Interrupted")
+    # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")

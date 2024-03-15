@@ -56,7 +56,7 @@ from peft import (
     get_peft_model,
 )
 
-from quantized_training import add_training_args, quantize_model, run_task
+from quantized_training import add_training_args, quantize, run_task
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -484,7 +484,7 @@ def main(args):
         loss.backward()
         model.zero_grad()
 
-    quantize_model(model, args, run_fn, device=device)
+    quantize(model, args, run_fn, device=device)
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

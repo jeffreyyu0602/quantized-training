@@ -30,7 +30,7 @@ pip install -r requirements.txt
 After installation, Quantized-Training can be easily used in your projects. Here's a quick start example:
 
 ```python
-from quantized_training import add_training_args, quantize_model
+from quantized_training import add_training_args, quantize
 ```
 
 Create an argument parser and add quantized training relevant arguments by calling add_training_args
@@ -51,7 +51,7 @@ model = AutoModel.from_pretrained(model_id)
 
 Initialize the quantizer for your model with the desired quantization type
 ```python
-quantize_model(model, args)
+quantize(model, args)
 ```
 
 Your model is now quantized and ready for training or inference
