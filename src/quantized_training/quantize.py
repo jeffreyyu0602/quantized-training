@@ -86,7 +86,8 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         error=error_fake_quant if args.quantize_bwd else nn.Identity,
     )
 
-    if args.quantize_fwd or args.quantize_bwd or args.quantize_weights:
+    if (args.quantize_fwd or args.quantize_bwd or args.quantize_weights or
+        args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal):
         # swap Transformer modules to track float operations
         if hasattr(model, 'config'):
             propagate_config(model, 'config', model.config)
