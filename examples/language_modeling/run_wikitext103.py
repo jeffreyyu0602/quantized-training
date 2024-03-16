@@ -40,7 +40,6 @@ def main():
     parser.add_argument('--max_length', default=1024, help='Maximum sequence length')
     parser.add_argument('--stride', default=512, help='Stride for processing the data')
     parser.add_argument("--log_file", default="logs/ppl.log", help="Path to the log file.")
-    parser.add_argument("--out_file", default=None, help="Name of the output file.")
     parser.add_argument("--gpu", default=None, help="GPU to use.")
     args = parser.parse_args()
 
@@ -49,9 +48,6 @@ def main():
             run_evaluation(
                 args.model_id, args.max_length, args.stride, dtype, ops, args.log_file, args.gpu
             )
-
-            if args.out_file:
-                extract_ppl(args.log_file, args.out_file)
 
     print("All commands executed.")
 
