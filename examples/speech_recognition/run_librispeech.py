@@ -16,7 +16,7 @@ def run_evaluation(model_id, dtype, ops, log_file, gpu):
         "python",
         "examples/speech_recognition/whisper_eval.py",
         "--model_id", model_id,
-        # "--bf16",
+        "--bf16",
         "--dtype", dtype,
         "--quantize_fwd", ops,
         "--quantize_weights",
