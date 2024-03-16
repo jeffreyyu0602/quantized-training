@@ -24,9 +24,9 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
+import transformers.models.whisper.modeling_whisper as modeling_whisper
 from transformers.activations import ACT2FN
 from transformers.models.whisper.configuration_whisper import WhisperConfig
-from transformers.models.whisper.modeling_whisper import WHISPER_ATTENTION_CLASSES
 
 from .functional_modules import AddFunctional, MulFunctional, MatmulFunctional
 
@@ -273,7 +273,7 @@ class WhisperEncoderLayer(nn.Module):
         assert hasattr(other, 'config'), "The float module must have 'config'"
         converted = cls(other.config)
         for name, module in other.named_children():
-            if isinstance(module, tuple(WHISPER_ATTENTION_CLASSES.values())):
+            if isinstance(module, modeling_whisper.WhisperAttention):
                 for submodule_name, submodule in module.named_children():
                     converted._modules[name]._modules[submodule_name] = submodule
             else:
@@ -409,7 +409,7 @@ class WhisperDecoderLayer(nn.Module):
         assert hasattr(other, 'config'), "The float module must have 'config'"
         converted = cls(other.config)
         for name, module in other.named_children():
-            if isinstance(module, tuple(WHISPER_ATTENTION_CLASSES.values())):
+            if isinstance(module, modeling_whisper.WhisperAttention):
                 for submodule_name, submodule in module.named_children():
                     converted._modules[name]._modules[submodule_name] = submodule
             else:

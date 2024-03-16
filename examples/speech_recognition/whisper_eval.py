@@ -29,7 +29,7 @@ def main(args):
     librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 
     processor = WhisperProcessor.from_pretrained(args.model_id)
-    model = WhisperForConditionalGeneration.from_pretrained(args.model_id).to(device)
+    model = WhisperForConditionalGeneration.from_pretrained(args.model_id, attn_implementation="eager").to(device)
 
     quantize(model, args, device=device)
 

@@ -34,7 +34,7 @@ def compute_differences(references, predictions1, predictions2, output_dir):
             indicator = "" if abs(diff) < 0.1 else " ***"
             f.write(f"{wer_scores1[i]:6.2f}\t{wer_scores2[i]:6.2f}{indicator}\n")
             if abs(diff) > 0.1:
-                f.write(f"{references[i]}\n{predictions1[i]}\n{predictions2[i]}\n")
+                f.write(references[i] + predictions1[i] + predictions2[i])
 
     return diffs
 
@@ -48,20 +48,24 @@ def plot_differences(diffs, output_dir):
     plt.ylabel('Number of samples')
     plt.title('WER Differences')
     plt.savefig(os.path.join(output_dir, "wer_scores.png"))
+    plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Process metrics files.")
-    parser.add_argument('ref_file', help='Path to the reference file')
-    parser.add_argument('pred_file1', help='Path to the first predictions file')
-    parser.add_argument('pred_file2', help='Path to the second predictions file')
-    parser.add_argument('--output_dir', default="./", help='Output directory for results')
+    parser.add_argument('dir1', help='Path to the first directory')
+    parser.add_argument('dir2', help='Path to the second directory')
+    parser.add_argument('--output_dir', default=".", help='Output directory for results')
     args = parser.parse_args()
 
-    with open(args.ref_file, 'r') as f:
+    ref_file_path = os.path.join(args.dir1, 'references.txt')
+    pred_file1_path = os.path.join(args.dir1, 'predictions.txt')
+    pred_file2_path = os.path.join(args.dir2, 'predictions.txt')
+
+    with open(ref_file_path, 'r') as f:
         references = f.readlines()
-    with open(args.pred_file1, 'r') as f:
+    with open(pred_file1_path, 'r') as f:
         predictions1 = f.readlines()
-    with open(args.pred_file2, 'r') as f:
+    with open(pred_file2_path, 'r') as f:
         predictions2 = f.readlines()
 
     diffs = compute_differences(references, predictions1, predictions2, args.output_dir)
