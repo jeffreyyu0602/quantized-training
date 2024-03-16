@@ -60,7 +60,7 @@ For users interested in adding support for their own models, please refer to the
 
 ## Results and Reproduction
 
-##### SQuAD Inference
+#### SQuAD Inference
 
 To reproduce the Table 1 results in the paper, run
 ```python
@@ -68,11 +68,11 @@ python example/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_fi
 ```
 The outputs are stored in squad_f1.csv which has the same format as Table 1.
 
-##### GLUE and SQuAD Fine-Tuning
+#### GLUE and SQuAD Fine-Tuning
 
 Fine-tuning the Transformer models for sequence classification on the GLUE benchmark and question answering on the SQuAD v1.1. GLUE is made up of a total of 9 different tasks. In our paper, we conduct evaluations on three benchmarks: SST-2, MRPC, and QNLI. All commands required to reproduce the results presented in Table 4 are provided in the script named `asplos_training.sh`. The experiments are organized into groups, each addressing four tasks of different data types and configurations: BF16, Posit8, Posit8 with approximation, and FP8. Each task is repeated with three different random seeds to mitigate outlier results. Specifically, the first set of experiments involves running the MobileBERT-tiny model on the QNLI task across these four configurations. This setup corresponds to the results shown in the first major row (MobileBERT-tiny) and the first column (QNLI) of Table 4. The structure for subsequent groups of experiments follows the same pattern. Outputs from the experiments are recorded in their respective log files, as indicated by the log_file argument. We recommend starting with the MRPC task, as it is the shortest and typically completes in around an hour on an RTX 4090 GPU.
 
-##### Whisper Evaluation
+#### Whisper Evaluation
 
 Whisper is a pre-trained model for automatic speech recognition (ASR) and speech translation. To evaluate Whisper models on LibriSpeech test-clean:
 ```python
@@ -82,7 +82,7 @@ where model_id could be any Whisper model in the [Whisper Release](https://huggi
 
 The user can perform quantized inference by passing quantize_weights and quantize_fwd arguments. OPERATIONS could be any combination of "gemm", "act", "norm", "attn_scaling", and "residual", separated by comma.
 
-##### LLM Evaluation
+#### LLM Evaluation
 
 To run language models evaluation on WikiText-103:
 ```python
