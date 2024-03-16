@@ -1,9 +1,9 @@
 import argparse
-import os
 import subprocess
 
+dtypes = ["posit8_1", "posit8_2", "e4m3"]
+
 operations = [
-    None,
     "gemm",
     "gemm,residual",
     "gemm,residual,norm",
@@ -11,23 +11,32 @@ operations = [
     "gemm,residual,norm,act,scaling"
 ]
 
+def run_evaluation(model_id, dtype, ops, log_file, gpu):
+    command = [
+        "python",
+        "examples/speech_recognition/whisper_eval.py",
+        "--model_id", model_id,
+        "--bf16",
+        "--dtype", dtype,
+        "--quantize_fwd", ops,
+        "--quantize_weights",
+        "--log_file", log_file,
+    ]
+    if gpu is not None:
+        command += ['--gpu', gpu]
+    print("Running:", " ".join(command))
+    subprocess.run(command, check=True)
+
 def main():
     parser = argparse.ArgumentParser(description="Run Whisper evaluation with various quantization strategies.")
     parser.add_argument("--model_id", default="openai/whisper-tiny", help="Model name or path for the Whisper model")
-    parser.add_argument("--output_dir", default="tmp/whisper/", help="Output directory for generated text and plots")
-    parser.add_argument('--out_file', default='accuracy.out')
-    parser.add_argument('--gpu', default=None)
+    parser.add_argument("--log_file", default="", help="Path to the log file.")
+    parser.add_argument("--gpu", default=None, help="GPU to use.")
     args = parser.parse_args()
 
-    base_cmd = ["python", "examples/speech_recognition/whisper_eval.py", "--model_id", args.model_id, "--bf16"]
-
-    for ops in operations:
-        output_dir = "bf16" if ops is None else ops.replace(",", "_")
-        cmd = base_cmd + ["--output_dir", os.path.join(args.output_dir, output_dir)]
-        if ops is not None:
-            cmd += ["--quantize_weights", "--quantize_fwd", ops]
-        print("Running:", " ".join(cmd))
-        subprocess.run(cmd, check=True)
+    for dtype in dtypes:
+        for ops in operations:
+            run_evaluation(args.model_id, dtype, ops, args.log_file, args.gpu)
 
 if __name__ == "__main__":
     main()

@@ -15,7 +15,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Perform whisper model inference on LibriSpeech dataset.")
     parser.add_argument("--model_id", default="openai/whisper-tiny", help="Model to perform evaluation.")
     parser.add_argument("--batch_size", type=int, default=16, help="Evaluation batch size.")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for scores.")
+    parser.add_argument("--output_dir", default=None, help="Output directory for scores.")
     add_training_args(parser)
     return parser.parse_args()
 

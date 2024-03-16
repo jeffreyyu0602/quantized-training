@@ -2,7 +2,7 @@ import argparse
 import re
 import subprocess
 
-dtypes = ["posit8_1", "e4m3", "posit8_2"]
+dtypes = ["posit8_1", "posit8_2", "e4m3"]
 
 operations = [
     "gemm",
@@ -28,18 +28,12 @@ def run_evaluation(model_id, max_length, stide, dtype, ops, log_file, gpu):
     print("Running:", ' '.join(command))
     subprocess.run(command, check=True)
 
-def extract_ppl(log_file, out_file):
-    with open(log_file, 'r') as file, open(out_file, 'w') as out:
-        scores = (re.findall(r"perplexity: (\d+\.\d+)", file.read()))
-        for score in scores:
-            out.write(score + '\n')
-
 def main():
     parser = argparse.ArgumentParser(description="Run language model evaluation.")
     parser.add_argument("--model_id", required=True, help="Pretrained model for evaluation.")
     parser.add_argument('--max_length', default=1024, help='Maximum sequence length')
     parser.add_argument('--stride', default=512, help='Stride for processing the data')
-    parser.add_argument("--log_file", default="logs/ppl.log", help="Path to the log file.")
+    parser.add_argument("--log_file", default="", help="Path to the log file.")
     parser.add_argument("--gpu", default=None, help="GPU to use.")
     args = parser.parse_args()
 
