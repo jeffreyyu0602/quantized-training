@@ -1,5 +1,6 @@
 import argparse
 import os
+import logging
 
 import torch
 from datasets import load_dataset
@@ -7,6 +8,8 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from evaluate import load
 
 from quantized_training import add_training_args, quantize, run_task
+
+logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Perform whisper model inference on LibriSpeech dataset.")
@@ -50,17 +53,17 @@ def main(args):
     result = librispeech_test_clean.map(map_to_pred, batched=True, batch_size=args.batch_size)
 
     wer = load("wer")
-    print(100 * wer.compute(references=result["reference"], predictions=result["prediction"]))
+    logger.info(100 * wer.compute(references=result["reference"], predictions=result["prediction"]))
 
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
 
-        with open(os.path.join(args.output_dir, "prediction.txt"), "w") as f:
+        with open(os.path.join(args.output_dir, "predictions.txt"), "w") as f:
             f.write('\n'.join(result["prediction"]) + '\n')
 
-        with open(os.path.join(args.output_dir, "reference.txt"), "w") as f:
+        with open(os.path.join(args.output_dir, "references.txt"), "w") as f:
             f.write('\n'.join(result["reference"]) + '\n')
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    run_task(args, main)

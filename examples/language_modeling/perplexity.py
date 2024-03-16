@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process model parameters.")
-    parser.add_argument('--model_id', type=str, required=True, help='Pretrained model identifier')
+    parser.add_argument('--model_id', required=True, help='Pretrained model identifier')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--stride', type=int, default=512, help='Stride for processing the data')
     parser.add_argument('--output_dir', default=None, help='Output directory for histograms')
@@ -33,7 +33,6 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
-
     add_training_args(parser)
     return parser.parse_args()
 
