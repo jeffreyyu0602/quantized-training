@@ -13,7 +13,7 @@ from accelerate import dispatch_model
 
 from .fake_quantize import FusedAmaxObsFakeQuantize
 from .modules import Softmax, modeling_bert, modeling_mobilebert
-from .qconfig import QConfig, get_default_qconfig
+from .qconfig import QConfig
 from .quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
@@ -44,18 +44,6 @@ def propagate_config(module, name, qconfig):
 def quantize(model, args, run_fn=None, device=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
-
-    # qconfig = get_default_qconfig(
-    #     dtype=args.dtype,
-    #     activation=args.quantize_fwd,
-    #     weight=args.quantize_weights,
-    #     error=args.quantize_bwd,
-    #     scaling_fwd=args.scaling_fwd,
-    #     scaling_bwd=args.scaling_bwd,
-    #     max_fwd=args.max_fwd,
-    #     max_bwd=args.max_bwd,
-    #     amax_history_len=args.amax_history_len
-    # )
 
     if "," in args.dtype:
         dtype_fwd, dtype_bwd = args.dtype.split(",")
@@ -115,6 +103,7 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         if run_fn is not None:
             run_fn(model)
 
+    # TODO: better way to handle bf16 argument?
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 

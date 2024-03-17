@@ -529,6 +529,8 @@ def main():
     def group_texts(examples):
         # Concatenate all texts.
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        # Remove start tokens from concatenated text
+        concatenated_examples['input_ids'] = [t for t in concatenated_examples['input_ids'] if t != 1]
         total_length = len(concatenated_examples[list(examples.keys())[0]])
         # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
         # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
