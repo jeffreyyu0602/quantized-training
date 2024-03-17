@@ -52,12 +52,12 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
     def calibrate(model):
-        val_datasets = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-        encoding = tokenizer("\n\n".join(val_datasets["text"]), return_tensors="pt")
-        seq_len = encoding.input_ids.size(1)
+        validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
+        seq_len = encodings.input_ids.size(1)
         for begin_loc in tqdm(range(0, seq_len, args.stride)):
             end_loc = min(begin_loc + args.max_length, seq_len)
-            input_ids = encoding.input_ids[:, begin_loc:end_loc].to(device)
+            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
             with torch.no_grad():
                 model(input_ids)
 

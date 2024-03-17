@@ -1,5 +1,4 @@
 import argparse
-import re
 import subprocess
 
 dtypes = ["posit8_1", "posit8_2", "e4m3"]
