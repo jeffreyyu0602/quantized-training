@@ -253,7 +253,7 @@ def add_training_args(parser=None):
     parser.add_argument(
         "--amax_history_len",
         type=int,
-        default=10,
+        default=50,
         help="The length of the amax history window used for scaling factor computation."
     )
     parser.add_argument(

@@ -68,9 +68,10 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         histogram_observer_enabled=args.record_histogram
     )
 
+    # TODO: weights need separate quantization parameters
     qconfig = QConfig(
         activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-        weight=default_fake_quant if args.quantize_weights else nn.Identity,
+        weight=FusedAmaxObsFakeQuantize.with_args(dtype=dtype_fwd) if args.quantize_weights else nn.Identity,
         error=error_fake_quant if args.quantize_bwd else nn.Identity,
     )
 
