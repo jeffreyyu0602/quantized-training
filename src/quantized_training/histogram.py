@@ -59,12 +59,12 @@ def plot_layer_range(model, prefix, output_dir):
     layer_histograms = {}
     for _, histograms in histc.items():
         for name, hist in histograms:
-            clean_name = name.replace('activation_pre_process.', '')
-            layer_histograms.setdefault(clean_name, np.zeros_like(hist))
-            layer_histograms[clean_name] += hist
+            layer_name = name.replace('activation_pre_process.', '')
+            layer_histograms.setdefault(layer_name, np.zeros_like(hist))
+            layer_histograms[layer_name] += hist
 
     # Calculate the overall histogram and determine global quantile values
-    hist_sum = np.sum(np.stack(layer_histograms.values()), axis=0)
+    hist_sum = np.sum(np.stack(list(layer_histograms.values())), axis=0)
     cumulative_sum = np.cumsum(hist_sum) / np.sum(hist_sum)
     min_quantile = np.searchsorted(cumulative_sum, 0.001) - 126
     max_quantile = min(np.searchsorted(cumulative_sum, 0.999), cumulative_sum.shape[0] - 1) - 126

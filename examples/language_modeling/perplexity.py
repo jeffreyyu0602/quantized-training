@@ -46,7 +46,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
-        device_map=args.gpu or "auto",
+        device_map=args.gpu if args.gpu is not None else "auto",
         attn_implementation="eager", # flash attention is not supported
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)

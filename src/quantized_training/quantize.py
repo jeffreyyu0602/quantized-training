@@ -98,7 +98,7 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         propagate_config(model, 'qconfig', qconfig)
         if args.do_train:
             convert(model, inplace=True)
-        prepare(model, args.quantize_fwd, args.quantize_bwd, args.op_fusion, device)
+        prepare(model, True, args.quantize_fwd, args.quantize_bwd, args.op_fusion)
 
         if run_fn is not None:
             run_fn(model)
@@ -128,7 +128,7 @@ def _get_unique_devices_(mod):
     return {p.device for p in mod.parameters()} | \
         {p.device for p in mod.buffers()}
 
-def _register_module_process_hook(module, hook_name, device, mod_name):
+def _register_module_hook(module, name, hook_name):
     def _observer_pre_hook(self, inputs):
         new_inputs = []
         module_dict = getattr(self, hook_name)
@@ -136,9 +136,7 @@ def _register_module_process_hook(module, hook_name, device, mod_name):
             if torch.is_tensor(input):
                 if (idx := str(i)) not in module_dict:
                     obs_cls = getattr(self.qconfig, hook_name.split('_')[0])
-                    module_dict.update({
-                        idx: obs_cls(device=device, name=mod_name)
-                    })
+                    module_dict.update({idx: obs_cls(device=input.device, name=name)})
                 new_inputs.append(module_dict[idx](input))
             else:
                 new_inputs.append(input)
@@ -154,48 +152,48 @@ def _register_module_process_hook(module, hook_name, device, mod_name):
             return _observer_pre_hook(self, grad_inputs)
         module.register_full_backward_hook(_observer_backward_hook)
 
-def prepare(
-    model: Module,
-    quantize_fwd: str = None,
-    quantize_bwd: str = None,
-    op_fusion: List[str] = None,
-    device=None,
-) -> Module:
-    forward_pre_hook_module_list = _parse_quantized_ops(quantize_fwd)
-    backward_pre_hook_module_list = _parse_quantized_ops(quantize_bwd)
-
-    def insert_module_process(m, device, name):
+def _add_observer_(module, fwd_pre_hook_module_list, bwd_pre_hook_module_list, bwd_residual, op_fusion, prefix):
+    def _insert_obs_or_fq(m, name):
         if op_fusion is not None and any(layer in name for layer in op_fusion):
             return
-
-        if isinstance(m, forward_pre_hook_module_list):
-            _register_module_process_hook(m, 'activation_pre_process', device, name)
-
-        if isinstance(m, backward_pre_hook_module_list):
-            _register_module_process_hook(m, 'error_pre_process', device, name)
-
+        if isinstance(m, fwd_pre_hook_module_list):
+            _register_module_hook(module, name, 'activation_pre_process')
+        if isinstance(m, bwd_pre_hook_module_list):
+            _register_module_hook(module, name, 'error_pre_process')
         is_residual = (
             isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
-            or any(layer in name for layer in RESIDUAL_LAYERS)
-            and isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
+            or (isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
+                and any(layer in name for layer in RESIDUAL_LAYERS))
         )
-        if quantize_bwd is not None and "residual" in quantize_bwd and is_residual:
-            _register_module_process_hook(m, 'error_post_process', device, name)
+        if bwd_residual and is_residual:
+            _register_module_hook(module, name, 'error_post_process')
 
-    def add_observer(module, device, prefix=""):
-        if device is None:
-            devices = _get_unique_devices_(module)
-            device = next(iter(devices)) if len(devices) == 1 else None
+    for name, child in module.named_children():
+        module_prefix = prefix + '.' + name if prefix else name
+        if isinstance(child, nni._FusedModule):
+            _insert_obs_or_fq(child, module_prefix)
+        else:
+            _add_observer_(child, fwd_pre_hook_module_list, bwd_pre_hook_module_list, bwd_residual, op_fusion, module_prefix)
+    _insert_obs_or_fq(module, prefix)
 
-        for name, child in module.named_children():
-            module_prefix = prefix + '.' + name if prefix else name
-            if isinstance(child, nni._FusedModule):
-                insert_module_process(child, device, module_prefix)
-            else:
-                add_observer(child, device, module_prefix)
-        insert_module_process(module, device, prefix)
+def prepare(
+    model: Module,
+    inplace=False,
+    quantize_fwd: str = None,
+    quantize_bwd: str = None,
+    op_fusion: List[str] = None
+) -> Module:
+    if not inplace:
+        model = copy.deepcopy(model)
 
-    add_observer(model, device)
+    _add_observer_(
+        model,
+        fwd_pre_hook_module_list=_parse_quantized_ops(quantize_fwd),
+        bwd_pre_hook_module_list=_parse_quantized_ops(quantize_bwd),
+        bwd_residual=quantize_bwd is not None and "residual" in quantize_bwd,
+        op_fusion=op_fusion,
+        prefix='',
+    )
     return model
 
 def convert(module, mapping=None, inplace=False, custom_module_class_mapping=None):
