@@ -7,7 +7,7 @@ from datasets import load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from evaluate import load
 
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import add_training_args, quantize, run_task, plot_layer_distribution, plot_layer_range
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,14 @@ def main(args):
 
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
-
         with open(os.path.join(args.output_dir, "predictions.txt"), "w") as f:
             f.write('\n'.join(result["prediction"]) + '\n')
-
         with open(os.path.join(args.output_dir, "references.txt"), "w") as f:
             f.write('\n'.join(result["reference"]) + '\n')
+
+    if args.record_histogram:
+        plot_layer_distribution(model, r'model.encoder.layers.(\d+).', args.output_dir)
+        plot_layer_range(model, r'model.encoder.layers.(\d+).', args.output_dir)
 
 if __name__ == "__main__":
     args = parse_args()

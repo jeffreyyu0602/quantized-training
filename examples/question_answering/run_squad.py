@@ -68,7 +68,7 @@ def extract_scores(log_file, out_file):
 def run_asplos_experiments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_file', default='logs/squad.log')
-    parser.add_argument('--out_file', default='accuracy.out')
+    parser.add_argument('--out_file', default='squad_f1.out')
     parser.add_argument('--gpu', default=None)
     args = parser.parse_args()
 

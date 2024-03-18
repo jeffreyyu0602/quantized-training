@@ -8,13 +8,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from quantized_training import (
-    add_training_args,
-    quantize,
-    run_task,
-    plot_layer_distribution,
-    plot_layer_range,
-)
+from quantized_training import add_training_args, quantize, run_task, plot_layer_distribution, plot_layer_range
 
 logger = logging.getLogger(__name__)
 
