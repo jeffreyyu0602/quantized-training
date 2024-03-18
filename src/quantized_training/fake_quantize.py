@@ -179,9 +179,10 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         # Remove attention mask from quantization process
-        x_detached = X.detach()
-        attention_mask = torch.where(x_detached == torch.finfo(X.dtype).min, torch.finfo(X.dtype).min, 0.0)
-        X -= attention_mask
+        if self.quantize_per_tensor:
+            x_detached = X.detach()
+            attention_mask = torch.where(x_detached == torch.finfo(X.dtype).min, torch.finfo(X.dtype).min, 0.0)
+            X -= attention_mask
 
         if self.observer_enabled[0] == 1:
             self.amax_history, amax = _default_get_amax(
@@ -208,7 +209,9 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         if self.histogram_observer_enabled[0] == 1:
             self._combine_histograms(self.histogram_post_process, X)
 
-        X += attention_mask
+        if self.quantize_per_tensor:
+            X += attention_mask
+
         return X
 
     def _combine_histograms(self, histogram: torch.Tensor, X: torch.Tensor) -> None:
