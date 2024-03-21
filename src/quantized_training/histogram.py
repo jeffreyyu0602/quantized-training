@@ -5,30 +5,28 @@ import logging
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from collections import defaultdict
 from scipy.interpolate import make_interp_spline
 
 logger = logging.getLogger(__name__)
 
-def get_histogram_pre_process(model, prefix):
-    histc = {}
+def get_histogram_pre_process(model):
+    layer_groups = defaultdict(list)
     for name, module in model.named_modules():
         if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-            match = re.match(prefix, name)
-            key = match.group(1) if match else name.replace('activation_pre_process.', '')
-            histc.setdefault(key, [])
+            if (match := re.search(r'(.*?\.\d+)\.(.*?)?(?=\.activation_pre_process\.\d+)', name)):
+                prefix, layer_name = match.group(1), match.group(2)
+            else:
+                prefix = layer_name = re.sub(r'\.activation_pre_process\.\d+', '', name)
+            layer_groups[prefix].append((layer_name, module.histogram.cpu().numpy()))
+    return layer_groups
 
-            layer_name = re.sub(prefix, '', name)
-            layer_name = layer_name.replace('activation_pre_process.', '')
-            histc[key].append((layer_name, module.histogram_pre_process.cpu().numpy()))
-    return histc
-
-def plot_layer_distribution(model, prefix, output_dir):
-    histc = get_histogram_pre_process(model, prefix)
-    for index, histograms in histc.items():
+def plot_layer_distribution(model, output_dir):
+    histc = get_histogram_pre_process(model)
+    for block_name, histograms in histc.items():
         hist_sum = np.sum(np.stack([hist for _, hist in histograms]), axis=0)
         cumulative_sum = np.cumsum(hist_sum) / np.sum(hist_sum)
-        min_quantile = np.searchsorted(cumulative_sum, 0.001)
-        max_quantile = min(np.searchsorted(cumulative_sum, 0.999), cumulative_sum.shape[0] - 1)
+        min_quantile = np.searchsorted(cumulative_sum, 0.005)
 
         non_zero_bins = np.nonzero(hist_sum)
         min_bin = max(non_zero_bins[0].min(), min_quantile)
@@ -48,13 +46,13 @@ def plot_layer_distribution(model, prefix, output_dir):
 
         plt.xlabel('Exponent Value')
         plt.ylabel('Frequency')
-        plt.title(f'Encoder {index} Value Distribution')
+        plt.title(f'{block_name} Tensor Distribution')
         plt.legend()
-        plt.savefig(os.path.join(output_dir, f"encoder-{index}.png"))
+        plt.savefig(os.path.join(output_dir, f"{block_name}.png"))
         plt.close()
 
-def plot_layer_range(model, prefix, output_dir):
-    histc = get_histogram_pre_process(model, prefix)
+def plot_layer_range(model, output_dir):
+    histc = get_histogram_pre_process(model)
     # Step 1: Aggregate histograms by layer name
     layer_histograms = {}
     for _, histograms in histc.items():
@@ -66,8 +64,7 @@ def plot_layer_range(model, prefix, output_dir):
     # Calculate the overall histogram and determine global quantile values
     hist_sum = np.sum(np.stack(list(layer_histograms.values())), axis=0)
     cumulative_sum = np.cumsum(hist_sum) / np.sum(hist_sum)
-    min_quantile = np.searchsorted(cumulative_sum, 0.001) - 126
-    max_quantile = min(np.searchsorted(cumulative_sum, 0.999), cumulative_sum.shape[0] - 1) - 126
+    min_quantile = np.searchsorted(cumulative_sum, 0.005) - 126
 
     # Step 2: Determine the minimum and maximum bin values for each layer
     layer_ranges = {}
@@ -103,39 +100,5 @@ def plot_layer_range(model, prefix, output_dir):
 
     # Adjust layout to not cut off the longer layer names and save
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "layer_range.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "layer_distribution.png"), dpi=300)
     plt.close()
-
-def plot_histogram(model, output_dir):
-    for name, module in model.named_modules():
-        if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-            hist_pre = module.histogram_pre_process.cpu()
-            hist_post = module.histogram_post_process.cpu()
-
-            non_empty_bins1 = torch.nonzero(hist_pre).flatten()
-            non_empty_bins2 = torch.nonzero(hist_post).flatten()
-
-            if len(non_empty_bins1) == 0 or len(non_empty_bins2) == 0:
-                logger.warn("One or both histograms are empty. Skipping plotting.")
-                continue
-
-            first_non_zero = min(non_empty_bins1[0], non_empty_bins2[0])
-            last_non_zero = max(non_empty_bins1[-1], non_empty_bins2[-1])
-
-            hist_pre = hist_pre[first_non_zero:last_non_zero + 1]
-            hist_post = hist_post[first_non_zero:last_non_zero + 1]
-
-            bins = torch.linspace(-126, 127, 255)[first_non_zero:last_non_zero + 2]
-            bar_width = (bins[1] - bins[0]) * 0.4
-
-            plt.figure(figsize=(10, 6))
-            plt.bar(bins[:-1] - bar_width/2, hist_pre, width=bar_width, label='Before quantization')
-            plt.bar(bins[:-1] + bar_width/2, hist_post, width=bar_width, label='After quantization')
-
-            plt.title('Activation Distribution')
-            plt.xlabel('Exponent Value')
-            plt.ylabel('Count')
-            plt.legend()
-
-            plt.savefig(os.path.join(output_dir, f'{name}.png'))
-            plt.close()

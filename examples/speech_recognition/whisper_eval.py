@@ -62,9 +62,9 @@ def main(args):
         with open(os.path.join(args.output_dir, "references.txt"), "w") as f:
             f.write('\n'.join(result["reference"]) + '\n')
 
-    if args.record_histogram:
-        plot_layer_distribution(model, r'model.encoder.layers.(\d+).', args.output_dir)
-        plot_layer_range(model, r'model.encoder.layers.(\d+).', args.output_dir)
+    if args.record_histogram and args.output_dir is not None:
+        plot_layer_distribution(model, args.output_dir)
+        plot_layer_range(model, args.output_dir)
 
 if __name__ == "__main__":
     args = parse_args()

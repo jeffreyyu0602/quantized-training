@@ -54,18 +54,18 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
 
     default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
         dtype=dtype_fwd,
+        is_per_tensor=args.scaling_fwd,
         quant_max=args.max_fwd,
         amax_history_len=args.amax_history_len,
-        quantize_per_tensor=args.scaling_fwd,
-        histogram_observer_enabled=args.record_histogram
+        observer_enabled=args.record_histogram
     )
 
     error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
         dtype=dtype_bwd,
+        is_per_tensor=args.scaling_bwd,
         quant_max=args.max_bwd,
         amax_history_len=args.amax_history_len,
-        quantize_per_tensor=args.scaling_bwd,
-        histogram_observer_enabled=args.record_histogram
+        observer_enabled=args.record_histogram
     )
 
     # TODO: weights need separate quantization parameters
@@ -104,15 +104,13 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         if run_fn is not None:
             run_fn(model)
 
-    # TODO: better way to handle bf16 argument?
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
     if args.quantize_weights:
         for name, param in model.named_parameters():
             if not 'bias' in name:
-                weight_fake_quant = qconfig.weight(device=param.device, name=name)
-                param.data = weight_fake_quant(param.data)
+                param.data = qconfig.weight(device=param.device)(param.data)
 
     return model
 

@@ -1,9 +1,7 @@
 import logging
 import re
-from typing import Any, Union, Callable, Literal, Tuple
 
 import torch
-import matplotlib.pyplot as plt
 from torch.ao.quantization import FakeQuantizeBase
 
 from .fp8 import quantize_to_fp8_e4m3, quantize_to_fp8_e5m2
@@ -11,7 +9,6 @@ from .posit import quantize_to_posit
 
 __all__ = [
     "FusedAmaxObsFakeQuantize",
-    "quantization_dtype_to_function",
 ]
 
 logger = logging.getLogger(__name__)
@@ -31,7 +28,7 @@ def _round_to_mbits(input, mbits):
     raw_bits &= ~(lb_mask - 1)
     return raw_bits.view(torch.float32).to(input.dtype)
 
-def quantization_dtype_to_function(dtype: str) -> Callable:
+def dtype_to_fq_fn(dtype: str):
     """Return the quantization function for the given dtype."""
     if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
         nbits, es = match.groups()
@@ -52,61 +49,24 @@ def quantization_dtype_to_function(dtype: str) -> Callable:
     else:
         raise ValueError(f"Unrecognized dtype: {dtype}")
 
-def _convert(input: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-    """Index value tensor using the bit pattern of input tensor."""
-    if input.dtype == torch.bfloat16:
-        indices = input.view(torch.int16).int() & 0xffff
-    else:
-        raw_bits = input.float().view(torch.int32)
-        indices = ((raw_bits >> 16) & 0xffff) | ((raw_bits & 0xffff) != 0).int()
-    return values[indices].to(input.dtype)
-
 class FakeQuantFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, values, scale=None):
-        if scale is None:
-            return _convert(input, values)
+        if scale is not None:
+            input = input * scale
+
+        if input.dtype == torch.bfloat16:
+            indices = input.view(torch.int16).int() & 0xffff
         else:
-            return _convert(input * scale, values) / scale
+            raw_bits = input.float().view(torch.int32)
+            indices = ((raw_bits >> 16) & 0xffff) | ((raw_bits & 0xffff) != 0).int()
+        input = values[indices].to(input.dtype)
+
+        return input / scale if scale is not None else input
 
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None, None
-
-def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
-    """Update amax history and set next amax to zero."""
-    if amax_history.shape[0] > 1:
-        amax_history = torch.roll(amax_history, -1, 0)
-    amax_history[0].fill_(0.0)
-    return amax_history
-
-def _default_get_amax(
-    amax_history: torch.Tensor,
-    amax_compute_algo: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Default function to obtain amax from history."""
-    if amax_compute_algo == "max":
-        amax = torch.max(amax_history, dim=0).values
-    else:  # amax_compute_algo == "most_recent"
-        amax = amax_history[0].clone()
-
-    amax_history = _update_amax_history(amax_history)
-    return amax_history, amax
-
-def _default_sf_compute(
-    amax: torch.Tensor,
-    scale: torch.Tensor,
-    quant_max: float,
-    margin: int,
-) -> torch.Tensor:
-    """Default function to convert amax to scaling factor."""
-    exp = torch.floor(torch.log2(quant_max / amax)) - margin
-    sf = torch.round(torch.pow(2, torch.abs(exp)))
-    sf = torch.where(amax > 0.0, sf, scale)
-    sf = torch.where(torch.isfinite(amax), sf, scale)
-    sf = torch.where(exp < 0, 1 / sf, sf)
-
-    return sf
 
 class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     r"""Observer module for computing the quantization parameters based on the
@@ -116,46 +76,37 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     parameters. The module records the maximums of absolute values of output
     tensors, and uses this statistic to compute the quantization parameters.
     """
+    value_map: torch.Tensor
     amax_history: torch.Tensor
     scale: torch.Tensor
-    value_map: torch.Tensor
-    histogram_pre_process: torch.Tensor
-    histogram_post_process: torch.Tensor
+    histogram: torch.Tensor
 
     def __init__(
         self,
         dtype: str,
+        is_per_tensor: bool = False,
         quant_max: float = None,
         amax_history_len: int = 50,
-        amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max",
-        quantize_per_tensor: bool = False,
-        histogram_observer_enabled: bool = False,
-        **kwargs: Any,
+        observer_enabled: bool = False,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.dtype = dtype
+        self.is_per_tensor = is_per_tensor
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
-        self.amax_compute_algo = amax_compute_algo
-        self.quantize_per_tensor = quantize_per_tensor
-        self.enable_observer(quantize_per_tensor)
         self.name = kwargs.get("name", None)
         device = kwargs.get("device", None)
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.zeros(amax_history_len, **factory_kwargs))
         self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
         # Generate all possible bfloat16 values and quantize them to the given dtype.
-        try:
-            input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-        except RuntimeError:
-            logger.warn("Bfloat16 is not supported on this device.")
-            input = (torch.arange(2 ** 16, dtype=torch.int32, device=device) << 16).view(torch.float)
-        self.fake_quant_function = quantization_dtype_to_function(dtype)
-        self.register_buffer("value_map", self.fake_quant_function(input), persistent=False)
-        # Records the histogram of the input and quantized input values
-        self.register_buffer('histogram_observer_enabled', torch.tensor([histogram_observer_enabled], dtype=torch.uint8))
-        self.register_buffer("histogram_pre_process", torch.zeros(254, **factory_kwargs))
-        self.register_buffer("histogram_post_process", torch.zeros(254, **factory_kwargs))
+        input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
+        self.fake_quant_fn = dtype_to_fq_fn(dtype)
+        self.register_buffer("value_map", self.fake_quant_fn(input), persistent=False)
+        # Records the histogram of the input tensor
+        self.enable_observer(observer_enabled)
+        self.register_buffer("histogram", torch.zeros(254, **factory_kwargs))
 
     @torch.jit.export
     def calculate_qparams(self):
@@ -164,53 +115,45 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     @torch.jit.export
     def extra_repr(self):
         return (
-            "fake_quant_enabled={}, observer_enabled={}, scale={}, quantize_per_tensor={}, "
-            "dtype={}, quant_max={}, amax_history_len={}, amax_compute_algo={}".format(
+            "fake_quant_enabled={}, observer_enabled={}, dtype={}, is_per_tensor={}, "
+            "quant_max={}, amax_history_len={}, scale={}".format(
                 self.fake_quant_enabled,
                 self.observer_enabled,
-                self.scale,
-                self.quantize_per_tensor,
                 self.dtype,
+                self.is_per_tensor,
                 self.quant_max,
                 self.amax_history_len,
-                self.amax_compute_algo,
+                self.scale,
             )
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # Remove attention mask from quantization process
-        if self.quantize_per_tensor:
+        if self.is_per_tensor:
+            # Remove attention mask when computing scaling factor
             x_detached = X.detach()
-            attention_mask = torch.where(x_detached == torch.finfo(X.dtype).min, torch.finfo(X.dtype).min, 0.0)
+            min_val = torch.finfo(X.dtype).min
+            attention_mask = torch.where(x_detached == min_val, min_val, 0.0)
             X -= attention_mask
 
-        if self.observer_enabled[0] == 1:
-            self.amax_history, amax = _default_get_amax(
-                self.amax_history,
-                self.amax_compute_algo,
-            )
-            self.scale = _default_sf_compute(
-                amax,
-                self.scale,
-                self.quant_max,
-                0,
-            )
+            amax = torch.amax(self.amax_history)
+            self.amax_history = torch.roll(self.amax_history, -1, 0)
             self.amax_history[0] = torch.amax(torch.abs(X.detach())).float()
 
-        if self.histogram_observer_enabled[0] == 1:
-            self._combine_histograms(self.histogram_pre_process, X)
+            sf = self.quant_max / amax
+            sf = torch.pow(2, torch.floor(torch.log2(sf)))
+            sf = torch.where(amax > 0.0, sf, self.scale)
+            sf = torch.where(torch.isfinite(amax), sf, self.scale)
+            self.scale = sf
+
+        if self.observer_enabled[0] == 1:
+            self._combine_histograms(self.histogram, X)
 
         if self.fake_quant_enabled[0] == 1:
-            if self.quantize_per_tensor:
+            if self.is_per_tensor:
                 X = FakeQuantFunction.apply(X, self.value_map, self.scale.to(X.dtype))
+                X += attention_mask
             else:
                 X = FakeQuantFunction.apply(X, self.value_map)
-
-        if self.histogram_observer_enabled[0] == 1:
-            self._combine_histograms(self.histogram_post_process, X)
-
-        if self.quantize_per_tensor:
-            X += attention_mask
 
         return X
 

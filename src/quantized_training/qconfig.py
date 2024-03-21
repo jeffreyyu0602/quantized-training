@@ -1,9 +1,4 @@
-import re
 from collections import namedtuple
-
-import torch.nn as nn
-
-from .fake_quantize import FusedAmaxObsFakeQuantize
 
 __all__ = [
     "QConfig",
@@ -31,47 +26,3 @@ class QConfig(namedtuple('QConfig', ['activation', 'weight', 'error'])):
     """
     def __new__(cls, activation, weight, error):
         return super().__new__(cls, activation, weight, error)
-
-def parse_dtype(dtype: str):
-    if "," in dtype:
-        dtypes = dtype.split(",")
-        assert len(dtypes) == 2, f"Invalid data types: {dtype}."
-        dtype_fwd, dtype_bwd = dtypes
-    elif re.search(r'^FP8(\.MIXED)?$', dtype, re.IGNORECASE):
-        dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
-    else:
-        dtype_fwd, dtype_bwd = (dtype, dtype)
-    return (dtype_fwd, dtype_bwd)
-
-def get_default_qconfig(
-    dtype: str,
-    activation: bool = False,
-    weight: bool = False,
-    error: bool = False,
-    scaling_fwd: bool = False,
-    scaling_bwd: bool = False,
-    max_fwd: float = 64.0,
-    max_bwd: float = 64.0,
-    amax_history_len: int = 10
-) -> QConfig:
-    dtype_fwd, dtype_bwd = parse_dtype(dtype)
-
-    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_fwd,
-        quant_max=max_fwd,
-        amax_history_len=amax_history_len,
-        quantize_per_tensor=scaling_fwd
-    )
-
-    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_bwd,
-        quant_max=max_bwd,
-        amax_history_len=amax_history_len,
-        quantize_per_tensor=scaling_bwd
-    )
-
-    return QConfig(
-        activation=default_fake_quant if activation else nn.Identity,
-        weight=default_fake_quant if weight else nn.Identity,
-        error=error_fake_quant if error else nn.Identity,
-    )

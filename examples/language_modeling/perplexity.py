@@ -49,11 +49,16 @@ def main(args):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
         seq_len = encodings.input_ids.size(1)
-        for begin_loc in tqdm(range(0, seq_len, args.stride)):
+        for begin_loc in tqdm(range(0, args.max_length * 20, args.stride)):
             end_loc = min(begin_loc + args.max_length, seq_len)
             input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
             with torch.no_grad():
                 model(input_ids)
+
+        # fix quantization parameters
+        for name, module in model.named_modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.disable_observer()
 
     quantize(model, args, run_fn=calibrate if args.scaling_fwd else None)
 
@@ -95,10 +100,10 @@ def main(args):
     if wandb.run is not None:
         wandb.log({"perplexity": ppl.item()})
 
-    if args.record_histogram:
+    if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
-        plot_layer_distribution(model, r'transformer.h.(\d+).', args.output_dir)
-        plot_layer_range(model, r'transformer.h.(\d+).', args.output_dir)
+        plot_layer_distribution(model, args.output_dir)
+        plot_layer_range(model, args.output_dir)
 
 if __name__ == "__main__":
     args = parse_args()
