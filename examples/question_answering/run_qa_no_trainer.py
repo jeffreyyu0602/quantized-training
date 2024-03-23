@@ -1052,7 +1052,7 @@ def main(args):
                 output_dir = os.path.join(args.output_dir, output_dir)
             # accelerator.save_state(output_dir)
 
-            train_loss = total_loss.item() / checkpointing_steps
+            train_loss = total_loss.item() / len(train_dataloader)
             logger.info(f"loss: {train_loss:>8f}\t[{completed_steps:>5}/{args.max_train_steps}]")
             best_metric = save_state(output_dir, best_metric, train_loss)
 
