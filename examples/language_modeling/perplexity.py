@@ -27,6 +27,7 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
+    parser.add_argument('--max_calibration_steps', type=int, default=1000, help='Maximum number of calibration steps')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -49,14 +50,19 @@ def main(args):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
         seq_len = encodings.input_ids.size(1)
-        for begin_loc in tqdm(range(0, args.max_length * 20, args.stride)):
+        calibration_steps = 0
+        for begin_loc in tqdm(range(0, seq_len, args.stride)):
             end_loc = min(begin_loc + args.max_length, seq_len)
             input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
             with torch.no_grad():
                 model(input_ids)
 
+            calibration_steps += 1
+            if calibration_steps >= args.max_calibration_steps:
+                break
+
         # fix quantization parameters
-        for name, module in model.named_modules():
+        for module in model.modules():
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 

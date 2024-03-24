@@ -1053,7 +1053,7 @@ def main(args):
             # accelerator.save_state(output_dir)
 
             train_loss = total_loss.item() / len(train_dataloader)
-            logger.info(f"loss: {train_loss:>8f}\t[{completed_steps:>5}/{args.max_train_steps}]")
+            logger.info(f"loss: {train_loss:>8f}\t[{epoch}/{args.num_train_epochs}]")
             best_metric = save_state(output_dir, best_metric, train_loss)
 
             model.train()
