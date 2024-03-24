@@ -47,7 +47,8 @@ def plot_layer_distribution(model, output_dir):
         plt.xlabel('Exponent Value')
         plt.ylabel('Frequency')
         plt.title(f'{block_name} Tensor Distribution')
-        plt.legend()
+        plt.legend(loc='upper left', bbox_to_anchor=(1, 1), ncol=1)
+        plt.subplots_adjust(right=0.75)
         plt.savefig(os.path.join(output_dir, f"{block_name}.png"))
         plt.close()
 
