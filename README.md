@@ -20,9 +20,8 @@ Ensure you meet the prerequisites above. To install Quantized-Training directly 
 ```bash
 git clone https://github.com/jeffreyyu0602/quantized-training.git
 cd quantized-training
-mkdir logs
-pip install -e .
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Usage
@@ -64,7 +63,7 @@ For users interested in adding support for their own models, please refer to the
 
 To reproduce the Table 1 results in the paper, run
 ```python
-python example/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
+python examples/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
 ```
 The outputs are stored in squad_f1.csv which has the same format as Table 1.
 

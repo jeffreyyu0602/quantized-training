@@ -80,6 +80,8 @@ def run_task(args, run_fn):
     if args.log_file == "":
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         args.log_file = f'logs/{timestamp}.log'
+    if args.log_file is not None:
+        os.makedirs(os.path.dirname(args.log_file), exist_ok=True)
 
     logging.basicConfig(
         filename=args.log_file,
