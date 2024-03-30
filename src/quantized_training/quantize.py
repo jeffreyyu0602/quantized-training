@@ -10,6 +10,7 @@ from torch.nn import Module
 from torch.nn.utils.parametrize import type_before_parametrizations
 
 from accelerate import dispatch_model
+from transformers import PretrainedConfig
 
 from .fake_quantize import FusedAmaxObsFakeQuantize
 from .modules import Softmax, modeling_bert, modeling_mobilebert
@@ -75,42 +76,37 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         error=error_fake_quant if args.quantize_bwd else nn.Identity,
     )
 
-    if (args.quantize_fwd or args.quantize_bwd or args.quantize_weights or
-        args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal):
-        # swap Transformer modules to track float operations
-        if hasattr(model, 'config'):
+    if (args.quantize_fwd or args.quantize_bwd or args.posit_exp or args.posit_exp_shifted
+        or args.posit_reciprocal):
+        if hasattr(model, 'config') and isinstance(model.config, PretrainedConfig):
             propagate_config(model, 'config', model.config)
-        convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
+            convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
+            if hasattr(model, 'hf_device_map'):
+                dispatch_model(model, device_map=model.hf_device_map)
 
-        # re-dispatch model to the correct device
-        if hasattr(model, 'hf_device_map'):
-            dispatch_model(model, device_map=model.hf_device_map)
+    if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
+        replace_softmax(
+            model,
+            posit_exp=args.posit_exp,
+            posit_exp_shifted=args.posit_exp_shifted,
+            posit_reciprocal=args.posit_reciprocal,
+            dtype=torch.bfloat16 if args.bf16 else None,
+        )
 
-        if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
-            replace_softmax(
-                model,
-                posit_exp=args.posit_exp,
-                posit_exp_shifted=args.posit_exp_shifted,
-                posit_reciprocal=args.posit_reciprocal,
-                dtype=torch.bfloat16 if args.bf16 else None,
-            )
+    propagate_config(model, 'qconfig', qconfig)
+    if args.quantize_weights and args.do_train:
+        convert(model, inplace=True)
+    prepare(model, True, args.quantize_fwd, args.quantize_bwd, args.op_fusion)
 
-        # register hooks to quantize activations and errors
-        propagate_config(model, 'qconfig', qconfig)
-        if args.do_train:
-            convert(model, inplace=True)
-        prepare(model, True, args.quantize_fwd, args.quantize_bwd, args.op_fusion)
-
-        if run_fn is not None:
-            run_fn(model)
+    if run_fn is not None:
+        run_fn(model)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    if args.quantize_weights:
-        for name, param in model.named_parameters():
-            if not 'bias' in name:
-                param.data = qconfig.weight(device=param.device)(param.data)
+    for name, param in model.named_parameters():
+        if not 'bias' in name:
+            param.data = qconfig.weight(device=param.device)(param.data)
 
     return model
 
@@ -153,7 +149,8 @@ def _register_module_hook(module, name, hook_name):
 
 def _add_observer_(module, fwd_pre_hook_module_list, bwd_pre_hook_module_list, bwd_residual, op_fusion, prefix):
     def _insert_obs_or_fq(m, name):
-        if op_fusion is not None and any(layer in name for layer in op_fusion):
+        if (op_fusion is not None and any(layer in name for layer in op_fusion)
+            or not (hasattr(m, 'qconfig') and m.qconfig is not None)):
             return
         if isinstance(m, fwd_pre_hook_module_list):
             _register_module_hook(module, name, 'activation_pre_process')
