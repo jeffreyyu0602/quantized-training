@@ -201,16 +201,9 @@ def main():
                 f.write(content)
     else:
         base_cmd = get_base_cmd(args)
-
-        quant_args = [
-            '--quantize_fwd', args.quantized_ops,
-            '--quantize_bwd', args.quantized_ops,
-            '--quantize_weights',
-            '--scaling_bwd',
-            '--amax_history_len', '10',
-        ]
-        posit_args = ['--dtype', 'posit8_1', '--max_fwd', '64', '--max_bwd', '64']
-        fp8_args = ['--dtype', 'FP8', '--max_fwd', '448', '--max_bwd', '57344']
+        quant_args = ['--quantize_fwd', args.quantized_ops, '--quantize_bwd', args.quantized_ops, '--quantize_weights']
+        posit_args = ['--dtype', 'posit8_1', '--scaling_bwd', 'per_tensor', '64', '10']
+        fp8_args = ['--dtype', 'FP8', '--scaling_bwd', 'per_tensor', '57344', '10']
 
         commands = {
             "bf16": base_cmd,

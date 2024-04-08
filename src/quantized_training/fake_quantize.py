@@ -13,6 +13,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+
 def _round_to_mbits(input, mbits):
     lb_mask = 1 << (23 - mbits)
     gb_mask = lb_mask >> 1
@@ -27,6 +28,7 @@ def _round_to_mbits(input, mbits):
     raw_bits[rb] += lb_mask
     raw_bits &= ~(lb_mask - 1)
     return raw_bits.view(torch.float32).to(input.dtype)
+
 
 def dtype_to_fq_fn(dtype: str):
     """Return the quantization function for the given dtype."""
@@ -49,6 +51,7 @@ def dtype_to_fq_fn(dtype: str):
     else:
         raise ValueError(f"Unrecognized dtype: {dtype}")
 
+
 class FakeQuantFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, values, scale=None):
@@ -68,6 +71,7 @@ class FakeQuantFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         return grad_output, None, None
 
+
 class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     r"""Observer module for computing the quantization parameters based on the
     historical amax values.
@@ -84,7 +88,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     def __init__(
         self,
         dtype: str,
-        is_per_tensor: bool = False,
+        qscheme: str = None,
         quant_max: float = None,
         amax_history_len: int = 50,
         observer_enabled: bool = False,
@@ -92,9 +96,11 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     ) -> None:
         super().__init__()
         self.dtype = dtype
-        self.is_per_tensor = is_per_tensor
+        self.qscheme = qscheme
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
+        self.ch_axis = -1
+        self.group_size = 8
         self.name = kwargs.get("name", None)
         device = kwargs.get("device", None)
         factory_kwargs = {'device': device, 'dtype': torch.float}
@@ -115,12 +121,12 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     @torch.jit.export
     def extra_repr(self):
         return (
-            "fake_quant_enabled={}, observer_enabled={}, dtype={}, is_per_tensor={}, "
+            "fake_quant_enabled={}, observer_enabled={}, dtype={}, qscheme={}, "
             "quant_max={}, amax_history_len={}, scale={}".format(
                 self.fake_quant_enabled,
                 self.observer_enabled,
                 self.dtype,
-                self.is_per_tensor,
+                self.qscheme,
                 self.quant_max,
                 self.amax_history_len,
                 self.scale,
@@ -128,28 +134,43 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        if self.is_per_tensor:
+        if self.qscheme is not None:
+            x = X.detach()  # avoid keeping autograd tape
+
             # Remove attention mask when computing scaling factor
-            x_detached = X.detach()
-            min_val = torch.finfo(X.dtype).min
-            attention_mask = torch.where(x_detached == min_val, min_val, 0.0)
+            dtype_min = torch.finfo(X.dtype).min
+            attention_mask = torch.where(x == dtype_min, dtype_min, 0.0)
             X -= attention_mask
 
-            amax = torch.amax(self.amax_history)
-            self.amax_history = torch.roll(self.amax_history, -1, 0)
-            self.amax_history[0] = torch.amax(torch.abs(X.detach())).float()
+            if self.qscheme == "per_tensor":
+                max_val = torch.amax(torch.abs(x))
+            elif self.qscheme == "per_channel":
+                y = torch.flatten(x.transpose(0, self.ch_axis), start_dim=1)
+                max_val = torch.amax(torch.abs(y), dim=1)
+            elif self.qscheme == "per_vector":
+                x_dim = x.size()
+                new_x_shape = x_dim[:-2] + (self.group_size, x_dim[-2] // self.group_size, x_dim[-1])
+                y = x.view(new_x_shape)
+                axis_list = tuple(range(len(new_x_shape)))[:-2]
+                max_val = torch.amax(torch.abs(y), dim=axis_list).repeat_interleave(self.group_size, dim=0)
+            else:
+                raise ValueError(f"Unrecognized qscheme: {self.qscheme}")
 
-            sf = self.quant_max / amax
-            sf = torch.pow(2, torch.floor(torch.log2(sf)))
-            sf = torch.where(amax > 0.0, sf, self.scale)
-            sf = torch.where(torch.isfinite(amax), sf, self.scale)
-            self.scale = sf
+            if self.qscheme in ["per_channel", "per_vector"] and len(self.amax_history.size()) < 2:
+                self.amax_history = torch.zeros((self.amax_history_len, *max_val.shape), device=X.device)
+
+            amax = torch.amax(self.amax_history, dim=0)
+            self.amax_history = torch.roll(self.amax_history, -1, 0)
+            self.amax_history[0] = max_val.float()
+
+            sf = torch.pow(2, torch.floor(torch.log2(self.quant_max / amax)))
+            self.scale = torch.where(torch.isfinite(sf), sf, self.scale)
 
         if self.observer_enabled[0] == 1:
             self._combine_histograms(self.histogram, X)
 
         if self.fake_quant_enabled[0] == 1:
-            if self.is_per_tensor:
+            if self.qscheme is not None:
                 X = FakeQuantFunction.apply(X, self.value_map, self.scale.to(X.dtype))
                 X += attention_mask
             else:

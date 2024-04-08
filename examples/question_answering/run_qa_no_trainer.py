@@ -989,6 +989,12 @@ def main(args):
         # accelerator.load_state(checkpoint_path)
         logger.info(f"Resumed from checkpoint: {checkpoint_path}")
         best_metric = load_state(checkpoint_path)['best_metric']
+        # Reset optimizer state
+        # for group in optimizer.param_groups:
+        #     group['momentum'] = 0.0
+            # for p in group['params']:
+            #     state = optimizer.state[p]
+            #     state['momentum_buffer'] = torch.zeros_like(p)
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(path)[0]
 
