@@ -370,52 +370,37 @@ def main():
 
     # Define our compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
-    # @torch.no_grad()
-    # def compute_metrics(eval_pred):
-    #     logits, labels = eval_pred
-    #     logits_tensor = torch.from_numpy(logits)
-    #     # scale the logits to the size of the label
-    #     logits_tensor = nn.functional.interpolate(
-    #         logits_tensor,
-    #         size=labels.shape[-2:],
-    #         mode="bilinear",
-    #         align_corners=False,
-    #     ).argmax(dim=1)
-
-    #     pred_labels = logits_tensor.detach().cpu().numpy()
-    #     metrics = metric.compute(
-    #         predictions=pred_labels,
-    #         references=labels,
-    #         num_labels=len(id2label),
-    #         ignore_index=0,
-    #         reduce_labels=image_processor.do_reduce_labels,
-    #     )
-    #     # add per category metrics as individual key-value pairs
-    #     per_category_accuracy = metrics.pop("per_category_accuracy").tolist()
-    #     per_category_iou = metrics.pop("per_category_iou").tolist()
-
-    #     metrics.update({f"accuracy_{id2label[i]}": v for i, v in enumerate(per_category_accuracy)})
-    #     metrics.update({f"iou_{id2label[i]}": v for i, v in enumerate(per_category_iou)})
-
-    #     return metrics
-
     @torch.no_grad()
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         logits_tensor = torch.from_numpy(logits)
+        # scale the logits to the size of the label
+        # logits_tensor = nn.functional.interpolate(
+        #     logits_tensor,
+        #     size=labels.shape[-2:],
+        #     mode="bilinear",
+        #     align_corners=False,
+        # ).argmax(dim=1)
+
+        outputs = []
         for i in range(0, len(logits), 100):
-            end = min(i + 100, len(logits))
-            upsampled_logits = nn.functional.interpolate(logits_tensor[i:end], size=labels.shape[-2:], mode="bilinear", align_corners=False)
-            predicted = upsampled_logits.argmax(dim=1)
+            upsampled_logits = nn.functional.interpolate(
+                logits_tensor[i:min(i + 100, len(logits))],
+                size=labels.shape[-2:],
+                mode="bilinear",
+                align_corners=False
+            ).argmax(dim=1)
+            outputs.extend(upsampled_logits)
+        logits_tensor = torch.stack(outputs)
 
-            # note that the metric expects predictions + labels as numpy arrays
-            metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=labels[i:end])
-
-        metrics = metric.compute(num_labels=len(id2label), 
-                                 ignore_index=255,
-                                 reduce_labels=False, # we've already reduced the labels before)
+        pred_labels = logits_tensor.detach().cpu().numpy()
+        metrics = metric._compute(
+            predictions=pred_labels,
+            references=labels,
+            num_labels=len(id2label),
+            ignore_index=255,
+            reduce_labels=False,
         )
-
         # add per category metrics as individual key-value pairs
         per_category_accuracy = metrics.pop("per_category_accuracy").tolist()
         per_category_iou = metrics.pop("per_category_iou").tolist()
@@ -450,11 +435,6 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-
-    # from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
-
-    # image_processor = AutoImageProcessor.from_pretrained("facebook/mask2former-swin-small-ade-semantic")
-    # model = Mask2FormerForUniversalSegmentation.from_pretrained("facebook/mask2former-swin-small-ade-semantic")
 
     # Define torchvision transforms to be applied to each image + target.
     # Not that straightforward in torchvision: https://github.com/pytorch/vision/issues/9
