@@ -29,16 +29,14 @@ def generate_commands():
                         "python", "run_quantized_training.py",
                         "--model", model_id,
                         "--task", task,
-                        "--warmup_ratio", "0.06",
                         "--run_job", config,
                         "--log_file", f"logs/{model_to_filename[model]}-{task}-{config}.log",
                     ]
-                    if model == "google/mobilebert-uncased":
-                        if task == "squad":
-                            cmd += ["--sgd", "--op_fusion", "qa_outputs"]
-                        else:
-                            cmd += ["--op_fusion", "classifier"]
-                    
+                    if (model == "google/mobilebert-uncased" or model == "models/mobilebert_tiny") and task == "squad":
+                        cmd += ["--sgd", "--op_fusion", "qa_outputs"]
+                    if model == "google/mobilebert-uncased" and task != "squad":
+                        cmd += ["--op_fusion", "classifier"]
+
                     for seed in range(3):
                         file.write(" ".join(cmd) + f" --seed {seed}\n")
                 file.write("\n")

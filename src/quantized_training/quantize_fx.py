@@ -1,55 +1,72 @@
-import time
+import re
 
 import torch
+from torch import nn
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
 from torch.export import export
-from torch.fx import GraphModule
+from torch.fx import GraphModule, Node
 from functorch.compile import aot_function
 
-from transformers import AutoModelForSequenceClassification, AutoModelForCausalLM
+from .fake_quantize import FusedAmaxObsFakeQuantize
+from .qconfig import QConfig
+from .quantization_mappings import QUANTIZATION_OPERATORS
 
-from quantized_training import quantize_to_posit, add_training_args, quantize
 
-QUANTIZATION_OPERATORS = {
-    "gemm": [
-        (torch.ops.aten.addmm.default, (1,)),
-        (torch.ops.aten.mm.default, (0,)),
-        torch.ops.aten.bmm.default,
-        torch.ops.aten.convolution.default,
-    ],
-    "activation": [
-        (torch.ops.aten._softmax.default, (0,)),
-        (torch.ops.aten.gelu, (0,)),
-        (torch.ops.aten.relu.default, (0,)),
-    ],
-    "norm": [(torch.ops.aten.native_layer_norm.default, (0,))],
-    "residual": [torch.ops.aten.add.Tensor],
-    "scaling": [torch.ops.aten.div.Tensor],
-}
+def quantize_fx(model, args, example_args, example_kwargs=None):
+    if "," in args.dtype:
+        dtype_fwd, dtype_bwd = args.dtype.split(",")
+    elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
+        dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
+    else:
+        dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
 
-class FakeQuantizeFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        print("FakeQuantizeFunction forward")
-        return quantize_to_posit(x, 8, 1)
+    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_fwd,
+        is_per_tensor=args.scaling_fwd,
+        quant_max=args.max_fwd,
+        amax_history_len=args.amax_history_len,
+        observer_enabled=args.record_histogram
+    )
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        print("FakeQuantizeFunction backward")
-        return grad_output
+    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+        dtype=dtype_bwd,
+        is_per_tensor=args.scaling_bwd,
+        quant_max=args.max_bwd,
+        amax_history_len=args.amax_history_len,
+        observer_enabled=args.record_histogram
+    )
 
-class Observer(torch.ao.quantization.FakeQuantizeBase):
-    def __init__(self, name) -> None:
-        super().__init__()
-        self.name = name
+    qconfig = QConfig(
+        activation=default_fake_quant if args.quantize_fwd else nn.Identity,
+        weight=default_fake_quant if args.quantize_weights else nn.Identity,
+        error=error_fake_quant if args.quantize_bwd else nn.Identity,
+    )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return FakeQuantizeFunction.apply(x)
+    ops = args.quantize_fwd.split(',') if args.quantize_fwd is not None else []
+    patterns = tuple(mod for op in ops for mod in QUANTIZATION_OPERATORS[op.lower()])
+    model = prepare(model, patterns, example_args, example_kwargs, qconfig=qconfig)
 
-    def calculate_qparams(self, **kwargs):
-        raise NotImplementedError
+    if hasattr(args, 'bf16') and args.bf16:
+        model.bfloat16()
 
-def prepare(model: GraphModule, patterns):
+    for name, param in model.named_parameters():
+        if not 'bias' in name:
+            param.data = qconfig.weight(device=param.device)(param.data)
+
+    return model
+
+
+def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=None, qconfig=None):
+    exported_program: torch.export.ExportedProgram = export(
+        module,
+        args=example_args,
+        kwargs=example_kwargs,
+        dynamic_shapes=dynamic_shapes,
+    )
+    model = exported_program.module()
+
+    observed_ops = []
+    unobserved_ops = []
     named_modules = {}
     # Go through all the nodes in the Graph
     for node in model.graph.nodes:
@@ -60,12 +77,17 @@ def prepare(model: GraphModule, patterns):
                 break
 
         if matching_pattern is not None:
+            observed_ops.append(str(node.target))
             new_args = []
             for i, arg in enumerate(node.args):
-                if isinstance(matching_pattern, tuple) and i not in matching_pattern[1]:
+                if (
+                    isinstance(matching_pattern, tuple)
+                    and i not in matching_pattern[1]
+                    or not isinstance(arg, Node)
+                ):
                     new_args.append(arg)
                     continue
-                obs_or_fq = Observer(node.name)
+                obs_or_fq = qconfig.activation(name=node.name)
                 model_device = assert_and_get_unique_device(model)
                 if model_device:
                     obs_or_fq.to(model_device)
@@ -79,61 +101,13 @@ def prepare(model: GraphModule, patterns):
                     new_node = model.graph.call_module(obs_or_fq_name, (arg,))
                 new_args.append(new_node)
             node.args = tuple(new_args)
+        elif node.op == 'call_function':
+            unobserved_ops.append(str(node.target))
+
+    print("=" * 80)
+    print("Observed ops: ")
+    print('\n'.join(list(set(observed_ops))))
+    print("=" * 80)
+    print("Unobserved ops: ")
+    print('\n'.join(list(set(unobserved_ops))))
     return GraphModule(model, model.graph)
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    torch.set_printoptions(precision=10)
-
-    # model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased").train()
-    # example_inputs = (torch.randint(0, 200, (1, 128)),)
-    # example_labels = torch.randint(0, 2, (1,))
-
-    model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Llama-2-7b-hf",
-        attn_implementation="eager"
-    ).train()
-    example_inputs = (torch.randint(0, 200, (1, 1024)),)
-    example_labels = example_inputs[0].clone()
-
-    parser = add_training_args()
-    args = parser.parse_args()
-    quantized_model = quantize(model, args, inplace=False)
-
-    start_time = time.time()
-    orig_output = quantized_model(example_inputs[0])
-    time_taken = time.time() - start_time
-    print(f"Original model inference takes: {time_taken} seconds")
-
-    print("Original output")
-    print(orig_output)
-
-    start_time = time.time()
-    exported_program: torch.export.ExportedProgram = export(
-        model, args=example_inputs, kwargs={'labels': example_labels}
-    )
-    time_taken = time.time() - start_time
-    print(f"torch.export takes: {time_taken} seconds")
-
-    # print(exported_program.graph.print_tabular())
-
-    ops = [op.lower() for op in args.quantize_fwd.split(',')] if args.quantize_fwd is not None else []
-    patterns = tuple(mod for op in ops for mod in QUANTIZATION_OPERATORS[op])
-
-    start_time = time.time()
-    exported_program = prepare(exported_program.module(), patterns)
-    time_taken = time.time() - start_time
-    print(f"prepare takes: {time_taken} seconds")
-
-    print(exported_program.graph.print_tabular())
-
-    start_time = time.time()
-    new_output = exported_program(example_inputs[0], example_labels)
-    time_taken = time.time() - start_time
-    print(f"GraphModule inference takes: {time_taken} seconds")
-
-    print("New output")
-    print(new_output)
-
-    loss = new_output.loss
-    loss.backward()

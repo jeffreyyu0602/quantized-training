@@ -1,5 +1,6 @@
 from typing import Dict, Any, Callable
 
+import torch
 import torch.ao.nn.intrinsic as nni
 import peft.tuners.lora as lora
 from torch import nn
@@ -14,12 +15,14 @@ from .modules import qat, quantizable
 def get_modules(module):
     return [getattr(nn, name) for name in module.__all__]
 
-ACTFNS = [value[0] if isinstance(value, tuple) else value for value in ACT2CLS.values()]
+
+ACTFNS = [value[0] if isinstance(
+    value, tuple) else value for value in ACT2CLS.values()]
 
 QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
     'act': get_modules(nn.modules.activation) + ACTFNS,
     'batchnorm': get_modules(nn.modules.batchnorm),
-    'gemm': get_modules(nn.modules.conv)+ [
+    'gemm': get_modules(nn.modules.conv) + [
         nn.Linear,
         Conv1D,
         quantizable.MatmulFunctional,
@@ -33,7 +36,7 @@ QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
     'scaling': [quantizable.MulFunctional],
 }
 
-DEFAULT_QAT_MODULE_MAPPINGS : Dict[Callable, Any] = {
+DEFAULT_QAT_MODULE_MAPPINGS: Dict[Callable, Any] = {
     nn.Conv2d: qat.Conv2d,
     nn.Conv3d: qat.Conv3d,
     nn.Linear: qat.Linear,
@@ -42,7 +45,7 @@ DEFAULT_QAT_MODULE_MAPPINGS : Dict[Callable, Any] = {
     nni.ConvBn2d: qat.ConvBn2d,
 }
 
-DEFAULT_CUSTOM_MODULE_MAPPINGS : Dict[Callable, Any] = {
+DEFAULT_CUSTOM_MODULE_MAPPINGS: Dict[Callable, Any] = {
     bert.modeling_bert.BertSelfAttention: quantizable.BertSelfAttention,
     bert.modeling_bert.BertSelfOutput: quantizable.BertSelfOutput,
     bert.modeling_bert.BertOutput: quantizable.BertOutput,
@@ -58,4 +61,21 @@ DEFAULT_CUSTOM_MODULE_MAPPINGS : Dict[Callable, Any] = {
     roberta.modeling_roberta.RobertaOutput: quantizable.BertOutput,
     whisper.modeling_whisper.WhisperEncoderLayer: quantizable.WhisperEncoderLayer,
     whisper.modeling_whisper.WhisperDecoderLayer: quantizable.WhisperDecoderLayer,
+}
+
+QUANTIZATION_OPERATORS = {
+    "gemm": [
+        (torch.ops.aten.addmm.default, (1,)),
+        (torch.ops.aten.mm.default, (0,)),
+        torch.ops.aten.bmm.default,
+        (torch.ops.aten.convolution.default, (0,)),
+    ],
+    "activation": [
+        (torch.ops.aten._softmax.default, (0,)),
+        (torch.ops.aten.gelu, (0,)),
+        (torch.ops.aten.relu.default, (0,)),
+    ],
+    "norm": [(torch.ops.aten.native_layer_norm.default, (0,))],
+    "residual": [torch.ops.aten.add.Tensor],
+    "scaling": [torch.ops.aten.div.Tensor],
 }

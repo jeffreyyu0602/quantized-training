@@ -153,6 +153,7 @@ def get_base_cmd(args):
         '--lora_rank', str(args.lora_rank),
         '--lora_alpha', str(args.lora_alpha),
         '--target_modules', args.target_modules,
+        '--warmup_ratio', '0.06',
         '--bf16',
         '--do_train',
     ]
