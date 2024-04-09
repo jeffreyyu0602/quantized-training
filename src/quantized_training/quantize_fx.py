@@ -22,17 +22,17 @@ def quantize_fx(model, args, example_args, example_kwargs=None):
 
     default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
         dtype=dtype_fwd,
-        is_per_tensor=args.scaling_fwd,
-        quant_max=args.max_fwd,
-        amax_history_len=args.amax_history_len,
+        qscheme=args.scaling_fwd[0],
+        quant_max=args.scaling_fwd[1],
+        amax_history_len=args.scaling_fwd[2],
         observer_enabled=args.record_histogram
     )
 
     error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
         dtype=dtype_bwd,
-        is_per_tensor=args.scaling_bwd,
-        quant_max=args.max_bwd,
-        amax_history_len=args.amax_history_len,
+        qscheme=args.scaling_bwd[0],
+        quant_max=args.scaling_bwd[1],
+        amax_history_len=args.scaling_bwd[2],
         observer_enabled=args.record_histogram
     )
 

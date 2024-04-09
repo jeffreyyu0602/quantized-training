@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from torch.library import Library, impl
 from torchvision.transforms import v2
 from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation, AutoImageProcessor, BeitForSemanticSegmentation
@@ -123,8 +124,22 @@ def main(args):
     model = AutoModelForSemanticSegmentation.from_pretrained(args.model_id).to(device)
     image_processor = AutoImageProcessor.from_pretrained(args.model_id)
 
+    m = Library("my_custom_library", "DEF")
+
+    m.define("my_interpolate(Tensor input, SymInt[] size, float[]? scale_factor = None, str mode = 'nearest', bool? align_corners = None, bool? recompute_scale_factor = None, bool antialias = False) -> Tensor")
+
+    orig_interpolate = F.interpolate
+
+    @impl(m, "my_interpolate", "CompositeExplicitAutograd")
+    def my_interpolate(*args, **kwargs):
+        return orig_interpolate(*args, **kwargs)
+
+    F.interpolate = torch.ops.my_custom_library.my_interpolate
+
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = quantize_fx(model, args, example_args)
+
+    # model.graph.print_tabular()
 
     results = []
     gt_seg_maps = []
