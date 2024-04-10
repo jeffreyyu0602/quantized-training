@@ -12,30 +12,6 @@ from transformers.pytorch_utils import Conv1D
 from .modules import qat, quantizable
 
 
-def get_modules(module):
-    return [getattr(nn, name) for name in module.__all__]
-
-
-ACTFNS = [value[0] if isinstance(
-    value, tuple) else value for value in ACT2CLS.values()]
-
-QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
-    'act': get_modules(nn.modules.activation) + ACTFNS,
-    'batchnorm': get_modules(nn.modules.batchnorm),
-    'gemm': get_modules(nn.modules.conv) + [
-        nn.Linear,
-        Conv1D,
-        quantizable.MatmulFunctional,
-    ],
-    'norm': get_modules(nn.modules.normalization) + [
-        llama.modeling_llama.LlamaRMSNorm,
-        mobilebert.modeling_mobilebert.NoNorm,
-    ],
-    'pooling': get_modules(nn.modules.pooling),
-    'residual': [quantizable.AddFunctional],
-    'scaling': [quantizable.MulFunctional],
-}
-
 DEFAULT_QAT_MODULE_MAPPINGS: Dict[Callable, Any] = {
     nn.Conv2d: qat.Conv2d,
     nn.Conv3d: qat.Conv3d,
@@ -45,7 +21,7 @@ DEFAULT_QAT_MODULE_MAPPINGS: Dict[Callable, Any] = {
     nni.ConvBn2d: qat.ConvBn2d,
 }
 
-DEFAULT_CUSTOM_MODULE_MAPPINGS: Dict[Callable, Any] = {
+TRANSFORMER_CUSTOM_MODULE_MAPPINGS: Dict[Callable, Any] = {
     bert.modeling_bert.BertSelfAttention: quantizable.BertSelfAttention,
     bert.modeling_bert.BertSelfOutput: quantizable.BertSelfOutput,
     bert.modeling_bert.BertOutput: quantizable.BertOutput,
@@ -63,6 +39,31 @@ DEFAULT_CUSTOM_MODULE_MAPPINGS: Dict[Callable, Any] = {
     whisper.modeling_whisper.WhisperDecoderLayer: quantizable.WhisperDecoderLayer,
 }
 
+
+def get_modules(module):
+    return [getattr(nn, name) for name in module.__all__]
+
+
+ACTFNS = [value[0] if isinstance(
+    value, tuple) else value for value in ACT2CLS.values()]
+
+QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
+    'gemm': get_modules(nn.modules.conv) + [
+        nn.Linear,
+        Conv1D,
+        quantizable.MatmulFunctional,
+    ],
+    'activation': get_modules(nn.modules.activation) + ACTFNS,
+    'norm': get_modules(nn.modules.normalization) + [
+        llama.modeling_llama.LlamaRMSNorm,
+        mobilebert.modeling_mobilebert.NoNorm,
+    ],
+    'residual': [quantizable.AddFunctional],
+    'scaling': [quantizable.MulFunctional],
+    'batchnorm': get_modules(nn.modules.batchnorm),
+    'pooling': get_modules(nn.modules.pooling),
+}
+
 QUANTIZATION_OPERATORS = {
     "gemm": [
         (torch.ops.aten.addmm.default, (1,)),
@@ -72,7 +73,7 @@ QUANTIZATION_OPERATORS = {
     ],
     "activation": [
         (torch.ops.aten._softmax.default, (0,)),
-        (torch.ops.aten.gelu, (0,)),
+        (torch.ops.aten.gelu.default, (0,)),
         (torch.ops.aten.relu.default, (0,)),
     ],
     "norm": [(torch.ops.aten.native_layer_norm.default, (0,))],

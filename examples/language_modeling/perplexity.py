@@ -113,4 +113,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(args, main)
+    run_task(main, args)

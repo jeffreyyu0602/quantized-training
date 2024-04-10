@@ -75,7 +75,7 @@ def write_bash_script(args, cmd):
         f.write('#!/bin/bash\n')
         f.write('python ' + ' '.join(cmd) + '\n')
 
-def run_task(args, run_fn):
+def run_task(run_fn, args):
     # Set up logging
     if args.log_file == "":
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')

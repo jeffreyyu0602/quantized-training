@@ -14,8 +14,8 @@ models = [
 ]
 
 operations = [
-    'gemm,residual,norm,act,scaling',
-    'gemm,residual,norm,act',
+    'gemm,residual,norm,activation,scaling',
+    'gemm,residual,norm,activation',
     'gemm,residual,norm',
     'gemm,residual',
     'gemm',

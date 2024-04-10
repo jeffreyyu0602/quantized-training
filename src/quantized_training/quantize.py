@@ -18,7 +18,7 @@ from .qconfig import QConfig
 from .quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
-    DEFAULT_CUSTOM_MODULE_MAPPINGS,
+    TRANSFORMER_CUSTOM_MODULE_MAPPINGS,
 )
 
 __all__ = [
@@ -80,7 +80,7 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         or args.posit_reciprocal):
         if hasattr(model, 'config') and isinstance(model.config, PretrainedConfig):
             propagate_config(model, 'config', model.config)
-            convert(model, inplace=True, custom_module_class_mapping=DEFAULT_CUSTOM_MODULE_MAPPINGS)
+            convert(model, inplace=True, custom_module_class_mapping=TRANSFORMER_CUSTOM_MODULE_MAPPINGS)
             if hasattr(model, 'hf_device_map'):
                 dispatch_model(model, device_map=model.hf_device_map)
 

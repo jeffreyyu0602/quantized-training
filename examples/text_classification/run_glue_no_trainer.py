@@ -795,4 +795,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    run_task(parse_args(), main)
+    args = parse_args()
+    run_task(main, args)

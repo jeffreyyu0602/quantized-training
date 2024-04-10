@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import tempfile
 from terminaltables import AsciiTable
 
@@ -7,14 +8,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
-from torch.library import Library, impl
+from huggingface_hub import hf_hub_download
 from torchvision.transforms import v2
 from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation, AutoImageProcessor, BeitForSemanticSegmentation
-from huggingface_hub import hf_hub_download
 
 from metrics import eval_metrics
-from quantized_training import add_training_args, quantize_fx
+from quantized_training import add_training_args, quantize_fx, run_task
+
+logger = logging.getLogger(__name__)
 
 
 class AlignedResize:
@@ -96,8 +98,6 @@ def main(args):
         # example_batch["pixel_values"] = [
         #     beit_pipeline(x).unsqueeze(0) for x in example_batch["image"]
         # ]
-        # print(beit_pipeline(example_batch["image"][0]).unsqueeze(0).shape)
-        # print(image_processor(example_batch["image"][0]).pixel_values[0].shape)
         # example_batch["pixel_values"] = [
         #     image_processor(x, return_tensors="pt").pixel_values for x in example_batch["image"]
         # ]
@@ -118,11 +118,13 @@ def main(args):
         device = torch.device(
             f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     else:
-        print("CUDA is not available.")
+        logger.warn("CUDA is not available.")
         device = torch.device("cpu")
 
     model = AutoModelForSemanticSegmentation.from_pretrained(args.model_id).to(device)
     image_processor = AutoImageProcessor.from_pretrained(args.model_id)
+
+    from torch.library import Library, impl
 
     m = Library("my_custom_library", "DEF")
 
@@ -139,7 +141,7 @@ def main(args):
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = quantize_fx(model, args, example_args)
 
-    # model.graph.print_tabular()
+    model.graph.print_tabular()
 
     results = []
     gt_seg_maps = []
@@ -180,14 +182,14 @@ def main(args):
     summary_table_data.append(['global'] + ret_metrics_mean[2:] +
                               [ret_metrics_mean[1]] +
                               [ret_metrics_mean[0]])
-    print('per class results:')
+    logger.info('per class results:')
     table = AsciiTable(class_table_data)
-    print('\n' + table.table)
-    print('Summary:')
+    logger.info('\n' + table.table)
+    logger.info('Summary:')
     table = AsciiTable(summary_table_data)
-    print('\n' + table.table)
+    logger.info('\n' + table.table)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    run_task(main, args)

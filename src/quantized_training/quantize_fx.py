@@ -1,11 +1,12 @@
 import re
+from typing import Dict
 
 import torch
 from torch import nn
+from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
 from torch.export import export
-from torch.fx import GraphModule, Node
-from functorch.compile import aot_function
+from torch.fx import GraphModule, Graph, Node
 
 from .fake_quantize import FusedAmaxObsFakeQuantize
 from .qconfig import QConfig
@@ -56,6 +57,33 @@ def quantize_fx(model, args, example_args, example_kwargs=None):
     return model
 
 
+def _insert_obs_or_fq(
+    node: Node,
+    obs_or_fq: ObserverOrFakeQuantize,
+    model: torch.nn.Module,
+    named_modules: Dict[str, torch.nn.Module],
+    graph: Graph,
+) -> Node:
+    """
+    Attaches `obs_or_fq` to `model`, and creates a node which calls
+    `obs_or_fq` on the output of `node`.
+
+    obs_or_fq: an instance of Observer or FakeQuantize module
+    """
+    model_device = assert_and_get_unique_device(model)
+    if model_device:
+        obs_or_fq.to(model_device)
+    # add obs_or_fq module as attribute
+    get_new_obs_or_fq_name = get_new_attr_name_with_prefix('activation_post_process_')
+    obs_or_fq_name = get_new_obs_or_fq_name(model)
+    setattr(model, obs_or_fq_name, obs_or_fq)
+    named_modules[obs_or_fq_name] = obs_or_fq
+    with graph.inserting_after(node):
+        new_obs = graph.create_node(
+            'call_module', obs_or_fq_name, (node,), {})
+    return new_obs
+
+
 def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=None, qconfig=None):
     exported_program: torch.export.ExportedProgram = export(
         module,
@@ -87,22 +115,15 @@ def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=
                 ):
                     new_args.append(arg)
                     continue
-                obs_or_fq = qconfig.activation(name=node.name)
-                model_device = assert_and_get_unique_device(model)
-                if model_device:
-                    obs_or_fq.to(model_device)
-                # add obs_or_fq module as attribute
-                prefix = 'activation_pre_process_'
-                get_new_obs_or_fq_name = get_new_attr_name_with_prefix(prefix)
-                obs_or_fq_name = get_new_obs_or_fq_name(model)
-                setattr(model, obs_or_fq_name, obs_or_fq)
-                named_modules[obs_or_fq_name] = obs_or_fq
-                with model.graph.inserting_after(arg):
-                    new_node = model.graph.call_module(obs_or_fq_name, (arg,))
-                new_args.append(new_node)
+                input_obs_or_fq = qconfig.activation(name=node.name)
+                new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
+                new_args.append(new_arg)
             node.args = tuple(new_args)
         elif node.op == 'call_function':
             unobserved_ops.append(str(node.target))
+
+        if len(list(node.users)) > 1:
+            print(f"Node {node.format_node()} has backward residual.")
 
     print("=" * 80)
     print("Observed ops: ")

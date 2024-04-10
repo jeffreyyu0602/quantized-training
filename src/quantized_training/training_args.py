@@ -122,7 +122,7 @@ class QuantizedTrainingArguments:
     quantize_fwd: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Whether to quantize activations. Choose from gemm, act, norm, scaling, and residual.",
+            "help": "Whether to quantize activations. Choose from gemm, activation, norm, scaling, and residual.",
             "nargs": '?',
             "const": 'gemm'
         }
@@ -130,7 +130,7 @@ class QuantizedTrainingArguments:
     quantize_bwd: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Whether to quantize activation gradients. Choose from gemm, act, norm, scaling, and residual.",
+            "help": "Whether to quantize activation gradients. Choose from gemm, activation, norm, scaling, and residual.",
             "nargs": '?',
             "const": 'gemm'
         }
@@ -300,7 +300,7 @@ def add_training_args(parser=None):
         const='gemm',
         default=None,
         help=(
-            "Whether to quantize activations. Choose from gemm, act, norm, scaling, and residual."
+            "Whether to quantize activations. Choose from gemm, activation, norm, scaling, and residual."
         ),
     )
     parser.add_argument(
@@ -309,7 +309,7 @@ def add_training_args(parser=None):
         const='gemm',
         default=None,
         help=(
-            "Whether to quantize activation gradients. Choose from gemm, act, norm, scaling, and residual."
+            "Whether to quantize activation gradients. Choose from gemm, activation, norm, scaling, and residual."
         ),
     )
     parser.add_argument(
