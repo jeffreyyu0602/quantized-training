@@ -130,8 +130,10 @@ def _register_module_hook(module, name, hook_name):
         for i, input in enumerate(inputs):
             if torch.is_tensor(input):
                 if (idx := str(i)) not in module_dict:
-                    obs_cls = getattr(self.qconfig, hook_name.split('_')[0])
-                    module_dict.update({idx: obs_cls(device=input.device, name=name)})
+                    obs_or_fq = getattr(self.qconfig, hook_name.split('_')[0])
+                    module_dict.update({
+                        idx: obs_or_fq(device=input.device, name=name)
+                    })
                 new_inputs.append(module_dict[idx](input))
             else:
                 new_inputs.append(input)

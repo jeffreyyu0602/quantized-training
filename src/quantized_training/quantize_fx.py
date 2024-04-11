@@ -13,7 +13,14 @@ from .qconfig import QConfig
 from .quantization_mappings import QUANTIZATION_OPERATORS
 
 
-def quantize_fx(model, args, example_args, example_kwargs=None):
+def _quantize_weight(float_wt, quant_min=-128, quant_max=127):
+    min_val, max_val = torch.aminmax(float_wt)
+    max_val = torch.max(-min_val, max_val)
+    scale = max_val / (float(quant_max - quant_min) / 2)
+    return torch.clamp(torch.round(float_wt / scale), quant_min, quant_max) * scale
+
+
+def quantize_fx(model, args, example_args, example_kwargs=None, dynamic_shapes=None, run_fn=None):
     if "," in args.dtype:
         dtype_fwd, dtype_bwd = args.dtype.split(",")
     elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
@@ -21,38 +28,70 @@ def quantize_fx(model, args, example_args, example_kwargs=None):
     else:
         dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
 
-    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_fwd,
-        qscheme=args.scaling_fwd[0],
-        quant_max=args.scaling_fwd[1],
-        amax_history_len=args.scaling_fwd[2],
-        observer_enabled=args.record_histogram
-    )
+    if args.dtype in ["qint8", "quint8"]:
+        from torch.ao.quantization import (
+            MovingAverageMinMaxObserver,
+            FusedMovingAvgObsFakeQuantize,
+            default_weight_observer
+        )
+        default_act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(observer=MovingAverageMinMaxObserver,
+                                                                         quant_min=-128,
+                                                                         quant_max=127,
+                                                                         dtype=getattr(torch, args.dtype),
+                                                                         qscheme=torch.per_tensor_affine)
+        qconfig = QConfig(activation=default_act_fake_quant if args.quantize_fwd else nn.Identity,
+                          weight=default_weight_observer if args.quantize_weights else nn.Identity,
+                          error=nn.Identity)
 
-    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_bwd,
-        qscheme=args.scaling_bwd[0],
-        quant_max=args.scaling_bwd[1],
-        amax_history_len=args.scaling_bwd[2],
-        observer_enabled=args.record_histogram
-    )
+        for name, param in model.named_parameters():
+            if not 'bias' in name:
+                param.data = _quantize_weight(param.data, -128, 127)
+    else:
+        default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+            dtype=dtype_fwd,
+            qscheme=args.scaling_fwd[0],
+            quant_max=args.scaling_fwd[1],
+            amax_history_len=args.scaling_fwd[2],
+            observer_enabled=args.record_histogram
+        )
 
-    qconfig = QConfig(
-        activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-        weight=default_fake_quant if args.quantize_weights else nn.Identity,
-        error=error_fake_quant if args.quantize_bwd else nn.Identity,
-    )
+        error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
+            dtype=dtype_bwd,
+            qscheme=args.scaling_bwd[0],
+            quant_max=args.scaling_bwd[1],
+            amax_history_len=args.scaling_bwd[2],
+            observer_enabled=args.record_histogram
+        )
+
+        qconfig = QConfig(
+            activation=default_fake_quant if args.quantize_fwd else nn.Identity,
+            weight=default_fake_quant if args.quantize_weights else nn.Identity,
+            error=error_fake_quant if args.quantize_bwd else nn.Identity,
+        )
+
+        for name, param in model.named_parameters():
+            if not 'bias' in name:
+                param.data = qconfig.weight(device=param.device)(param.data)
 
     ops = args.quantize_fwd.split(',') if args.quantize_fwd is not None else []
-    patterns = tuple(mod for op in ops for mod in QUANTIZATION_OPERATORS[op.lower()])
-    model = prepare(model, patterns, example_args, example_kwargs, qconfig=qconfig)
+    node_list = tuple(node for op in ops for node in QUANTIZATION_OPERATORS[op.lower()])
+    exported_program: torch.export.ExportedProgram = export(
+        model,
+        args=example_args,
+        kwargs=example_kwargs,
+        dynamic_shapes=dynamic_shapes,
+    )
+    model = prepare_pt2e(exported_program.module(), node_list, qconfig=qconfig)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    for name, param in model.named_parameters():
-        if not 'bias' in name:
-            param.data = qconfig.weight(device=param.device)(param.data)
+    if args.quantize_fwd and run_fn is not None:
+        run_fn(model)
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+            module.disable_observer()
 
     return model
 
@@ -74,7 +113,7 @@ def _insert_obs_or_fq(
     if model_device:
         obs_or_fq.to(model_device)
     # add obs_or_fq module as attribute
-    get_new_obs_or_fq_name = get_new_attr_name_with_prefix('activation_post_process_')
+    get_new_obs_or_fq_name = get_new_attr_name_with_prefix('activation_pre_process_')
     obs_or_fq_name = get_new_obs_or_fq_name(model)
     setattr(model, obs_or_fq_name, obs_or_fq)
     named_modules[obs_or_fq_name] = obs_or_fq
@@ -84,22 +123,14 @@ def _insert_obs_or_fq(
     return new_obs
 
 
-def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=None, qconfig=None):
-    exported_program: torch.export.ExportedProgram = export(
-        module,
-        args=example_args,
-        kwargs=example_kwargs,
-        dynamic_shapes=dynamic_shapes,
-    )
-    model = exported_program.module()
-
+def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
     observed_ops = []
     unobserved_ops = []
     named_modules = {}
     # Go through all the nodes in the Graph
     for node in model.graph.nodes:
         matching_pattern = None
-        for pattern in patterns:
+        for pattern in fwd_obs_or_fq_node_list:
             if node.target == (pattern[0] if isinstance(pattern, tuple) else pattern):
                 matching_pattern = pattern
                 break
@@ -115,7 +146,9 @@ def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=
                 ):
                     new_args.append(arg)
                     continue
-                input_obs_or_fq = qconfig.activation(name=node.name)
+                # FIXME: fake quant class does not have name argument
+                # input_obs_or_fq = qconfig.activation(name=node.name)
+                input_obs_or_fq = qconfig.activation()
                 new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
                 new_args.append(new_arg)
             node.args = tuple(new_args)
@@ -132,3 +165,7 @@ def prepare(module, patterns, example_args, example_kwargs=None, dynamic_shapes=
     print("Unobserved ops: ")
     print('\n'.join(list(set(unobserved_ops))))
     return GraphModule(model, model.graph)
+
+
+def convert_pt2e(model):
+    pass

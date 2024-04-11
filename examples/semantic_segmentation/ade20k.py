@@ -11,7 +11,7 @@ from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 from torchvision.transforms import v2
 from tqdm import tqdm
-from transformers import AutoModelForSemanticSegmentation, AutoImageProcessor, BeitForSemanticSegmentation
+from transformers import AutoModelForSemanticSegmentation
 
 from metrics import eval_metrics
 from quantized_training import add_training_args, quantize_fx, run_task
@@ -67,6 +67,7 @@ def parse_args():
     parser.add_argument(
         '--model_id', required=True, help='Fine-tuned model identifier'
     )
+    parser.add_argument('--calibrate_steps', type=int, default=1000)
     add_training_args(parser)
     return parser.parse_args()
 
@@ -83,27 +84,9 @@ def main(args):
                      std=[58.395, 57.12, 57.375]),
     ])
 
-    # beit_pipeline = v2.Compose([
-    #     v2.Resize((640, 640)),
-    #     v2.PILToTensor(),
-    #     v2.ToDtype(torch.float),
-    #     v2.Normalize(mean=[123.675, 116.28, 103.53],
-    #                  std=[58.395, 57.12, 57.375]),
-    # ])
-
     def transform(example_batch):
-        example_batch["pixel_values"] = [
-            test_pipeline(x).unsqueeze(0) for x in example_batch["image"]
-        ]
-        # example_batch["pixel_values"] = [
-        #     beit_pipeline(x).unsqueeze(0) for x in example_batch["image"]
-        # ]
-        # example_batch["pixel_values"] = [
-        #     image_processor(x, return_tensors="pt").pixel_values for x in example_batch["image"]
-        # ]
-        example_batch["label"] = [
-            v2.functional.pil_to_tensor(x) for x in example_batch["annotation"]
-        ]
+        example_batch["pixel_values"] = [test_pipeline(x).unsqueeze(0) for x in example_batch["image"]]
+        example_batch["label"] = [v2.functional.pil_to_tensor(x) for x in example_batch["annotation"]]
         return example_batch
 
     dataset.set_transform(transform)
@@ -122,7 +105,6 @@ def main(args):
         device = torch.device("cpu")
 
     model = AutoModelForSemanticSegmentation.from_pretrained(args.model_id).to(device)
-    image_processor = AutoImageProcessor.from_pretrained(args.model_id)
 
     from torch.library import Library, impl
 
@@ -138,10 +120,20 @@ def main(args):
 
     F.interpolate = torch.ops.my_custom_library.my_interpolate
 
-    example_args = (dataset[0]["pixel_values"].to(device),)
-    model = quantize_fx(model, args, example_args)
+    def calibrate(model):
+        train_dataset = load_dataset("scene_parse_150", split="train")
+        train_dataset.set_transform(transform)
+        for i, data in enumerate(tqdm(train_dataset)):
+            pixel_values = data["pixel_values"].to(device)
+            with torch.no_grad():
+                model(pixel_values)
+            if i == args.calibrate_steps:
+                break
 
-    model.graph.print_tabular()
+    example_args = (dataset[0]["pixel_values"].to(device),)
+    model = quantize_fx(model, args, example_args, run_fn=calibrate)
+
+    # model.graph.print_tabular()
 
     results = []
     gt_seg_maps = []

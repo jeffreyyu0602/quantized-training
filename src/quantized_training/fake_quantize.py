@@ -30,6 +30,13 @@ def _round_to_mbits(input, mbits):
     return raw_bits.view(torch.float32).to(input.dtype)
 
 
+def _clamp_exp(x, min_exp, max_exp):
+    exponent = torch.floor(torch.log2(x))
+    x = torch.where(exponent < min_exp, 0, x)
+    x = torch.where(exponent > max_exp, 2 ** max_exp, x)
+    return x
+
+
 def dtype_to_fq_fn(dtype: str):
     """Return the quantization function for the given dtype."""
     if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
@@ -38,13 +45,12 @@ def dtype_to_fq_fn(dtype: str):
     elif (match := re.fullmatch(r'(?:FP8\.)?(E4M3|E5M2)', dtype, re.IGNORECASE)):
         fp8_format = match.group(1).lower()
         return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
-    elif (match := re.fullmatch(r'clamp_max_(\d+)', dtype)):
-        max_value = float(match.group(1))
-        return lambda x: torch.clamp(x, -max_value, max_value)
-    elif (match := re.fullmatch(r'clamp_min_exp_(-?\d+)', dtype)):
-        min_exp = int(match.group(1))
-        return lambda x: torch.where(torch.log2(torch.abs(x)) < min_exp, 0, x)
-    elif (match := re.fullmatch(r'E8M(\d+)', dtype, re.IGNORECASE)):
+    elif (match := re.fullmatch(r'E(\d+)MX', dtype, re.IGNORECASE)):
+        N = int(match.group(1))
+        bias = 2 ** (N - 1) - 1
+        min_exp, max_exp = 1 - bias, 2 ** N - 2 - bias
+        return lambda x: _clamp_exp(x, min_exp, max_exp)
+    elif (match := re.fullmatch(r'EXM(\d+)', dtype, re.IGNORECASE)):
         mbits = int(match.group(1))
         assert mbits >= 0 and mbits <= 23, "mbits must be between 0 and 23"
         return lambda x: _round_to_mbits(x, mbits)
@@ -179,7 +185,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         return X
 
     def _combine_histograms(self, histogram: torch.Tensor, X: torch.Tensor) -> None:
-        x_detached = X.detach().float()
-        exponent = torch.floor(torch.log2(x_detached[x_detached != 0].abs()))
+        x = X.detach().float()
+        exponent = torch.floor(torch.log2(x[x != 0].abs()))
         combined_histogram = torch.histc(exponent, 254, min=-126, max=127)
         histogram += combined_histogram
