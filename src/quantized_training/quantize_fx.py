@@ -155,8 +155,9 @@ def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
         elif node.op == 'call_function':
             unobserved_ops.append(str(node.target))
 
+        # TODO: handle backward residual
         if len(list(node.users)) > 1:
-            print(f"Node {node.format_node()} has backward residual.")
+            pass
 
     print("=" * 80)
     print("Observed ops: ")
