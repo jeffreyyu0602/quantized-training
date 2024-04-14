@@ -1,13 +1,19 @@
 import argparse
-import os
 import logging
+import os
 
 import torch
 from datasets import load_dataset
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from evaluate import load
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-from quantized_training import add_training_args, quantize, run_task, plot_layer_distribution, plot_layer_range
+from quantized_training import (
+    add_training_args,
+    quantize,
+    run_task,
+    plot_layer_distribution,
+    plot_layer_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +40,9 @@ def main(args):
     quantize(model, args, device=device)
 
     def map_to_pred(batch):
-        input_features = torch.cat([
-            processor(
-                audio["array"], sampling_rate=audio["sampling_rate"], return_tensors="pt"
-            ).input_features for audio in batch["audio"]
-        ], dim=0)
+        array = [audio["array"] for audio in batch["audio"]]
+        sampling_rate = batch["audio"][0]["sampling_rate"]
+        input_features = processor(array, sampling_rate=sampling_rate, return_tensors="pt").input_features
         batch["reference"] = [processor.tokenizer._normalize(text) for text in batch['text']]
 
         if args.bf16:
@@ -46,8 +50,8 @@ def main(args):
 
         with torch.no_grad():
             predicted_ids = model.generate(input_features.to(device))
-        transcription = [processor.decode(ids) for ids in predicted_ids]
-        batch["prediction"] = [processor.tokenizer._normalize(trans) for trans in transcription]
+        transcription = [processor.decode(pi) for pi in predicted_ids]
+        batch["prediction"] = [processor.tokenizer._normalize(t) for t in transcription]
         return batch
 
     result = librispeech_test_clean.map(map_to_pred, batched=True, batch_size=args.batch_size)
@@ -61,10 +65,9 @@ def main(args):
             f.write('\n'.join(result["prediction"]) + '\n')
         with open(os.path.join(args.output_dir, "references.txt"), "w") as f:
             f.write('\n'.join(result["reference"]) + '\n')
-
-    if args.record_histogram and args.output_dir is not None:
-        plot_layer_distribution(model, args.output_dir)
-        plot_layer_range(model, args.output_dir)
+        if args.record_histogram:
+            plot_layer_distribution(model, args.output_dir)
+            plot_layer_range(model, args.output_dir)
 
 if __name__ == "__main__":
     args = parse_args()
