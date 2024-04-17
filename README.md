@@ -75,7 +75,7 @@ Fine-tuning the Transformer models for sequence classification on the GLUE bench
 
 Whisper is a pre-trained model for automatic speech recognition (ASR) and speech translation. To evaluate Whisper models on LibriSpeech test-clean:
 ```python
-python examples/speech_recognition/whisper_eval.py --model_id openai/whisper-tiny [--quantize_weights] [--quantize_fwd <OPERATIONS>]
+python examples/speech_recognition/librispeech_asr.py --model_id openai/whisper-tiny [--quantize_weights] [--quantize_fwd <OPERATIONS>]
 ```
 where model_id could be any Whisper model in the [Whisper Release](https://huggingface.co/collections/openai/whisper-release-6501bba2cf999715fd953013).
 
@@ -85,7 +85,7 @@ The user can perform quantized inference by passing quantize_weights and quantiz
 
 To run language models evaluation on WikiText-103:
 ```python
-python examples/language_modeling/perplexity.py --model_id [--max_length <LENGTH>] [--stride <STRIDE>]
+python examples/language_modeling/wikitext.py --model_id gpt2-xl [--max_length <LENGTH>] [--stride <STRIDE>]
 ```
 
 To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
