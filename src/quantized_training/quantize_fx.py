@@ -4,6 +4,7 @@ from typing import Dict
 import torch
 from torch import nn
 from torch.ao.quantization import ObserverOrFakeQuantize
+import torch.ao.quantization
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
 from torch.export import export
 from torch.fx import GraphModule, Graph, Node
@@ -32,16 +33,19 @@ def quantize_fx(model, args, example_args, example_kwargs=None, dynamic_shapes=N
         from torch.ao.quantization import (
             MovingAverageMinMaxObserver,
             FusedMovingAvgObsFakeQuantize,
-            default_weight_observer
+            default_weight_observer,
         )
-        default_act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(observer=MovingAverageMinMaxObserver,
-                                                                         quant_min=-128,
-                                                                         quant_max=127,
-                                                                         dtype=getattr(torch, args.dtype),
-                                                                         qscheme=torch.per_tensor_affine)
-        qconfig = QConfig(activation=default_act_fake_quant if args.quantize_fwd else nn.Identity,
-                          weight=default_weight_observer if args.quantize_weights else nn.Identity,
-                          error=nn.Identity)
+        default_act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(
+            observer=MovingAverageMinMaxObserver,
+            quant_min=-128,
+            quant_max=127,
+            dtype=getattr(torch, args.dtype),
+            qscheme=torch.per_tensor_affine
+        )
+        qconfig = torch.ao.quantization.QConfig(
+            activation=default_act_fake_quant if args.quantize_fwd else nn.Identity,
+            weight=default_weight_observer if args.quantize_weights else nn.Identity,
+        )
 
         for name, param in model.named_parameters():
             if not 'bias' in name:
@@ -146,8 +150,7 @@ def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
                 ):
                     new_args.append(arg)
                     continue
-                # FIXME: fake quant class does not have name argument
-                # input_obs_or_fq = qconfig.activation(name=node.name)
+                # TODO: fake quant class does not accept name argument
                 input_obs_or_fq = qconfig.activation()
                 new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
                 new_args.append(new_arg)

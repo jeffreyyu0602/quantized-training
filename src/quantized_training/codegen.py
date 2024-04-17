@@ -17,7 +17,18 @@ ANCHOR_OPS = [
 ]
 
 
-class FusedNode(nn.Module):
+class Attribute(nn.Module):
+    def __init__(self, nodes: List[Node]):
+        self.nodes = nodes
+
+    def forward(self, args, kwargs):
+        pass
+
+    def __repr__(self):
+        return f"attr: {' -> '.join([str(node) for node in self.nodes])}"
+
+
+class FusedOperations(nn.Module):
     def __init__(self, nodes: List[Node]):
         super().__init__()
         self.nodes = nodes
@@ -31,7 +42,7 @@ class FusedNode(nn.Module):
         return result
     
     def __repr__(self):
-        return f"FusedNode: {' -> '.join([str(node) for node in self.nodes])}"
+        return f"fused ops: {' -> '.join([str(node) for node in self.nodes])}"
 
 
 class ShapeProp:
@@ -120,12 +131,12 @@ class ShapeProp:
                     visited[node] = None
                     continue
                 new_kwargs = tuple([n.kwargs for n in fused_ops])
-                node_module = FusedNode(fused_ops)
+                fused_mod = FusedOperations(fused_ops)
                 get_new_node_name = get_new_attr_name_with_prefix('fused_node_')
                 node_name = get_new_node_name(self.mod)
-                setattr(self.mod, node_name, node_module)
-                logger.debug(node_name + " " + str(node_module))
-                self.modules[node_name] = node_module
+                setattr(self.mod, node_name, fused_mod)
+                logger.debug(node_name + " " + str(fused_mod))
+                self.modules[node_name] = fused_mod
                 with self.graph.inserting_before(node):
                     new_node = self.graph.create_node(
                         'call_module', node_name, (new_args, new_kwargs), {})
@@ -133,12 +144,10 @@ class ShapeProp:
                 for node in reversed(fused_ops):
                     self.graph.erase_node(node)
                 visited[new_node] = None
-            elif node.op == 'get_attr':
-                visited[node] = None
-                # TODO: fuse get_attr with shape mutation operations
             else:
                 visited[node] = None
-                logger.debug(f"ignore non-anchor node: {node.op} {node.name}")
+                logger.debug(f"skip non-anchor node: {node.op} {node.name}")
+                # TODO: fuse get_attr with shape mutation operations
 
         self.mod = GraphModule(self.mod, self.graph)
 

@@ -98,8 +98,7 @@ def main(args):
     num_classes = len(class_names)
 
     if torch.cuda.is_available():
-        device = torch.device(
-            f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
+        device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     else:
         logger.warn("CUDA is not available.")
         device = torch.device("cpu")
