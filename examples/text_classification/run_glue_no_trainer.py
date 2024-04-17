@@ -332,51 +332,47 @@ def main(args):
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    adapter_config_path = os.path.join(args.model_name_or_path, peft.utils.other.CONFIG_NAME)
-    if os.path.exists(adapter_config_path):
-        peft_config = PeftConfig.from_pretrained(args.model_name_or_path)
-        config = AutoConfig.from_pretrained(peft_config.base_model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-        model = AutoPeftModelForSequenceClassification.from_pretrained(args.model_name_or_path, is_trainable=True)
-    else:
-        config = AutoConfig.from_pretrained(
-            args.model_name_or_path,
-            num_labels=num_labels,
-            finetuning_task=args.task_name,
-            trust_remote_code=args.trust_remote_code,
+    config = AutoConfig.from_pretrained(
+        args.model_name_or_path,
+        num_labels=num_labels,
+        finetuning_task=args.task_name,
+        trust_remote_code=args.trust_remote_code,
+    )
+
+    # Override the default number of hidden layer in the config
+    if args.num_hidden_layers is not None:
+        assert args.num_hidden_layers < config.num_hidden_layers, (
+            "Number of hideen layers must be smaller than the original number of layers, but got"
+            f"{args.num_hidden_layers} >= {args.num_hidden_layers}."
         )
+        config.num_hidden_layers = args.num_hidden_layers
 
-        # Override the default number of layer in the config
-        if args.num_hidden_layers is not None:
-            assert args.num_hidden_layers < config.num_hidden_layers, (
-                "Number of hideen layers must be smaller than the original number of layers, but got"
-                f"{args.num_hidden_layers} >= {args.num_hidden_layers}."
-            )
-            config.num_hidden_layers = args.num_hidden_layers
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
+    )
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_name_or_path,
+        from_tf=bool(".ckpt" in args.model_name_or_path),
+        config=config,
+        ignore_mismatched_sizes=args.ignore_mismatched_sizes,
+        trust_remote_code=args.trust_remote_code,
+    )
+
+    if args.lora_rank > 0:
+        peft_config = LoraConfig(
+            task_type=TaskType.SEQ_CLS,
+            inference_mode=False,
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=0.1,
+            target_modules=args.target_modules,
         )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
-            ignore_mismatched_sizes=args.ignore_mismatched_sizes,
-            trust_remote_code=args.trust_remote_code,
-        )
-
-        if args.lora_rank > 0:
-            peft_config = LoraConfig(
-                task_type=TaskType.SEQ_CLS,
-                inference_mode=False,
-                r=args.lora_rank,
-                lora_alpha=args.lora_alpha,
-                lora_dropout=0.1,
-                target_modules=args.target_modules,
-            )
-            model = get_peft_model(model, peft_config)
-            model.print_trainable_parameters()
+    if args.peft_model_id is not None:
+        model.load_adapter(args.peft_model_id, "default", is_trainable=args.do_train)
 
     # Preprocessing the datasets
     if args.task_name is not None:

@@ -437,65 +437,61 @@ def main(args):
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
 
-    adapter_config_path = os.path.join(args.model_name_or_path, peft.utils.other.CONFIG_NAME)
-    if os.path.exists(adapter_config_path):
-        peft_config = PeftConfig.from_pretrained(args.model_name_or_path)
-        config = AutoConfig.from_pretrained(peft_config.base_model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-        model = AutoPeftModelForQuestionAnswering.from_pretrained(args.model_name_or_path)
+    if args.config_name:
+        config = AutoConfig.from_pretrained(args.config_name, trust_remote_code=args.trust_remote_code)
+    elif args.model_name_or_path:
+        config = AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=args.trust_remote_code)
     else:
-        if args.config_name:
-            config = AutoConfig.from_pretrained(args.config_name, trust_remote_code=args.trust_remote_code)
-        elif args.model_name_or_path:
-            config = AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=args.trust_remote_code)
-        else:
-            config = CONFIG_MAPPING[args.model_type]()
-            logger.warning("You are instantiating a new config instance from scratch.")
+        config = CONFIG_MAPPING[args.model_type]()
+        logger.warning("You are instantiating a new config instance from scratch.")
 
-        # Override the default number of layer in the config
-        if args.num_hidden_layers is not None:
-            assert args.num_hidden_layers < config.num_hidden_layers, (
-                "Number of hideen layers must be smaller than the original number of layers, but got"
-                f"{args.num_hidden_layers} >= {args.num_hidden_layers}."
-            )
-            config.num_hidden_layers = args.num_hidden_layers
+    # Override the default number of hidden layer in the config
+    if args.num_hidden_layers is not None:
+        assert args.num_hidden_layers < config.num_hidden_layers, (
+            "Number of hideen layers must be smaller than the original number of layers, but got"
+            f"{args.num_hidden_layers} >= {args.num_hidden_layers}."
+        )
+        config.num_hidden_layers = args.num_hidden_layers
 
-        if args.tokenizer_name:
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.tokenizer_name, use_fast=True, trust_remote_code=args.trust_remote_code
-            )
-        elif args.model_name_or_path:
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.model_name_or_path, use_fast=True, trust_remote_code=args.trust_remote_code
-            )
-        else:
-            raise ValueError(
-                "You are instantiating a new tokenizer from scratch. This is not supported by this script. "
-                "You can do it from another script, save it, and load it from here, using --tokenizer_name."
-            )
+    if args.tokenizer_name:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.tokenizer_name, use_fast=True, trust_remote_code=args.trust_remote_code
+        )
+    elif args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path, use_fast=True, trust_remote_code=args.trust_remote_code
+        )
+    else:
+        raise ValueError(
+            "You are instantiating a new tokenizer from scratch. This is not supported by this script. "
+            "You can do it from another script, save it, and load it from here, using --tokenizer_name."
+        )
 
-        if args.model_name_or_path:
-            model = AutoModelForQuestionAnswering.from_pretrained(
-                args.model_name_or_path,
-                from_tf=bool(".ckpt" in args.model_name_or_path),
-                config=config,
-                trust_remote_code=args.trust_remote_code,
-            )
-        else:
-            logger.info("Training new model from scratch")
-            model = AutoModelForQuestionAnswering.from_config(config, trust_remote_code=args.trust_remote_code)
+    if args.model_name_or_path:
+        model = AutoModelForQuestionAnswering.from_pretrained(
+            args.model_name_or_path,
+            from_tf=bool(".ckpt" in args.model_name_or_path),
+            config=config,
+            trust_remote_code=args.trust_remote_code,
+        )
+    else:
+        logger.info("Training new model from scratch")
+        model = AutoModelForQuestionAnswering.from_config(config, trust_remote_code=args.trust_remote_code)
 
-        if args.lora_rank > 0:
-            peft_config = LoraConfig(
-                task_type=TaskType.QUESTION_ANS,
-                inference_mode=False,
-                r=args.lora_rank,
-                lora_alpha=args.lora_alpha,
-                lora_dropout=0.1,
-                target_modules=args.target_modules,
-            )
-            model = get_peft_model(model, peft_config)
-            model.print_trainable_parameters()
+    if args.lora_rank > 0:
+        peft_config = LoraConfig(
+            task_type=TaskType.QUESTION_ANS,
+            inference_mode=False,
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=0.1,
+            target_modules=args.target_modules,
+        )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+
+    if args.peft_model_id is not None:
+        model.load_adapter(args.peft_model_id, "default", is_trainable=args.do_train)
 
     # Preprocessing the datasets.
     # Preprocessing is slighlty different for training and evaluation.

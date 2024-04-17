@@ -279,6 +279,11 @@ def add_training_args(parser=None):
         default="query,value",
         help="The modules (for example, attention blocks) to apply the LoRA update matrices."
     )
+    parser.add_argument(
+        "--peft_model_id",
+        default=None,
+        help="Name of path of pre-trained peft adapter."
+    )
     # =============================================================================
     # ================= QUANTIZATION ARGUMENTS SECTION ============================
     # =============================================================================
