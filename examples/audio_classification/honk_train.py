@@ -15,6 +15,7 @@ from datasets import DatasetDict, Dataset, load_dataset
 from scipy.fftpack import dct
 from torch import nn
 from tqdm import tqdm
+from transformers import set_seed
 
 from honk_model import SpeechResModel, configs
 from quantized_training import add_training_args, run_task, quantize_pt2e
@@ -124,11 +125,17 @@ def load_local_dataset(data_dir):
                     raw_datasets[set_name]["file"].append(wav_name)
                     raw_datasets[set_name]["label"].append(label)
 
+    # unknown_files = (raw_datasets["train"]["unknown"] +
+    #                  raw_datasets["validation"]["unknown"] +
+    #                  raw_datasets["test"]["unknown"])
+    # random.shuffle(unknown_files)
     for dataset_dict in raw_datasets.values():
         num_examples = len(dataset_dict["file"])
 
         num_unknown_samples = int(unknown_prob * num_examples)
         dataset_dict["file"] += random.sample(dataset_dict["unknown"], num_unknown_samples)
+        # dataset_dict["file"] += random.sample(unknown_files, num_unknown_samples)
+        # unknown_files = [f for f in unknown_files if f not in dataset_dict["file"]]
         dataset_dict["label"] += [unknown_label] * num_unknown_samples
         del dataset_dict["unknown"]
 
@@ -177,7 +184,7 @@ def _compute_mfcc(data):
 
 
 def prepare_audio(example, train=False):
-    if example["label"] == 10:
+    if example["label"] == label2id["_silence_"]:
         data = np.zeros(input_length, dtype=np.float32)
     elif (data := _file_cache.get(example["file"])) is None:
         data = librosa.core.load(example["file"], sr=16000)[0]
@@ -195,7 +202,7 @@ def prepare_audio(example, train=False):
 
     if train and len(bg_noise_audio) > 0:
         # Adds background noise to each sample with a probability of 0.8 at every epoch
-        if random.random() < noise_prob or example["label"] == 10:
+        if random.random() < noise_prob or example["label"] == label2id["_silence_"]:
             bg_noise = random.choice(bg_noise_audio)
             i = random.randint(0, len(bg_noise) - input_length - 1)
             bg_noise = bg_noise[i:i + input_length]
@@ -220,11 +227,16 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--num_train_epochs', type=int, default=30)
+    parser.add_argument('--seed', type=int, default=None)
     add_training_args(parser)
     return parser.parse_args()
 
 
 def main(args):
+    if args.seed is not None:
+        set_seed(args.seed)
+        torch.backends.cudnn.deterministic=True
+
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     else:
@@ -271,9 +283,6 @@ def main(args):
         with torch.no_grad():
             logits = model(input_values.to(device))
         batch["prediction"] = torch.argmax(logits, dim=-1)
-        # FIXME: model trained using the honk repo has a different label mapping
-        # logits = torch.argmax(logits, dim=-1) - 2
-        # batch["prediction"] = torch.where(logits < 0, logits + 12, logits)
         return batch
 
     metric = evaluate.load("accuracy")
@@ -284,24 +293,15 @@ def main(args):
         model.eval()
         result = raw_dataset["test"].map(map_to_pred, batched=True, batch_size=16)
         eval_metric = metric.compute(predictions=result['prediction'], references=result['label'])
-        logger.info(f"Test accuracy {eval_metric['accuracy']}")
+        logger.info(f"Test accuracy: {eval_metric['accuracy']}")
         return
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     best_acc = 0.0
     best_model = None
     for epoch in range(args.num_train_epochs):
-        # FIXME: randomly select unknown examples to train for superb dataset
-        # unknown_prob = 0.1
-        # train_dataset = raw_dataset["train"].filter(
-        #     lambda example: example["label"] != 11 or random.random() < unknown_prob
-        # )
-        # train_dataloader = torch.utils.data.DataLoader(
-        #     train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn
-        # )
-
         total_loss = 0.0
         model.train()
         for batch in tqdm(train_dataloader):

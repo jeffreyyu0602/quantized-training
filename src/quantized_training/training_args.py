@@ -185,8 +185,7 @@ class QuantizedTrainingArguments:
 # FIXME: this function should be deprecated
 def add_training_args(parser=None):
     if parser is None:
-        parser = argparse.ArgumentParser(
-            description="Run quantized inference or training.")
+        parser = argparse.ArgumentParser(description="Run quantized inference or training.")
     # =============================================================================
     # ================= W&B RELATED ARGUMENTS SECTION =============================
     # =============================================================================
