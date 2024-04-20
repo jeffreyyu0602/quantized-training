@@ -97,13 +97,12 @@ def which_set(filename, validation_percentage, testing_percentage):
 
 
 def load_local_dataset(data_dir):
-    raw_datasets = DatasetDict()
-    raw_datasets["train"] = {"file": [], "label": []}
-    raw_datasets["validation"] = {"file": [], "label": []}
-    raw_datasets["test"] = {"file": [], "label": []}
-
+    raw_datasets = {
+        "train": {"file": [], "label": [], "unknown": []},
+        "validation": {"file": [], "label": [], "unknown": []},
+        "test": {"file": [], "label": [], "unknown": []},
+    }
     bg_noise_files = []
-    unknown_files = []
     unknown_label = label2id["_unknown_"]
     for folder_name in os.listdir(data_dir):
         path_name = os.path.join(data_dir, folder_name)
@@ -117,30 +116,31 @@ def load_local_dataset(data_dir):
             wav_name = os.path.join(path_name, filename)
             if folder_name == "_background_noise_":
                 bg_noise_files.append(wav_name)
-            elif label == unknown_label:
-                unknown_files.append(wav_name)
             else:
                 set_name = which_set(str(wav_name), 10, 10)
-                raw_datasets[set_name]["file"].append(wav_name)
-                raw_datasets[set_name]["label"].append(label)
+                if label == unknown_label:
+                    raw_datasets[set_name]["unknown"].append(wav_name)
+                else:
+                    raw_datasets[set_name]["file"].append(wav_name)
+                    raw_datasets[set_name]["label"].append(label)
 
-    i = 0
-    random.shuffle(unknown_files)
     for dataset_dict in raw_datasets.values():
         num_examples = len(dataset_dict["file"])
 
         num_unknown_samples = int(unknown_prob * num_examples)
-        dataset_dict["file"] += unknown_files[i:i + num_unknown_samples]
+        dataset_dict["file"] += random.sample(dataset_dict["unknown"], num_unknown_samples)
         dataset_dict["label"] += [unknown_label] * num_unknown_samples
-        i += num_unknown_samples
+        del dataset_dict["unknown"]
 
         num_silence_samples = int(silence_prob * num_examples)
         dataset_dict["file"] += ["silence"] * num_silence_samples
         dataset_dict["label"] += [label2id["_silence_"]] * num_silence_samples
 
-    raw_datasets["train"] = Dataset.from_dict(raw_datasets["train"])
-    raw_datasets["validation"] = Dataset.from_dict(raw_datasets["validation"])
-    raw_datasets["test"] = Dataset.from_dict(raw_datasets["test"])
+    raw_datasets = DatasetDict({
+        "train": Dataset.from_dict(raw_datasets["train"]),
+        "validation": Dataset.from_dict(raw_datasets["validation"]),
+        "test": Dataset.from_dict(raw_datasets["test"]),
+    })
 
     # FIXME: avoid using global variables
     global bg_noise_audio
@@ -239,9 +239,7 @@ def main(args):
             validation_files = f.read().splitlines()
         val_dataset = raw_dataset["validation"]
         for file, label in zip(val_dataset["file"], val_dataset["label"]):
-            if label == 10 or label == 11:
-                continue
-            if (filename := file[prefix_len:]) not in validation_files:
+            if label != label2id["_silence_"] and (filename := file[prefix_len:]) not in validation_files:
                 raise ValueError(f"Validation file {filename} not found in validation list")
         print("All validation files found in validation list")
 
@@ -249,9 +247,7 @@ def main(args):
             test_files = f.read().splitlines()
         test_dataset = raw_dataset["test"]
         for file, label in zip(test_dataset["file"], test_dataset["label"]):
-            if label == 10 or label == 11:
-                continue
-            if (filename := file[prefix_len:]) not in test_files:
+            if label != label2id["_silence_"] and (filename := file[prefix_len:]) not in test_files:
                 raise ValueError(f"Test file {filename} not found in testing list")
         print("All test files found in testing list")
     else:
@@ -266,8 +262,8 @@ def main(args):
     model = SpeechResModel(configs["res8-narrow"])
     model.to(device)
 
-    example_args = (raw_dataset["validation"][:8],)
-    dynamic_shapes = {"input_values": {0: torch.export.Dim("batch")}}
+    example_args = (torch.tensor(raw_dataset["validation"][:8]["audio"]).to(device),)
+    dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
     quantize_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
 
     def map_to_pred(batch):
