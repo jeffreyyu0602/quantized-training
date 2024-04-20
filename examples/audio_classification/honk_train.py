@@ -17,7 +17,7 @@ from torch import nn
 from tqdm import tqdm
 
 from honk_model import SpeechResModel, configs
-from quantized_training import add_training_args, run_task, quantize_fx
+from quantized_training import add_training_args, run_task, quantize_pt2e
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +127,14 @@ def load_local_dataset(data_dir):
     i = 0
     random.shuffle(unknown_files)
     for dataset_dict in raw_datasets.values():
-        num_unknown_samples = int(unknown_prob * len(dataset_dict["file"]))
+        num_examples = len(dataset_dict["file"])
+
+        num_unknown_samples = int(unknown_prob * num_examples)
         dataset_dict["file"] += unknown_files[i:i + num_unknown_samples]
         dataset_dict["label"] += [unknown_label] * num_unknown_samples
         i += num_unknown_samples
 
-        num_silence_samples = int(silence_prob * len(dataset_dict["file"]))
+        num_silence_samples = int(silence_prob * num_examples)
         dataset_dict["file"] += ["silence"] * num_silence_samples
         dataset_dict["label"] += [label2id["_silence_"]] * num_silence_samples
 
@@ -175,7 +177,7 @@ def _compute_mfcc(data):
 
 
 def prepare_audio(example, train=False):
-    if example["file"] == "silence":
+    if example["label"] == 10:
         data = np.zeros(input_length, dtype=np.float32)
     elif (data := _file_cache.get(example["file"])) is None:
         data = librosa.core.load(example["file"], sr=16000)[0]
@@ -237,7 +239,7 @@ def main(args):
             validation_files = f.read().splitlines()
         val_dataset = raw_dataset["validation"]
         for file, label in zip(val_dataset["file"], val_dataset["label"]):
-            if label == 11 or file == "silence":
+            if label == 10 or label == 11:
                 continue
             if (filename := file[prefix_len:]) not in validation_files:
                 raise ValueError(f"Validation file {filename} not found in validation list")
@@ -247,7 +249,7 @@ def main(args):
             test_files = f.read().splitlines()
         test_dataset = raw_dataset["test"]
         for file, label in zip(test_dataset["file"], test_dataset["label"]):
-            if label == 11 or file == "silence":
+            if label == 10 or label == 11:
                 continue
             if (filename := file[prefix_len:]) not in test_files:
                 raise ValueError(f"Test file {filename} not found in testing list")
@@ -264,8 +266,9 @@ def main(args):
     model = SpeechResModel(configs["res8-narrow"])
     model.to(device)
 
-    # example_args = (torch.randn(1, 40, 98).to(device),)
-    # quantize_fx(model, args,)
+    example_args = (raw_dataset["validation"][:8],)
+    dynamic_shapes = {"input_values": {0: torch.export.Dim("batch")}}
+    quantize_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
 
     def map_to_pred(batch):
         input_values = torch.tensor(batch["audio"])
@@ -289,7 +292,7 @@ def main(args):
         return
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     best_acc = 0.0
     best_model = None

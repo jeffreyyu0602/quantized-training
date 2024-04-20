@@ -21,7 +21,7 @@ def _quantize_weight(float_wt, quant_min=-128, quant_max=127):
     return torch.clamp(torch.round(float_wt / scale), quant_min, quant_max) * scale
 
 
-def quantize_fx(model, args, example_args, example_kwargs=None, dynamic_shapes=None, run_fn=None):
+def quantize_pt2e(model, args, example_args, example_kwargs=None, dynamic_shapes=None, run_fn=None):
     if "," in args.dtype:
         dtype_fwd, dtype_bwd = args.dtype.split(",")
     elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):

@@ -14,7 +14,7 @@ from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation
 
 from metrics import eval_metrics
-from quantized_training import add_training_args, quantize_fx, run_task
+from quantized_training import add_training_args, quantize_pt2e, run_task
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def main(args):
                 break
 
     example_args = (dataset[0]["pixel_values"].to(device),)
-    model = quantize_fx(model, args, example_args, run_fn=calibrate)
+    model = quantize_pt2e(model, args, example_args, run_fn=calibrate)
 
     # model.graph.print_tabular()
 
