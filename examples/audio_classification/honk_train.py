@@ -18,7 +18,7 @@ from tqdm import tqdm
 from transformers import set_seed
 
 from honk_model import SpeechResModel, configs
-from quantized_training import add_training_args, run_task, quantize_pt2e
+from quantized_training import add_training_args, run_task, quantize_pt2e, quantize
 
 logger = logging.getLogger(__name__)
 
@@ -128,15 +128,21 @@ def load_local_dataset(data_dir):
     # unknown_files = (raw_datasets["train"]["unknown"] +
     #                  raw_datasets["validation"]["unknown"] +
     #                  raw_datasets["test"]["unknown"])
-    # random.shuffle(unknown_files)
     for dataset_dict in raw_datasets.values():
         num_examples = len(dataset_dict["file"])
 
-        num_unknown_samples = int(unknown_prob * num_examples)
-        dataset_dict["file"] += random.sample(dataset_dict["unknown"], num_unknown_samples)
+        # num_unknown_samples = int(unknown_prob * num_examples)
+        # dataset_dict["file"] += random.sample(dataset_dict["unknown"], num_unknown_samples)
+        # dataset_dict["label"] += [unknown_label] * num_unknown_samples
+
+        # choose from the entire unknown set
         # dataset_dict["file"] += random.sample(unknown_files, num_unknown_samples)
         # unknown_files = [f for f in unknown_files if f not in dataset_dict["file"]]
-        dataset_dict["label"] += [unknown_label] * num_unknown_samples
+        # dataset_dict["label"] += [unknown_label] * num_unknown_samples
+
+        # add all unknown samples
+        dataset_dict["file"] += dataset_dict["unknown"]
+        dataset_dict["label"] += [unknown_label] * len(dataset_dict["unknown"])
         del dataset_dict["unknown"]
 
         num_silence_samples = int(silence_prob * num_examples)
@@ -183,8 +189,16 @@ def _compute_mfcc(data):
     return data
 
 
+def _log_melspectrogram(array):
+    S = librosa.feature.melspectrogram(
+        y=array, n_fft=400, hop_length=160, sr=16000, n_mels=40
+    )
+    S_dB = librosa.power_to_db(S, ref=np.max)
+    return S_dB
+
+
 def prepare_audio(example, train=False):
-    if example["label"] == label2id["_silence_"]:
+    if example["file"] == "silence":
         data = np.zeros(input_length, dtype=np.float32)
     elif (data := _file_cache.get(example["file"])) is None:
         data = librosa.core.load(example["file"], sr=16000)[0]
@@ -200,14 +214,16 @@ def prepare_audio(example, train=False):
         # performs a random time-shift of 100 milliseconds before transforming the audio into MFCCs
         data = _timeshift_audio(data)
 
-    if train and len(bg_noise_audio) > 0:
+    if len(bg_noise_audio) > 0:
         # Adds background noise to each sample with a probability of 0.8 at every epoch
-        if random.random() < noise_prob or example["label"] == label2id["_silence_"]:
+        # TODO: the original code add different randome noise to silence samples for evaluation as well
+        if (train and random.random() < noise_prob) or example["file"] == "silence":
             bg_noise = random.choice(bg_noise_audio)
             i = random.randint(0, len(bg_noise) - input_length - 1)
             bg_noise = bg_noise[i:i + input_length]
             data = np.clip(random.random() * 0.1 * bg_noise + data, -1, 1)
-    example["audio"] = _compute_mfcc(data).reshape(-1, 40)
+    # example["audio"] = _compute_mfcc(data).reshape(-1, 40)
+    example["audio"] = _log_melspectrogram(data)
     return example
 
 
@@ -221,13 +237,14 @@ def collate_fn(data):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process model parameters.")
-    parser.add_argument('--model_id', default=None, help='Fine-tuned model identifier.')
+    parser.add_argument('--model_id', default=None, help='Path to fine-tuned model.')
     parser.add_argument('--output_file', default="res8-narrow.pt", help='Path to save the best model.')
     parser.add_argument('--data_dir', default=None, help='Path to the Google speech command dataset.')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--num_train_epochs', type=int, default=30)
     parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--qmode', default='qat', help='Quantization mode.')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -245,38 +262,29 @@ def main(args):
 
     if args.data_dir is not None:
         raw_dataset, _ = load_local_dataset(args.data_dir)
-
-        prefix_len = len("data/speech_commands/")
-        with open(os.path.join(args.data_dir, "validation_list.txt")) as f:
-            validation_files = f.read().splitlines()
-        val_dataset = raw_dataset["validation"]
-        for file, label in zip(val_dataset["file"], val_dataset["label"]):
-            if label != label2id["_silence_"] and (filename := file[prefix_len:]) not in validation_files:
-                raise ValueError(f"Validation file {filename} not found in validation list")
-        print("All validation files found in validation list")
-
-        with open(os.path.join(args.data_dir, "testing_list.txt")) as f:
-            test_files = f.read().splitlines()
-        test_dataset = raw_dataset["test"]
-        for file, label in zip(test_dataset["file"], test_dataset["label"]):
-            if label != label2id["_silence_"] and (filename := file[prefix_len:]) not in test_files:
-                raise ValueError(f"Test file {filename} not found in testing list")
-        print("All test files found in testing list")
     else:
         raw_dataset = load_dataset("superb", "ks")
 
-    raw_dataset["validation"] = raw_dataset["validation"].map(prepare_audio)
-    raw_dataset["test"] = raw_dataset["test"].map(prepare_audio)
     train_dataloader = torch.utils.data.DataLoader(
         raw_dataset["train"], batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn
     )
+    if args.do_train:
+        raw_dataset["validation"] = raw_dataset["validation"].map(prepare_audio)
+    raw_dataset["test"] = raw_dataset["test"].map(prepare_audio)
 
     model = SpeechResModel(configs["res8-narrow"])
     model.to(device)
 
-    example_args = (torch.tensor(raw_dataset["validation"][:8]["audio"]).to(device),)
-    dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
-    quantize_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
+    if args.qmode == "qat":
+        modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
+        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
+
+        def run_fn(model):
+            batch = next(iter(train_dataloader))
+            with torch.no_grad():
+                model(batch["input_values"].to(device))
+
+        quantize(model, args, run_fn)
 
     def map_to_pred(batch):
         input_values = torch.tensor(batch["audio"])
@@ -289,18 +297,41 @@ def main(args):
 
     if not args.do_train:
         if args.model_id is not None:
-            model.load(args.model_id)
+            model.load_state_dict(torch.load(args.model_id))
+
+        if args.qmode == "ptq":
+            model.eval()
+            modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
+            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
+
+            def calibrate(model):
+                for step, batch in enumerate(tqdm(train_dataloader)):
+                    with torch.no_grad():
+                        model(batch["input_values"].to(device))
+
+                for module in model.modules():
+                    if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                        module.disable_observer()
+
+            example_args = (torch.tensor(raw_dataset["test"][:128]["audio"]).to(device),)
+            dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
+            model = quantize_pt2e(model, args, example_args,
+                                  dynamic_shapes=dynamic_shapes, run_fn=calibrate)
+
         model.eval()
-        result = raw_dataset["test"].map(map_to_pred, batched=True, batch_size=16)
+        result = raw_dataset["test"].map(
+            map_to_pred, batched=True, batch_size=args.batch_size, desc="Test"
+        )
         eval_metric = metric.compute(predictions=result['prediction'], references=result['label'])
         logger.info(f"Test accuracy: {eval_metric['accuracy']}")
         return
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_train_epochs, eta_min=0.0001)
 
     best_acc = 0.0
-    best_model = None
+    best_state = None
     for epoch in range(args.num_train_epochs):
         total_loss = 0.0
         model.train()
@@ -308,7 +339,7 @@ def main(args):
             batch = {k: v.to(device) for k, v in batch.items()}
             output = model(batch["input_values"])
             loss = nn.CrossEntropyLoss()(output, batch["labels"])
-            total_loss += loss.item()
+            total_loss += loss.detach().float()
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -319,19 +350,23 @@ def main(args):
         logger.info(f"Epoch {epoch}: Loss {total_loss}")
 
         model.eval()
-        result = raw_dataset["validation"].map(map_to_pred, batched=True, batch_size=16)
+        result = raw_dataset["validation"].map(
+            map_to_pred, batched=True, batch_size=args.batch_size, desc="Validate"
+        )
         eval_metric = metric.compute(predictions=result['prediction'], references=result['label'])
         logger.info(f"Epoch {epoch}: Validation accuracy {eval_metric['accuracy']}")
 
         if eval_metric['accuracy'] > best_acc:
             best_acc = eval_metric['accuracy']
-            best_model = copy.deepcopy(model)
+            best_state = copy.deepcopy(model.state_dict())
             if args.output_file is not None:
-                model.save(args.output_file)
+                torch.save(model.state_dict(), args.output_file)
 
-    model.load_state_dict(best_model.state_dict())
+    model.load_state_dict(best_state)
     model.eval()
-    result = raw_dataset["test"].map(map_to_pred, batched=True, batch_size=16)
+    result = raw_dataset["test"].map(
+        map_to_pred, batched=True, batch_size=args.batch_size, desc="Test"
+    )
     eval_metric = metric.compute(predictions=result['prediction'], references=result['label'])
     logger.info(f"Final test accuracy: {eval_metric['accuracy']}")
 

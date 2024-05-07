@@ -14,9 +14,9 @@ models = [
 ]
 
 operations = [
-    'gemm,residual,norm,activation,scaling',
-    'gemm,residual,norm,activation',
-    'gemm,residual,norm',
+    'gemm,residual,layernorm,activation,scaling',
+    'gemm,residual,layernorm,activation',
+    'gemm,residual,layernorm',
     'gemm,residual',
     'gemm',
 ]
@@ -36,7 +36,7 @@ def run_evaluation(model, ops, dtype, log_file, gpu):
         '--bf16',
         '--dtype', dtype,
         '--quantize_fwd', ops,
-        '--quantize_weights',
+        '--quantize_weight',
         '--log_file', log_file,
     ]
     if gpu is not None:

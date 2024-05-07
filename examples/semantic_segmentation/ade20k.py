@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument(
         '--model_id', required=True, help='Fine-tuned model identifier'
     )
-    parser.add_argument('--calibrate_steps', type=int, default=1000)
+    parser.add_argument('--max_calibrate_steps', type=int, default=1000)
     add_training_args(parser)
     return parser.parse_args()
 
@@ -126,7 +126,7 @@ def main(args):
             pixel_values = data["pixel_values"].to(device)
             with torch.no_grad():
                 model(pixel_values)
-            if i == args.calibrate_steps:
+            if i == args.max_calibrate_steps:
                 break
 
     example_args = (dataset[0]["pixel_values"].to(device),)

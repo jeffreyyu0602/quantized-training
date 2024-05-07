@@ -25,12 +25,8 @@ from torch.utils.data import Subset
 
 from quantized_training import (
     add_training_args,
-    convert,
-    get_fused_modules,
-    get_default_qconfig,
-    prepare,
-    propagate_config,
-    quantize_to_posit
+    quantize_to_posit,
+    quantize,
 )
 
 model_names = sorted(name for name in models.__dict__
@@ -90,11 +86,11 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
 
-parser.add_argument('--qat', action="store_true", help="Whether to perform quantization aware training.")
-parser.add_argument('--replace_maxpool', action="store_true", help="Whether to replace ResNet maxpool with 2x2 maxpool.")
-parser.add_argument('--save_dataset', action="store_true", help="Whether to save validation data.")
+parser.add_argument('--fuse_conv_bn', action="store_true", help="Whether to fuse batch norm.")
+parser.add_argument('--use_maxpool2x2', action="store_true", help="Whether to use 2x2 maxpool.")
+parser.add_argument('--save_val_dataset', action="store_true", help="Whether to save validation data.")
 parser.add_argument('--output_dir', default=None, help="Directory to save model checkpoints.")
-parser.add_argument('--model_eval', default=None, help="Model for evaluation.")
+parser.add_argument('--model_id', default=None, help="Model for evaluation.")
 parser.add_argument('--chunk_size', default=50000, help="Number of samples processed per epoch")
 add_training_args(parser)
 
@@ -213,15 +209,15 @@ def main_worker(gpu, ngpus_per_node, args):
 # replace maxpool, fuse batch norm, and prepare qat
 # =============================================================================
 
-    def replace_pattern(module, pattern, fn, inplace=True):
+    def replace_module(module, mod_cls, fn, inplace=True):
         if not inplace:
             module = copy.deepcopy(module)
 
         for name, mod in module.named_children():
-            replace_pattern(mod, pattern, fn)
-            if isinstance(mod, pattern):
+            if isinstance(mod, mod_cls):
                 module._modules[name] = fn(mod)
-
+            else:
+                replace_module(mod, mod_cls, fn)
         return module
 
     def _to_float(mod):
@@ -231,29 +227,20 @@ def main_worker(gpu, ngpus_per_node, args):
         return new_mod
 
     def get_fused_model(model):
-        model_fused = replace_pattern(model, nni._FusedModule, _to_float, inplace=False)
+        model_fused = replace_module(model, nni._FusedModule, _to_float, inplace=False)
         for name, param in model_fused.named_parameters():
             param.data = quantize_to_posit(param.data, 16 if 'bias' in name else 8, 1)
         return model_fused
 
-    def _replace_maxpool(_m):
-        return nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
+    if args.use_maxpool2x2:
+        replace_module(model, nn.MaxPool2d, lambda _: nn.MaxPool2d(kernel_size=2, stride=2, padding=0))
 
-    if args.replace_maxpool:
-        replace_pattern(model, nn.MaxPool2d, _replace_maxpool)
+    if args.fuse_conv_bn:
+        # FIXME:
+        modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
+        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
-    if args.qat:
-        modules = get_fused_modules(model, [nn.Conv2d, nn.BatchNorm2d])
-        print(f"Fusing modules: {modules}")
-        model = torch.ao.quantization.fuse_modules_qat(model, modules)
-
-        qconfig = get_default_qconfig(dtype=args.dtype, activation=True, weight=True)
-        propagate_config(model, 'qconfig', qconfig)
-        convert(model, inplace=True)
-        prepare(model, quantize_fwd="gemm", device=device)
-
-    if args.bf16:
-        model.bfloat16()
+    quantize(model, args)
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
@@ -325,7 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
     indices = random.sample(range(len(val_dataset)), 1000)
     val_dataset = Subset(val_dataset, indices=indices)
 
-    if args.save_dataset:
+    if args.save_val_dataset:
         dest_dirs = {}
         labels = []
         for idx in indices:
@@ -360,9 +347,9 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
     if args.evaluate:
-        model_eval = get_fused_model(model) if args.qat else model
-        if args.model_eval:
-            checkpoint = torch.load(args.model_eval, map_location=device)
+        model_eval = get_fused_model(model) if args.fuse_conv_bn else model
+        if args.model_id:
+            checkpoint = torch.load(args.model_id, map_location=device)
             model_eval.load_state_dict(checkpoint['state_dict'])
             print(f"best acc1: {checkpoint['best_acc1']}")
 
@@ -384,7 +371,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        model_eval = get_fused_model(model) if args.qat else model
+        model_eval = get_fused_model(model) if args.fuse_conv_bn else model
         acc1 = validate(val_loader, model_eval, criterion, args)
 
         scheduler.step()

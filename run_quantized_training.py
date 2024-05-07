@@ -57,19 +57,19 @@ LORA_CONFIG = {
         "lora_rank": 8,
         "lora_alpha": 8,
         "target_modules": "query,value",
-        "quantized_ops": "gemm,residual,norm,act"
+        "quantized_ops": "gemm,residual,layernorm,activation"
     },
     "roberta-large": {
         "lora_rank": 8,
         "lora_alpha": 16,
         "target_modules": "query,value",
-        "quantized_ops": "gemm,residual,norm,act"
+        "quantized_ops": "gemm,residual,layernorm,activation"
     },
     "roberta-large-mnli": {
         "lora_rank": 8,
         "lora_alpha": 16,
         "target_modules": "query,value",
-        "quantized_ops": "gemm,residual,norm,act"
+        "quantized_ops": "gemm,residual,layernorm,activation"
     },
 }
 
@@ -202,7 +202,7 @@ def main():
                 f.write(content)
     else:
         base_cmd = get_base_cmd(args)
-        quant_args = ['--quantize_fwd', args.quantized_ops, '--quantize_bwd', args.quantized_ops, '--quantize_weights']
+        quant_args = ['--quantize_fwd', args.quantized_ops, '--quantize_bwd', args.quantized_ops, '--quantize_weight']
         posit_args = ['--dtype', 'posit8_1', '--scaling_bwd', 'per_tensor', '64', '10']
         fp8_args = ['--dtype', 'FP8', '--scaling_bwd', 'per_tensor', '57344', '10']
 
