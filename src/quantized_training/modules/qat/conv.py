@@ -39,9 +39,15 @@ class _ConvNd(nn.modules.conv._ConvNd):
         assert qconfig, 'qconfig must be provided for QAT module'
         self.qconfig = qconfig
         self.weight_fake_quant = qconfig.weight(factory_kwargs=factory_kwargs)
+        self.qweight = self.weight_fake_quant(self.weight)
+        def update_qweight(module, incompatible_keys):
+            module.qweight = module.weight_fake_quant(module.weight)
+        self.register_load_state_dict_post_hook(update_qweight)
 
     def forward(self, input):
-        return self._conv_forward(input, self.weight_fake_quant(self.weight), self.bias)
+        if self.training:
+            self.qweight = self.weight_fake_quant(self.weight)
+        return self._conv_forward(input, self.qweight, self.bias)
 
     @staticmethod
     def from_float(cls, mod):
