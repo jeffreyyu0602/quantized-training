@@ -5,14 +5,10 @@ import logging
 import os
 import sys
 from pprint import pformat
-from typing import List
 
 import wandb
-from torch import nn
-from torch.nn.utils.parametrize import type_before_parametrizations
 
 __all__ = [
-    "get_fused_modules",
     "run_task",
 ]
 
@@ -138,23 +134,3 @@ def run_task(run_fn, args):
             )
         logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
         run_fn(args)
-
-def get_fused_modules(model: nn.Module, modules_to_fuse: List[nn.Module]):
-    module_list = []
-    fused_module_list = []
-    index = 0
-
-    for name, mod in model.named_modules():
-        if type_before_parametrizations(mod) != modules_to_fuse[index]:
-            module_list = []
-            index = 0
-
-        if type_before_parametrizations(mod) == modules_to_fuse[index]:
-            module_list.append(name)
-            index += 1
-            if index == len(modules_to_fuse):
-                fused_module_list.append(module_list)
-                module_list = []
-                index = 0
-
-    return fused_module_list

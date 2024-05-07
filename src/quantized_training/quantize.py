@@ -18,7 +18,7 @@ from .qconfig import QConfig
 from .quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
-    TRANSFORMER_CUSTOM_MODULE_MAPPINGS,
+    HF_TRANSFORMER_MODULE_MAPPINGS,
 )
 
 __all__ = [
@@ -42,7 +42,7 @@ def propagate_config(module, name, qconfig):
     for child in module.children():
         propagate_config(child, name, qconfig)
 
-def quantize(model, args, run_fn=None, device=None, inplace=True):
+def quantize(model, args, run_fn=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
@@ -72,17 +72,21 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
     # TODO: weights need separate quantization parameters
     qconfig = QConfig(
         activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-        weight=default_fake_quant if args.quantize_weights else nn.Identity,
+        weight=default_fake_quant if args.quantize_weight else nn.Identity,
         error=error_fake_quant if args.quantize_bwd else nn.Identity,
     )
 
-    if (args.quantize_fwd or args.quantize_bwd or args.posit_exp or args.posit_exp_shifted
-        or args.posit_reciprocal):
-        if hasattr(model, 'config') and isinstance(model.config, PretrainedConfig):
-            propagate_config(model, 'config', model.config)
-            convert(model, inplace=True, custom_module_class_mapping=TRANSFORMER_CUSTOM_MODULE_MAPPINGS)
-            if hasattr(model, 'hf_device_map'):
-                dispatch_model(model, device_map=model.hf_device_map)
+    if (
+        (args.quantize_fwd or args.quantize_bwd or args.posit_exp or
+            args.posit_exp_shifted or args.posit_reciprocal) and
+        hasattr(model, 'config') and
+        isinstance(model.config, PretrainedConfig)
+    ):
+        propagate_config(model, 'config', model.config)
+        convert(model, inplace=True,
+                custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS)
+        if hasattr(model, 'hf_device_map'):
+            dispatch_model(model, device_map=model.hf_device_map)
 
     if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
         replace_softmax(
@@ -94,24 +98,20 @@ def quantize(model, args, run_fn=None, device=None, inplace=True):
         )
 
     propagate_config(model, 'qconfig', qconfig)
-    if args.quantize_weights and args.do_train:
-        convert(model, inplace=True)
+    convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     prepare(model, True, args.quantize_fwd, args.quantize_bwd, args.op_fusion)
 
     if run_fn is not None:
         run_fn(model)
 
+    # FIXME: use a cofig dict instead of argparse Namespace
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    for name, param in model.named_parameters():
-        if not 'bias' in name:
-            param.data = qconfig.weight(device=param.device)(param.data)
-
     return model
 
-def _parse_quantized_ops(ops):
-    ops = {op.lower() for op in ops.split(',')} if ops is not None else set()
+def _parse_ops(op_str):
+    ops = {op.lower() for op in op_str.split(',')} if op_str is not None else set()
     valid_ops = set(QCONFIG_PROPAGATE_MODULE_CLASS_LIST.keys())
     invalid_ops = ops - valid_ops
     assert not invalid_ops, (
@@ -128,15 +128,16 @@ def _register_module_hook(module, name, hook_name):
         new_inputs = []
         module_dict = getattr(self, hook_name)
         for i, input in enumerate(inputs):
-            if torch.is_tensor(input):
-                if (idx := str(i)) not in module_dict:
-                    obs_or_fq = getattr(self.qconfig, hook_name.split('_')[0])
-                    module_dict.update({
-                        idx: obs_or_fq(device=input.device, name=name)
-                    })
-                new_inputs.append(module_dict[idx](input))
-            else:
+            if not torch.is_tensor(input):
                 new_inputs.append(input)
+                continue
+
+            if (idx := str(i)) not in module_dict:
+                obs_or_fq = getattr(self.qconfig, hook_name.split('_')[0])
+                module_dict.update({
+                    idx: obs_or_fq(device=input.device, name=name)
+                })
+            new_inputs.append(module_dict[idx](input))
         return tuple(new_inputs)
 
     module.add_module(hook_name, nn.ModuleDict())
@@ -149,29 +150,34 @@ def _register_module_hook(module, name, hook_name):
             return _observer_pre_hook(self, grad_inputs)
         module.register_full_backward_hook(_observer_backward_hook)
 
-def _add_observer_(module, fwd_pre_hook_module_list, bwd_pre_hook_module_list, bwd_residual, op_fusion, prefix):
+def _add_observer_(
+        module, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
+        bwd_residual, op_fusion, prefix):
     def _insert_obs_or_fq(m, name):
         if (op_fusion is not None and any(layer in name for layer in op_fusion)
             or not (hasattr(m, 'qconfig') and m.qconfig is not None)):
             return
         if isinstance(m, fwd_pre_hook_module_list):
-            _register_module_hook(module, name, 'activation_pre_process')
+            _register_module_hook(m, name, 'activation_pre_process')
         if isinstance(m, bwd_pre_hook_module_list):
-            _register_module_hook(module, name, 'error_pre_process')
+            _register_module_hook(m, name, 'error_pre_process')
         is_residual = (
             isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
             or (isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
                 and any(layer in name for layer in RESIDUAL_LAYERS))
         )
         if bwd_residual and is_residual:
-            _register_module_hook(module, name, 'error_post_process')
+            _register_module_hook(m, name, 'error_post_process')
 
-    for name, child in module.named_children():
+    named_modules = dict(module.named_children())
+    for name, child in named_modules.items():
         module_prefix = prefix + '.' + name if prefix else name
         if isinstance(child, nni._FusedModule):
             _insert_obs_or_fq(child, module_prefix)
         else:
-            _add_observer_(child, fwd_pre_hook_module_list, bwd_pre_hook_module_list, bwd_residual, op_fusion, module_prefix)
+            _add_observer_(
+                child, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
+                bwd_residual, op_fusion, module_prefix)
     _insert_obs_or_fq(module, prefix)
 
 def prepare(
@@ -185,13 +191,8 @@ def prepare(
         model = copy.deepcopy(model)
 
     _add_observer_(
-        model,
-        fwd_pre_hook_module_list=_parse_quantized_ops(quantize_fwd),
-        bwd_pre_hook_module_list=_parse_quantized_ops(quantize_bwd),
-        bwd_residual=quantize_bwd is not None and "residual" in quantize_bwd,
-        op_fusion=op_fusion,
-        prefix='',
-    )
+        model, _parse_ops(quantize_fwd), _parse_ops(quantize_bwd),
+        quantize_bwd is not None and "residual" in quantize_bwd, op_fusion, '')
     return model
 
 def convert(module, mapping=None, inplace=False, custom_module_class_mapping=None):

@@ -1,4 +1,6 @@
 import argparse
+import collections
+import json
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
 
@@ -8,6 +10,51 @@ __all__ = [
     "QuantizedTrainingArguments",
     "add_training_args",
 ]
+
+
+class QuantSpecs(collections.UserDict):
+    """
+    Class for handling quantization parameters.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """
+        Constructor inheriting from UserDict/dict.
+        Args:
+            *args:        Passing a dict will initialize using those entries.
+        """
+        super(QuantSpecs, self).__init__(*args, **kwargs)
+
+        defaults = {
+            "dtype": None,
+            "quantize_weight": False,
+            "quantize_fwd": None,
+            "quantize_bwd": None,
+            "scaling_fwd": (None, None, 0),  # quantization granularity, quant_max, amax_history_len
+            "scaling_bwd": (None, None, 0),
+            "op_fusion": None,
+            "posit_exp": False,
+            "posit_exp_shifted": False,
+            "posit_reciprocal": False,
+            "record_histogram": False
+        }
+
+        for k in defaults:
+            if k not in self.data.keys():
+                self.data[k] = defaults[k]
+
+        for k in self.data.keys():
+            assert(k in self.help_strings.keys())
+
+    def safe_json(self, indent=None):
+        """
+        Return json of parameters.
+        """
+        default = lambda o: f"<<non-serializable: {type(o).__qualname__}>>"
+        return json.dumps(self.data, indent=indent, default=default)
+
+    def __str__(self):
+        return self.safe_json(indent=4)
 
 
 class DelayedScaling(argparse.Action):
@@ -115,7 +162,7 @@ class QuantizedTrainingArguments:
             "help": "Quantization data type to use. Choose between posit(nbits)_(es), FP8_(E4M3|E5M2), and FP8(.MIXED)."
         }
     )
-    quantize_weights: bool = field(
+    quantize_weight: bool = field(
         default=False,
         metadata={"help": "Whether to quantize model weights."}
     )
@@ -294,7 +341,7 @@ def add_training_args(parser=None):
         ),
     )
     parser.add_argument(
-        "--quantize_weights",
+        "--quantize_weight",
         action="store_true",
         help="Whether to quantize model weights.",
     )

@@ -4,7 +4,6 @@ from typing import Dict
 import torch
 from torch import nn
 from torch.ao.quantization import ObserverOrFakeQuantize
-import torch.ao.quantization
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
 from torch.export import export
 from torch.fx import GraphModule, Graph, Node
@@ -22,35 +21,47 @@ def _quantize_weight(float_wt, quant_min=-128, quant_max=127):
 
 
 def quantize_pt2e(model, args, example_args, example_kwargs=None, dynamic_shapes=None, run_fn=None):
-    if "," in args.dtype:
-        dtype_fwd, dtype_bwd = args.dtype.split(",")
-    elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
-        dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
-    else:
-        dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
-
     if args.dtype in ["qint8", "quint8"]:
         from torch.ao.quantization import (
             MovingAverageMinMaxObserver,
+            MovingAveragePerChannelMinMaxObserver,
             FusedMovingAvgObsFakeQuantize,
             default_weight_observer,
         )
+        from torch.ao.quantization.fake_quantize import _is_per_channel
+        qscheme = (
+            getattr(torch, args.scaling_fwd[0])
+            if args.scaling_fwd[0] is not None
+            else torch.per_tensor_affine
+        )
+        observer = (
+            MovingAveragePerChannelMinMaxObserver
+            if _is_per_channel(qscheme) else MovingAverageMinMaxObserver
+        )
         default_act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(
-            observer=MovingAverageMinMaxObserver,
+            observer=observer,
+            ch_axis=1,
             quant_min=-128,
             quant_max=127,
             dtype=getattr(torch, args.dtype),
-            qscheme=torch.per_tensor_affine
+            qscheme=qscheme,
         )
         qconfig = torch.ao.quantization.QConfig(
             activation=default_act_fake_quant if args.quantize_fwd else nn.Identity,
-            weight=default_weight_observer if args.quantize_weights else nn.Identity,
+            weight=default_weight_observer if args.quantize_weight else nn.Identity,
         )
 
         for name, param in model.named_parameters():
             if not 'bias' in name:
                 param.data = _quantize_weight(param.data, -128, 127)
     else:
+        if "," in args.dtype:
+            dtype_fwd, dtype_bwd = args.dtype.split(",")
+        elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
+            dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
+        else:
+            dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
+
         default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
             dtype=dtype_fwd,
             qscheme=args.scaling_fwd[0],
@@ -69,7 +80,7 @@ def quantize_pt2e(model, args, example_args, example_kwargs=None, dynamic_shapes
 
         qconfig = QConfig(
             activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-            weight=default_fake_quant if args.quantize_weights else nn.Identity,
+            weight=default_fake_quant if args.quantize_weight else nn.Identity,
             error=error_fake_quant if args.quantize_bwd else nn.Identity,
         )
 
@@ -79,23 +90,34 @@ def quantize_pt2e(model, args, example_args, example_kwargs=None, dynamic_shapes
 
     ops = args.quantize_fwd.split(',') if args.quantize_fwd is not None else []
     node_list = tuple(node for op in ops for node in QUANTIZATION_OPERATORS[op.lower()])
-    exported_program: torch.export.ExportedProgram = export(
+
+    # torch.export does not support training due to inplace operations
+    # exported_program: torch.export.ExportedProgram = export(
+    #     model,
+    #     args=example_args,
+    #     kwargs=example_kwargs,
+    #     dynamic_shapes=dynamic_shapes,
+    # )
+    # model = prepare_pt2e(exported_program.module(), node_list, qconfig=qconfig)
+
+    # from torch.export._trace import _export
+    # ep = _export(model, example_args, example_kwargs, dynamic_shapes, pre_dispatch=True)
+    # model = prepare_pt2e(ep.module(), node_list, qconfig=qconfig)
+
+    from torch._export import capture_pre_autograd_graph
+    model = capture_pre_autograd_graph(
         model,
         args=example_args,
         kwargs=example_kwargs,
         dynamic_shapes=dynamic_shapes,
     )
-    model = prepare_pt2e(exported_program.module(), node_list, qconfig=qconfig)
+    model = prepare_pt2e(model, node_list, qconfig=qconfig)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    if args.quantize_fwd and run_fn is not None:
+    if args.scaling_fwd[0] and run_fn is not None:
         run_fn(model)
-
-    for name, module in model.named_modules():
-        if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-            module.disable_observer()
 
     return model
 
@@ -130,9 +152,9 @@ def _insert_obs_or_fq(
 def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
     observed_ops = []
     unobserved_ops = []
-    named_modules = {}
     # Go through all the nodes in the Graph
-    for node in model.graph.nodes:
+    nodes_before_observation = list(model.graph.nodes)
+    for node in nodes_before_observation:
         matching_pattern = None
         for pattern in fwd_obs_or_fq_node_list:
             if node.target == (pattern[0] if isinstance(pattern, tuple) else pattern):
@@ -141,12 +163,13 @@ def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
 
         if matching_pattern is not None:
             observed_ops.append(str(node.target))
+            named_modules = dict(model.named_modules(remove_duplicate=False))
             new_args = []
             for i, arg in enumerate(node.args):
                 if (
+                    not isinstance(arg, Node) or
                     isinstance(matching_pattern, tuple)
                     and i not in matching_pattern[1]
-                    or not isinstance(arg, Node)
                 ):
                     new_args.append(arg)
                     continue
@@ -169,7 +192,3 @@ def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
     print("Unobserved ops: ")
     print('\n'.join(list(set(unobserved_ops))))
     return GraphModule(model, model.graph)
-
-
-def convert_pt2e(model):
-    pass

@@ -75,11 +75,11 @@ Fine-tuning the Transformer models for sequence classification on the GLUE bench
 
 Whisper is a pre-trained model for automatic speech recognition (ASR) and speech translation. To evaluate Whisper models on LibriSpeech test-clean:
 ```python
-python examples/speech_recognition/librispeech_asr.py --model_id openai/whisper-tiny [--quantize_weights] [--quantize_fwd <OPERATIONS>]
+python examples/speech_recognition/librispeech_asr.py --model_id openai/whisper-tiny [--quantize_weight] [--quantize_fwd <OPERATIONS>]
 ```
 where model_id could be any Whisper model in the [Whisper Release](https://huggingface.co/collections/openai/whisper-release-6501bba2cf999715fd953013).
 
-The user can perform quantized inference by passing quantize_weights and quantize_fwd arguments. OPERATIONS could be any combination of "gemm", "act", "norm", "attn_scaling", and "residual", separated by comma.
+The user can perform quantized inference by passing quantize_weight and quantize_fwd arguments. OPERATIONS could be any combination of "gemm", "act", "norm", "attn_scaling", and "residual", separated by comma.
 
 #### LLM Evaluation
 
