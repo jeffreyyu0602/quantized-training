@@ -58,7 +58,7 @@ def quantize(model, args, run_fn=None, inplace=True):
         qscheme=args.scaling_fwd[0],
         quant_max=args.scaling_fwd[1],
         amax_history_len=args.scaling_fwd[2],
-        observer_enabled=args.record_histogram
+        record_histogram=args.record_histogram
     )
 
     error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
@@ -66,7 +66,7 @@ def quantize(model, args, run_fn=None, inplace=True):
         qscheme=args.scaling_bwd[0],
         quant_max=args.scaling_bwd[1],
         amax_history_len=args.scaling_bwd[2],
-        observer_enabled=args.record_histogram
+        record_histogram=args.record_histogram
     )
 
     # TODO: weights need separate quantization parameters

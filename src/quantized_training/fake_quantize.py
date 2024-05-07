@@ -123,7 +123,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         amax_history_len: int = 50,
         ch_axis: int = 1,
         block_size: int = 8,
-        observe_histogram: bool = False,
+        record_histogram: bool = False,
         name=None,
         **kwargs,
     ) -> None:
@@ -147,9 +147,9 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.register_buffer("amax_history", None)
             self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
         # Create histogram buffer
-        if observe_histogram:
+        if record_histogram:
             self.register_buffer("histogram", torch.zeros(254, **factory_kwargs))
-        self.observe_histogram = observe_histogram
+        self.record_histogram = record_histogram
 
     @torch.jit.export
     def calculate_qparams(self):
@@ -159,19 +159,24 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     def extra_repr(self):
         return (
             "fake_quant_enabled={}, observer_enabled={}, dtype={}, qscheme={}, "
-            "quant_max={}, amax_history_len={}, scale={}".format(
+            "quant_max={}, amax_history_len={}, ch_axis={}, block_size={}, "
+            "name={}, record_histogram={}, scale={}".format(
                 self.fake_quant_enabled,
                 self.observer_enabled,
                 self.dtype,
                 self.qscheme,
                 self.quant_max,
                 self.amax_history_len,
+                self.ch_axis,
+                self.block_size,
+                self.name,
+                self.record_histogram,
                 self.scale,
             )
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        if self.observe_histogram:
+        if self.record_histogram:
             self._combine_histograms(X)
 
         if self.observer_enabled[0] == 1:
