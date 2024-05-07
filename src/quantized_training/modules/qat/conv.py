@@ -45,7 +45,7 @@ class _ConvNd(nn.modules.conv._ConvNd):
         self.register_load_state_dict_post_hook(update_qweight)
 
     def forward(self, input):
-        if self.training:
+        if self.training or self.qweight.dtype != self.weight.dtype:
             self.qweight = self.weight_fake_quant(self.weight)
         return self._conv_forward(input, self.qweight, self.bias)
 

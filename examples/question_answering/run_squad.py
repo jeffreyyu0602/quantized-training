@@ -40,7 +40,7 @@ def run_evaluation(model, ops, dtype, log_file, gpu):
         '--log_file', log_file,
     ]
     if gpu is not None:
-        command += ['--gpus', gpu]
+        command += ['--gpu', gpu]
     print("Running:", ' '.join(command))
     subprocess.run(command, check=True)
 

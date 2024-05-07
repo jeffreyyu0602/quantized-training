@@ -800,7 +800,7 @@ def main(args):
         loss.backward()
         model.zero_grad()
 
-    model = quantize(model, args, run_fn, device=device)
+    quantize(model, args, run_fn)
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

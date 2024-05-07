@@ -142,10 +142,10 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.register_buffer("encodings", self.fake_quant_fn(input), persistent=False)
         # Create amax history and scale buffer
         factory_kwargs = {'device': device, 'dtype': torch.float}
+        self.enable_observer(qscheme is not None)
         if qscheme is not None:
             self.register_buffer("amax_history", None)
             self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
-            self.enable_observer()
         # Create histogram buffer
         if observe_histogram:
             self.register_buffer("histogram", torch.zeros(254, **factory_kwargs))

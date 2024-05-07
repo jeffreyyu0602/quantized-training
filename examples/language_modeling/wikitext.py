@@ -50,15 +50,15 @@ def main(args):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
         seq_len = encodings.input_ids.size(1)
-        calibration_steps = 0
+        steps = 0
         for begin_loc in tqdm(range(0, seq_len, args.stride)):
             end_loc = min(begin_loc + args.max_length, seq_len)
             input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
             with torch.no_grad():
                 model(input_ids)
 
-            calibration_steps += 1
-            if calibration_steps >= args.max_calibration_steps:
+            steps += 1
+            if steps == args.max_calibration_steps - 1:
                 break
 
         # fix quantization parameters
@@ -66,7 +66,7 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
-    quantize(model, args, run_fn=calibrate if args.scaling_fwd else None)
+    quantize(model, args, run_fn=calibrate)
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
