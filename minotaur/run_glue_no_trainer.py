@@ -490,24 +490,7 @@ def main(args):
         loss.backward()
         model.zero_grad()
 
-    quantize(model, args, run_fn, device=device)
-
-    # Quantize model output logits
-    if hasattr(model, "qconfig") and model.qconfig.activation != torch.nn.Identity:
-        activation_pre_process = model.qconfig.activation(device=device)
-        def _observer_forward_hook(self, inputs, output):
-            return activation_pre_process(output)
-        for name, mod in model.named_modules():
-            if name == "base_model.model.classifier.modules_to_save.default":
-                mod.register_forward_hook(_observer_forward_hook)
-
-    # Use tiled matmul to emulate chip behavior
-    # from quantized_training import get_default_qconfig
-    # from quantized_training.matmul import TiledLinear
-
-    # qconfig = get_default_qconfig("posit16_1", activation=True)
-    # linear = TiledLinear(qconfig=qconfig).to(device)
-    # torch.nn.functional.linear = linear.forward
+    quantize(model, args, run_fn)
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
