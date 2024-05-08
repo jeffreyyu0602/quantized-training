@@ -795,9 +795,9 @@ def main(args):
     model.to(device)
 
     def run_fn(model):
-        batch = {k: v.to(device) for k, v in next(iter(train_dataloader)).items()}
-        loss = model(**batch).loss
-        loss.backward()
+        example_args = next(iter(train_dataloader))
+        batch = {k: v.to(device) for k, v in example_args.items()}
+        model(**batch).loss.backward()
         model.zero_grad()
 
     quantize(model, args, run_fn)

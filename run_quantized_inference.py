@@ -17,7 +17,9 @@ def main():
         for ops in operations:
             command = ['python'] + sys.argv[1:]
             command += [
-                "--dtype", dtype, "--quantize_fwd", ops, "--quantize_weight"
+                "--activation", dtype,
+                "--weight", dtype,
+                "--quantize_forward", ops,
             ]
             print("Running:", ' '.join(command))
             subprocess.run(command, check=True)

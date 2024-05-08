@@ -1,7 +1,5 @@
 import copy
 import logging
-import re
-from typing import List
 
 import torch
 import torch.nn as nn
@@ -42,42 +40,27 @@ def propagate_config(module, name, qconfig):
     for child in module.children():
         propagate_config(child, name, qconfig)
 
+def _create_fake_quant(qconfig, args):
+    if qconfig is None:
+        return nn.Identity()
+
+    return FusedAmaxObsFakeQuantize.with_args(
+        **qconfig.to_dict(), record_histogram=args.record_histogram
+    )
+
 def quantize(model, args, run_fn=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
-    if "," in args.dtype:
-        dtype_fwd, dtype_bwd = args.dtype.split(",")
-    elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
-        dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
-    else:
-        dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
-
-    default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_fwd,
-        qscheme=args.scaling_fwd[0],
-        quant_max=args.scaling_fwd[1],
-        amax_history_len=args.scaling_fwd[2],
-        record_histogram=args.record_histogram
-    )
-
-    error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-        dtype=dtype_bwd,
-        qscheme=args.scaling_bwd[0],
-        quant_max=args.scaling_bwd[1],
-        amax_history_len=args.scaling_bwd[2],
-        record_histogram=args.record_histogram
-    )
-
-    # TODO: weights need separate quantization parameters
+    act_fake_quant = _create_fake_quant(args.activation, args)
+    wt_fake_quant = _create_fake_quant(args.weight, args)
+    error_fake_quant = _create_fake_quant(args.error, args)
     qconfig = QConfig(
-        activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-        weight=default_fake_quant if args.quantize_weight else nn.Identity,
-        error=error_fake_quant if args.quantize_bwd else nn.Identity,
+        activation=act_fake_quant, weight=wt_fake_quant, error=error_fake_quant
     )
 
     if (
-        (args.quantize_fwd or args.quantize_bwd or args.posit_exp or
+        (args.activation or args.error or args.posit_exp or
             args.posit_exp_shifted or args.posit_reciprocal) and
         hasattr(model, 'config') and
         isinstance(model.config, PretrainedConfig)
@@ -97,16 +80,27 @@ def quantize(model, args, run_fn=None, inplace=True):
             dtype=torch.bfloat16 if args.bf16 else None,
         )
 
+    # TODO: better way to handle this?
+    if args.activation is None:
+        args.quantize_forward = None
+    if args.error is None:
+        args.quantize_backprop = None
+
     propagate_config(model, 'qconfig', qconfig)
     convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
-    prepare(model, True, args.quantize_fwd, args.quantize_bwd, args.op_fusion)
+    prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
 
     if run_fn is not None:
         run_fn(model)
 
-    # FIXME: use a cofig dict instead of argparse Namespace
+    # TODO: use a config dict instead of argparse Namespace
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
+
+    # ASPLOS experiments perform quantization after converting model dtype to bfloat16
+    # for name, param in model.named_parameters():
+    #     if not 'bias' in name:
+    #         param.data = qconfig.weight(device=param.device)(param.data)
 
     return model
 
@@ -124,7 +118,8 @@ def _get_unique_devices_(mod):
         {p.device for p in mod.buffers()}
 
 def _register_module_hook(module, name, hook_name):
-    def _observer_pre_hook(self, inputs):
+    module.add_module(hook_name, nn.ModuleDict())
+    def _forward_pre_hook(self, inputs):
         new_inputs = []
         module_dict = getattr(self, hook_name)
         for i, input in enumerate(inputs):
@@ -132,23 +127,24 @@ def _register_module_hook(module, name, hook_name):
                 new_inputs.append(input)
                 continue
 
-            if (idx := str(i)) not in module_dict:
+            if (obs_or_fq_name := str(i)) not in module_dict:
                 obs_or_fq = getattr(self.qconfig, hook_name.split('_')[0])
                 module_dict.update({
-                    idx: obs_or_fq(device=input.device, name=name)
+                    obs_or_fq_name: obs_or_fq(device=input.device, name=name)
                 })
-            new_inputs.append(module_dict[idx](input))
+            new_inputs.append(module_dict[obs_or_fq_name](input))
         return tuple(new_inputs)
 
-    module.add_module(hook_name, nn.ModuleDict())
+    def _backward_hook(self, grad_inputs, grad_outputs):
+        return _forward_pre_hook(self, grad_inputs)
+
     if hook_name == 'activation_pre_process':
-        module.register_forward_pre_hook(_observer_pre_hook)
+        module.register_forward_pre_hook(_forward_pre_hook)
     elif hook_name == 'error_pre_process':
-        module.register_full_backward_pre_hook(_observer_pre_hook)
+        # backward pre hook has the same signature as forward pre hook
+        module.register_full_backward_pre_hook(_forward_pre_hook)
     elif hook_name == 'error_post_process':
-        def _observer_backward_hook(self, grad_inputs, grad_outputs):
-            return _observer_pre_hook(self, grad_inputs)
-        module.register_full_backward_hook(_observer_backward_hook)
+        module.register_full_backward_hook(_backward_hook)
 
 def _add_observer_(
         module, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
@@ -181,18 +177,13 @@ def _add_observer_(
     _insert_obs_or_fq(module, prefix)
 
 def prepare(
-    model: Module,
-    inplace=False,
-    quantize_fwd: str = None,
-    quantize_bwd: str = None,
-    op_fusion: List[str] = None
-) -> Module:
+        model, inplace=False, ops_fwd=None, ops_bwd=None, op_fusion=None):
     if not inplace:
         model = copy.deepcopy(model)
 
     _add_observer_(
-        model, _parse_ops(quantize_fwd), _parse_ops(quantize_bwd),
-        quantize_bwd is not None and "residual" in quantize_bwd, op_fusion, '')
+        model, _parse_ops(ops_fwd), _parse_ops(ops_bwd),
+        ops_bwd and "residual" in ops_bwd, op_fusion, '')
     return model
 
 def convert(module, mapping=None, inplace=False, custom_module_class_mapping=None):

@@ -1,18 +1,75 @@
 import argparse
 import collections
 import json
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+from dataclasses import dataclass, asdict, field
+from enum import Enum, IntEnum
+from typing import Optional, List
 
 from .utils import SLURM_ARGS
 
 __all__ = [
-    "QuantizedTrainingArguments",
     "add_training_args",
 ]
 
 
-class QuantSpecs(collections.UserDict):
+# Enum for rounding modes
+class RoundingMode(IntEnum):
+    nearest = 0
+    floor = 1
+    even = 2
+
+    @staticmethod
+    def string_enums():
+        return [s.name for s in list(RoundingMode)]
+
+
+class QScheme(Enum):
+    PER_TENSOR = "per_tensor"
+    PER_CHANNEL = "per_channel"
+    PER_VECTOR = "per_vector"
+
+
+DTYPE_TO_QUANT_MAX = {
+    "int8": 127,
+    "int4": 7,
+    "posit8_1": 64,
+    "fp8_e4m3": 448,
+    "fp8_e5m2": 57344,
+    "fp4_e2m1": 6,
+}
+
+
+@dataclass
+class QuantizationConfig:
+    dtype: str
+    qscheme: str
+    quant_max: float
+    amax_history_len: int
+    ch_axis: int
+    block_size: int
+
+    @staticmethod
+    def from_str(s):
+        assert(s != None), "String elem_format == None"
+        s = s.lower()
+        fields = s.split(',')
+        if len(fields) > 6:
+            raise ValueError("Input string must contain at most 4 comma-separated values.")
+
+        return QuantizationConfig(
+            dtype=fields[0],
+            qscheme=QScheme(fields[1]) if len(fields) >= 2 else None,
+            quant_max=float(fields[2]) if len(fields) >= 3 else DTYPE_TO_QUANT_MAX.get(fields[0]),
+            amax_history_len=int(fields[3]) if len(fields) >= 4 else 50,
+            ch_axis=int(fields[4]) if len(fields) >= 5 else 1,
+            block_size=int(fields[5]) if len(fields) == 6 else 16,
+        )
+
+    def to_dict(self):
+        return asdict(self)
+
+
+class QSpecs(collections.UserDict):
     """
     Class for handling quantization parameters.
     """
@@ -23,28 +80,25 @@ class QuantSpecs(collections.UserDict):
         Args:
             *args:        Passing a dict will initialize using those entries.
         """
-        super(QuantSpecs, self).__init__(*args, **kwargs)
+        super(QSpecs, self).__init__(*args, **kwargs)
 
         defaults = {
-            "dtype": None,
-            "quantize_weight": False,
-            "quantize_fwd": None,
-            "quantize_bwd": None,
-            "scaling_fwd": (None, None, 0),  # quantization granularity, quant_max, amax_history_len
-            "scaling_bwd": (None, None, 0),
+            "activation": None,
+            "weight": None,
+            "error": None,
+            "quantize_forward": "gemm",
+            "quantize_backward": "gemm",
             "op_fusion": None,
             "posit_exp": False,
             "posit_exp_shifted": False,
             "posit_reciprocal": False,
-            "record_histogram": False
+            "record_histogram": False,
+            "use_bfloat16": False,
         }
 
         for k in defaults:
             if k not in self.data.keys():
                 self.data[k] = defaults[k]
-
-        for k in self.data.keys():
-            assert(k in self.help_strings.keys())
 
     def safe_json(self, indent=None):
         """
@@ -57,21 +111,8 @@ class QuantSpecs(collections.UserDict):
         return self.safe_json(indent=4)
 
 
-class DelayedScaling(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        # Default values for qscheme, quant_max, and amax_history_len
-        defaults = ["per_tensor", 64.0, 50]
-
-        # Update defaults with any provided values
-        for i, value in enumerate(values):
-            defaults[i] = value
-        defaults = (defaults[0], float(defaults[1]), int(defaults[2]))
-
-        setattr(namespace, self.dest, defaults)
-
-
 @dataclass
-class QuantizedTrainingArguments:
+class QuantizationArguments:
     project: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the project where the new run will be sent."}
@@ -128,7 +169,7 @@ class QuantizedTrainingArguments:
     warmup_ratio: float = field(
         default=0.0, metadata={"help": "Ratio of warmup steps in the lr scheduler."}
     )
-    bf16: bool = field(
+    use_bfloat16: bool = field(
         default=False,
         metadata={
             "help": "Whether to use bf16 (mixed) precision instead of 32-bit float."
@@ -156,44 +197,25 @@ class QuantizedTrainingArguments:
     # =============================================================================
     # ================= QUANTIZATION ARGUMENTS SECTION ============================
     # =============================================================================
-    dtype: str = field(
-        default="posit8_1",
-        metadata={
-            "help": "Quantization data type to use. Choose between posit(nbits)_(es), FP8_(E4M3|E5M2), and FP8(.MIXED)."
-        }
-    )
-    quantize_weight: bool = field(
-        default=False,
-        metadata={"help": "Whether to quantize model weights."}
-    )
-    quantize_fwd: Optional[str] = field(
+    activation: str = field(
         default=None,
         metadata={
-            "help": "Whether to quantize activations. Choose from gemm, activation, norm, scaling, and residual.",
-            "nargs": '?',
-            "const": 'gemm'
+            "type": QuantizationConfig.from_str,
+            "help": "Activation data type and quantization configuration."
         }
     )
-    quantize_bwd: Optional[str] = field(
+    weight: str = field(
         default=None,
         metadata={
-            "help": "Whether to quantize activation gradients. Choose from gemm, activation, norm, scaling, and residual.",
-            "nargs": '?',
-            "const": 'gemm'
+            "type": QuantizationConfig.from_str,
+            "help": "Weight data type and quantization configuration."
         }
     )
-    scaling_fwd: Tuple = field(
-        default=(None, None, 0),
+    error: str = field(
+        default=None,
         metadata={
-            "help": "Specify quantization scheme and parameters. Defaults to no scaling.",
-            "action": DelayedScaling,
-        }
-    )
-    scaling_bwd: Tuple = field(
-        default=(None, None, 0),
-        metadata={
-            "help": "Specify quantization scheme and parameters. Defaults to no scaling.",
-            "action": DelayedScaling,
+            "type": QuantizationConfig.from_str,
+            "help": "Activation gradient data type and quantization configuration."
         }
     )
     op_fusion: Optional[str] = field(
@@ -229,7 +251,6 @@ class QuantizedTrainingArguments:
     )
 
 
-# FIXME: this function should be deprecated
 def add_training_args(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="Run quantized inference or training.")
@@ -294,7 +315,10 @@ def add_training_args(parser=None):
         "--sgd", action="store_true", help="Whether to use SGD optimizer."
     )
     parser.add_argument(
-        "--warmup_ratio", type=float, default=0.0, help="Ratio of warmup steps in the lr scheduler."
+        "--warmup_ratio",
+        type=float,
+        default=0.0,
+        help="Ratio of warmup steps in the lr scheduler."
     )
     parser.add_argument(
         "--bf16",
@@ -334,53 +358,46 @@ def add_training_args(parser=None):
     # ================= QUANTIZATION ARGUMENTS SECTION ============================
     # =============================================================================
     parser.add_argument(
-        "--dtype",
-        default="posit8_1",
-        help=(
-            "Quantization data type to use. Choose between posit(nbits)_(es), FP8_(E4M3|E5M2), and FP8(.MIXED)."
-        ),
-    )
-    parser.add_argument(
-        "--quantize_weight",
-        action="store_true",
-        help="Whether to quantize model weights.",
-    )
-    parser.add_argument(
-        "--quantize_fwd",
-        nargs='?',
-        const='gemm',
+        "--activation",
         default=None,
+        type=QuantizationConfig.from_str,
         help=(
-            "Whether to quantize activations. Choose from gemm, activation, norm, scaling, and residual."
+            "Activation quantization data type and configurations. "
+            "Specify in order of dtype, qscheme, quant_max, and amax_history_len."
         ),
     )
     parser.add_argument(
-        "--quantize_bwd",
-        nargs='?',
-        const='gemm',
+        "--weight",
         default=None,
+        type=QuantizationConfig.from_str,
         help=(
-            "Whether to quantize activation gradients. Choose from gemm, activation, norm, scaling, and residual."
+            "Weight quantization data type and configurations. "
+            "Specify in order of dtype, qscheme, quant_max, and amax_history_len."
         ),
     )
     parser.add_argument(
-        "--scaling_fwd",
-        nargs='*',
-        action=DelayedScaling,
-        default=(None, None, 0),
+        "--error",
+        default=None,
+        type=QuantizationConfig.from_str,
         help=(
-            "Specify quantization scheme and parameters. Specify in order of "
-            "qscheme, quant_max, and amax_history_len. Defaults to no scaling."
+            "Activation gradient quantization data type and configurations. "
+            "Specify in order of dtype, qscheme, quant_max, and amax_history_len."
         ),
     )
     parser.add_argument(
-        "--scaling_bwd",
-        nargs='*',
-        action=DelayedScaling,
-        default=(None, None, 0),
+        "--quantize_forward",
+        default='gemm',
         help=(
-            "Specify quantization scheme and parameters. Specify in order of "
-            "qscheme, quant_max, and amax_history_len. Defaults to no scaling."
+            "Forward operations to quantize. Choose from gemm, residual, "
+            "activation, layernorm, and scaling."
+        ),
+    )
+    parser.add_argument(
+        "--quantize_backprop",
+        default='gemm',
+        help=(
+            "Backprop operations to quantize. Choose from gemm, residual, "
+            "activation, layernorm, and scaling."
         ),
     )
     parser.add_argument(

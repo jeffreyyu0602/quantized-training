@@ -54,33 +54,34 @@ def _get_fq_fn(dtype: str):
     elif (match := re.fullmatch(r'E(\d+)MY', dtype, re.IGNORECASE)):
         ebits = int(match.group(1))
         return lambda x: _clamp_exp(x, ebits)
-    elif dtype == "binary":
-        return lambda x: torch.sign(x - x.mean())
+    elif (match := re.fullmatch(r'int(\d+)', dtype, re.IGNORECASE)):
+        nbits = int(match.group(1))
+        quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
+        return lambda x: torch.clamp(torch.round(x), quant_min, quant_max)
     else:
         raise ValueError(f"Unrecognized dtype: {dtype}")
 
 
-def _get_max_val(x, qscheme, ch_axis=1, block_size=32):
-    if qscheme == "per_tensor":
-        max_val = torch.amax(torch.abs(x))
-    elif qscheme == "per_channel":
-        y = torch.flatten(x.transpose(0, ch_axis), start_dim=1)
-        max_val = torch.amax(torch.abs(y), dim=1)
-    elif qscheme == "per_vector":
-        x_dim = x.size()
-        sp_axis = len(x_dim) - 2
+def  _get_amax(x, qscheme, axis=1, block_size=32):
+    if qscheme.value == "per_tensor":
+        amax = torch.amax(torch.abs(x))
+    elif qscheme.value == "per_channel":
+        dim = tuple(range(x.dim()))
+        dim = dim[:axis] + dim[axis + 1:]
+        amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
+    elif qscheme.value == "per_vector":
+        x_shape = x.size()
         new_x_shape = (
-            x_dim[:sp_axis] +
-            (block_size, x_dim[sp_axis] // block_size) +
-            x_dim[sp_axis + 1:]
+            x_shape[:axis] +
+            (block_size, x_shape[axis] // block_size) +
+            x_shape[axis + 1:]
         )
         y = x.view(new_x_shape)
-        max_val = torch.amax(torch.abs(y), dim=(0, sp_axis)).unsqueeze(0)
-    else:
-        raise ValueError(f"Unrecognized qscheme: {qscheme}")
-    return max_val
+        amax = torch.amax(torch.abs(y), dim=(0, axis)).unsqueeze(0)
+    return amax
 
 
+# TODO: perform fake quantization directly for simple data types
 class FakeQuantFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, scale, encodings):
@@ -122,7 +123,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         quant_max: float = None,
         amax_history_len: int = 50,
         ch_axis: int = 1,
-        block_size: int = 8,
+        block_size: int = 16,
         record_histogram: bool = False,
         name=None,
         **kwargs,
@@ -176,26 +177,27 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
+        # Remove attention mask when computing scaling factor
+        # if self.qscheme is not None:
+        #     dtype_min = torch.finfo(X.dtype).min
+        #     attention_mask = torch.where(x == dtype_min, dtype_min, 0.0)
+        #     X -= attention_mask
+
         if self.record_histogram:
             self._combine_histograms(X)
 
         if self.observer_enabled[0] == 1:
             x = X.detach()  # avoid keeping autograd tape
 
-            # Remove attention mask when computing scaling factor
-            # dtype_min = torch.finfo(X.dtype).min
-            # attention_mask = torch.where(x == dtype_min, dtype_min, 0.0)
-            # X -= attention_mask
-
-            max_val = _get_max_val(x, self.qscheme, self.ch_axis, self.block_size)
+            curr_amax = _get_amax(x, self.qscheme, self.ch_axis, self.block_size)
             if self.amax_history is None:
                 self.amax_history = torch.zeros(
-                    (self.amax_history_len, *max_val.shape), device=max_val.device
+                    (self.amax_history_len, *curr_amax.shape), device=curr_amax.device
                 )
 
             amax = torch.amax(self.amax_history, dim=0)
             self.amax_history = torch.roll(self.amax_history, -1, 0)
-            self.amax_history[0] = max_val.float()
+            self.amax_history[0] = curr_amax.float()
 
             sf = torch.pow(2, torch.floor(torch.log2(self.quant_max / amax)))
             self.scale = torch.where(torch.isfinite(sf), sf, self.scale)
@@ -204,12 +206,13 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             X = FakeQuantFunction.apply(
                 X, self.scale if self.qscheme is not None else None, self.encodings
             )
-            # X += attention_mask
+
+        # if self.qscheme is not None:
+        #     X += attention_mask
 
         return X
 
     def _combine_histograms(self, X: torch.Tensor) -> None:
         x = X.detach().float()
-        exponent = torch.floor(torch.log2(torch.abs(x)))
-        hist = torch.histc(exponent, 254, min=-126, max=127)
-        self.histogram += hist
+        exp = torch.floor(torch.log2(torch.abs(x)))
+        self.histogram += torch.histc(exp, 254, min=-126, max=127)

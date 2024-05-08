@@ -34,9 +34,9 @@ def run_evaluation(model, ops, dtype, log_file, gpu):
         '--doc_stride', '128',
         '--pad_to_max_length',
         '--bf16',
-        '--dtype', dtype,
-        '--quantize_fwd', ops,
-        '--quantize_weight',
+        '--activation', dtype,
+        '--weight', dtype,
+        '--quantize_forward', ops,
         '--log_file', log_file,
     ]
     if gpu is not None:
@@ -59,22 +59,22 @@ def run_asplos_experiments(args):
             for dtype in dtypes:
                 run_evaluation(model, ops, dtype, args.log_file, args.gpu)
                 scores = extract_scores(args.log_file, args.out_file)
-
     print("All commands executed.")
 
     rows = [
         "no fusion",
-        "fuse gemm + attention scaling",
-        "plus activation fusion",
-        "plus layernorm fusion",
-        "plus residual fusion"
+        "gemm + attention scaling",
+        "\'+ activation fusion",
+        "\'+ layernorm fusion",
+        "\'+ residual fusion"
     ]
+    headers = ['MobileBERT-tiny', 'MobileBERT', 'BERT-base',
+               'BERT-large', 'DistillBERT-base']
+    subheaders = ['Posit8', 'E4M3']
 
-    columns = pd.MultiIndex.from_product([
-        ['MobileBERT-tiny', 'MobileBERT', 'BERT-base',
-            'BERT-large', 'DistillBERT-base'],  # Main headers
-        ['Posit8', 'E4M3']  # Sub-headers
-    ], names=['Model', 'Data Type'])
+    columns = pd.MultiIndex.from_product(
+        [headers, subheaders], names=['Model', 'Data Type']
+    )
 
     scores_matrix = [scores[i:i+10] for i in range(0, len(scores), 10)]
     df = pd.DataFrame(scores_matrix, index=rows, columns=columns)
@@ -89,19 +89,20 @@ def run_asplos_v2(args):
                 scores = extract_scores(args.log_file, args.out_file)
     print("All commands executed.")
 
-    rows = ['MobileBERT-tiny', 'MobileBERT',
-            'DistillBERT-base', 'BERT-base', 'BERT-large']
+    rows = ['MobileBERT-tiny', 'MobileBERT', 'DistillBERT-base',
+            'BERT-base', 'BERT-large']
+    headers = [
+        "no fusion",
+        "gemm + attention scaling",
+        "\'+ activation fusion",
+        "\'+ layernorm fusion",
+        "\'+ residual fusion"
+    ]
+    subheaders = ['Posit8', 'E4M3']
 
-    columns = pd.MultiIndex.from_product([
-        [
-            "no fusion",
-            "gemm + attn scaling",
-            "plus activation fusion",
-            "plus layernorm fusion",
-            "plus residual fusion"
-        ],
-        ['Posit8', 'E4M3']  # Sub-headers
-    ], names=['Fusion', 'Data Type'])
+    columns = pd.MultiIndex.from_product(
+        [headers, subheaders], names=['Fusion', 'Data Type']
+    )
 
     scores_matrix = [scores[i:i+10] for i in range(0, len(scores), 10)]
     df = pd.DataFrame(scores_matrix, index=rows, columns=columns)

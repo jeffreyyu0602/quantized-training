@@ -13,82 +13,30 @@ from .qconfig import QConfig
 from .quantization_mappings import QUANTIZATION_OPERATORS
 
 
-def _quantize_weight(float_wt, quant_min=-128, quant_max=127):
-    min_val, max_val = torch.aminmax(float_wt)
-    max_val = torch.max(-min_val, max_val)
-    scale = max_val / (float(quant_max - quant_min) / 2)
-    return torch.clamp(torch.round(float_wt / scale), quant_min, quant_max) * scale
+def _create_fake_quant(qconfig, args):
+    if qconfig is None:
+        return nn.Identity()
+
+    return FusedAmaxObsFakeQuantize.with_args(
+        **qconfig.to_dict(), record_histogram=args.record_histogram
+    )
 
 
-def quantize_pt2e(model, args, example_args, example_kwargs=None, dynamic_shapes=None, run_fn=None):
-    if args.dtype in ["qint8", "quint8"]:
-        from torch.ao.quantization import (
-            MovingAverageMinMaxObserver,
-            MovingAveragePerChannelMinMaxObserver,
-            FusedMovingAvgObsFakeQuantize,
-            default_weight_observer,
-        )
-        from torch.ao.quantization.fake_quantize import _is_per_channel
-        qscheme = (
-            getattr(torch, args.scaling_fwd[0])
-            if args.scaling_fwd[0] is not None
-            else torch.per_tensor_affine
-        )
-        observer = (
-            MovingAveragePerChannelMinMaxObserver
-            if _is_per_channel(qscheme) else MovingAverageMinMaxObserver
-        )
-        default_act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(
-            observer=observer,
-            ch_axis=1,
-            quant_min=-128,
-            quant_max=127,
-            dtype=getattr(torch, args.dtype),
-            qscheme=qscheme,
-        )
-        qconfig = torch.ao.quantization.QConfig(
-            activation=default_act_fake_quant if args.quantize_fwd else nn.Identity,
-            weight=default_weight_observer if args.quantize_weight else nn.Identity,
-        )
+def quantize_pt2e(
+        model, args, example_args, example_kwargs=None, dynamic_shapes=None,
+        run_fn=None):
+    act_fake_quant = _create_fake_quant(args.activation, args)
+    wt_fake_quant = _create_fake_quant(args.weight, args)
+    error_fake_quant = _create_fake_quant(args.error, args)
+    qconfig = QConfig(
+        activation=act_fake_quant, weight=wt_fake_quant, error=error_fake_quant
+    )
 
-        for name, param in model.named_parameters():
-            if not 'bias' in name:
-                param.data = _quantize_weight(param.data, -128, 127)
-    else:
-        if "," in args.dtype:
-            dtype_fwd, dtype_bwd = args.dtype.split(",")
-        elif re.search(r'^FP8(\.MIXED)?$', args.dtype, re.IGNORECASE):
-            dtype_fwd, dtype_bwd = ("E4M3", "E5M2")
-        else:
-            dtype_fwd, dtype_bwd = (args.dtype, args.dtype)
+    for name, param in model.named_parameters():
+        if not 'bias' in name:
+            param.data = qconfig.weight(device=param.device)(param.data)
 
-        default_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-            dtype=dtype_fwd,
-            qscheme=args.scaling_fwd[0],
-            quant_max=args.scaling_fwd[1],
-            amax_history_len=args.scaling_fwd[2],
-            record_histogram=args.record_histogram
-        )
-
-        error_fake_quant = FusedAmaxObsFakeQuantize.with_args(
-            dtype=dtype_bwd,
-            qscheme=args.scaling_bwd[0],
-            quant_max=args.scaling_bwd[1],
-            amax_history_len=args.scaling_bwd[2],
-            record_histogram=args.record_histogram
-        )
-
-        qconfig = QConfig(
-            activation=default_fake_quant if args.quantize_fwd else nn.Identity,
-            weight=default_fake_quant if args.quantize_weight else nn.Identity,
-            error=error_fake_quant if args.quantize_bwd else nn.Identity,
-        )
-
-        for name, param in model.named_parameters():
-            if not 'bias' in name:
-                param.data = qconfig.weight(device=param.device)(param.data)
-
-    ops = args.quantize_fwd.split(',') if args.quantize_fwd is not None else []
+    ops = args.quantize_forward.split(',')
     node_list = tuple(node for op in ops for node in QUANTIZATION_OPERATORS[op.lower()])
 
     # torch.export does not support training due to inplace operations
