@@ -15,7 +15,7 @@ from .quantization_mappings import QUANTIZATION_OPERATORS
 
 def _create_fake_quant(qconfig, args):
     if qconfig is None:
-        return nn.Identity()
+        return nn.Identity
 
     return FusedAmaxObsFakeQuantize.with_args(
         **qconfig.to_dict(), record_histogram=args.record_histogram
