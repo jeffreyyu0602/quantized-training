@@ -244,7 +244,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--num_train_epochs', type=int, default=30)
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--qmode', default='qat', help='Quantization mode.')
+    parser.add_argument('--qmode', default=None, help='Quantization mode.')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -268,8 +268,7 @@ def main(args):
     train_dataloader = torch.utils.data.DataLoader(
         raw_dataset["train"], batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn
     )
-    if args.do_train:
-        raw_dataset["validation"] = raw_dataset["validation"].map(prepare_audio)
+    raw_dataset["validation"] = raw_dataset["validation"].map(prepare_audio)
     raw_dataset["test"] = raw_dataset["test"].map(prepare_audio)
 
     model = SpeechResModel(configs["res8-narrow"])
@@ -286,6 +285,9 @@ def main(args):
 
         quantize(model, args, run_fn)
 
+    if args.model_id is not None:
+        model.load_state_dict(torch.load(args.model_id, map_location=device))
+
     def map_to_pred(batch):
         input_values = torch.tensor(batch["audio"])
         with torch.no_grad():
@@ -296,16 +298,13 @@ def main(args):
     metric = evaluate.load("accuracy")
 
     if not args.do_train:
-        if args.model_id is not None:
-            model.load_state_dict(torch.load(args.model_id))
-
         if args.qmode == "ptq":
             model.eval()
             modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
 
             def calibrate(model):
-                for step, batch in enumerate(tqdm(train_dataloader)):
+                for batch in tqdm(train_dataloader):
                     with torch.no_grad():
                         model(batch["input_values"].to(device))
 
@@ -318,6 +317,18 @@ def main(args):
             model = quantize_pt2e(model, args, example_args,
                                   dynamic_shapes=dynamic_shapes, run_fn=calibrate)
 
+        # Convert intrinsic modules back to float modules for evaluation
+        if args.qmode == "qat":
+            import torch.ao.nn.intrinsic as nni
+            for name, module in model.named_children():
+                if isinstance(module, nni._FusedModule):
+                    new_mod = module.to_float()
+                    for pre_hook_fn in module._forward_pre_hooks.values():
+                        new_mod.register_forward_pre_hook(pre_hook_fn)
+                    if hasattr(module, "activation_pre_process"):
+                        setattr(new_mod, "activation_pre_process", module.activation_pre_process)
+                    model._modules[name] = new_mod
+
         model.eval()
         result = raw_dataset["test"].map(
             map_to_pred, batched=True, batch_size=args.batch_size, desc="Test"
@@ -327,8 +338,9 @@ def main(args):
         return
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_train_epochs, eta_min=0.0001)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.num_train_epochs, eta_min=0.0001
+    )
 
     best_acc = 0.0
     best_state = None
@@ -361,6 +373,8 @@ def main(args):
             best_state = copy.deepcopy(model.state_dict())
             if args.output_file is not None:
                 torch.save(model.state_dict(), args.output_file)
+
+    logger.info(f"Best validation accuracy: {best_acc}")
 
     model.load_state_dict(best_state)
     model.eval()
