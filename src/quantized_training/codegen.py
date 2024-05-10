@@ -83,6 +83,7 @@ def get_anchor_ops():
 
 
 def map_operations(node, args):
+    # TODO: iteratively replace all tensor arguments with their shapes and node name
     args = [tuple(arg.shape) if torch.is_tensor(arg) else arg for arg in args]
     if node.target == aten.convolution.default:
         return {
@@ -146,33 +147,38 @@ def map_operations(node, args):
             "eps": args[4],
         }
     elif node.target == aten.avg_pool2d.default:
+        default_args = [None, None, [], 0, False, True, None]
+        default_args[:len(args)] = args
         return {
             "name": node.name,
             "type": COMPLEX_VECTOR_OPS_MAPPING[node.target],
-            "input": args[0],
-            "kernel_size": args[1],
-            "stride": args[2] if len(args) > 2 else [],
-            "padding": args[3] if len(args) > 3 else 0,
-            "ceil_mode": args[4] if len(args) > 4 else False,
-            "count_include_pad": args[5] if len(args) > 5 else True,
-            "divisor_override": args[6] if len(args) > 6 else None,
+            "input": default_args[0],
+            "kernel_size": default_args[1],
+            "stride": default_args[2],
+            "padding": default_args[3],
+            "ceil_mode": default_args[4],
+            "count_include_pad": default_args[5],
+            "divisor_override": default_args[6],
         }
     elif node.target == aten.max_pool2d_with_indices.default:
+        default_args = [None, None, [], 0, 1, False]
+        default_args[:len(args)] = args
         return {
             "name": node.name,
             "type": COMPLEX_VECTOR_OPS_MAPPING[node.target],
-            "input": args[0],
-            "kernel_size": args[1],
-            "stride": args[2] if len(args) > 2 else [],
-            "padding": args[3] if len(args) > 3 else 0,
-            "dilation": args[4] if len(args) > 4 else 1,
-            "ceil_mode": args[5] if len(args) > 5 else False,
+            "input": default_args[0],
+            "kernel_size": default_args[1],
+            "stride": default_args[2],
+            "padding": default_args[3],
+            "dilation": default_args[4],
+            "ceil_mode": default_args[5],
         }
     else:
         return {
             "name": node.name,
             "type": "unknown",
             "target": str(node.target),
+            "args": args,
         }
 
 
@@ -208,6 +214,12 @@ class FusedOperations(nn.Module):
 
     def __repr__(self):
         return f"fused ops: {' -> '.join([str(node) for node in self.nodes])}"
+
+
+def _check_arg_computed(arg, visited):
+    if isinstance(arg, List):
+        return all(_check_arg_computed(a, visited) for a in arg)
+    return arg in visited or not isinstance(arg, Node)
 
 
 class ShapeProp:
@@ -283,9 +295,9 @@ class ShapeProp:
                 cur_node = node
                 while len(cur_node.users) == 1:
                     user = next(iter(cur_node.users))
-                    # TODO: if all the args are computed before they are used, we can fuse them
-                    all_args_computed = all(arg in visited for arg in user.args
-                                            if isinstance(arg, Node) and arg != cur_node)
+                    all_args_computed = all(
+                        _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
+                    )
                     if _is_anchor(user) or user.target == 'output' or not all_args_computed:
                         break
                     fused_ops.append(user)
@@ -296,7 +308,7 @@ class ShapeProp:
                     continue
                 new_kwargs = tuple([n.kwargs for n in fused_ops])
                 fused_mod = FusedOperations(fused_ops)
-                get_new_node_name = get_new_attr_name_with_prefix('fused_node_')
+                get_new_node_name = get_new_attr_name_with_prefix('fused_op_')
                 node_name = get_new_node_name(self.mod)
                 setattr(self.mod, node_name, fused_mod)
                 self.modules[node_name] = fused_mod
