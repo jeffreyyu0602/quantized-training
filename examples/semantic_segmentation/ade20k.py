@@ -75,6 +75,9 @@ def parse_args():
 def main(args):
     dataset = load_dataset("scene_parse_150", split="validation")
 
+    # We can achieve mIoU 37.43 if keep the ratio of the original image.
+    # However, torch.export quantization only support static shape, so we
+    # need to resize the image to a fixed size. 37.43 ==> 36.83
     test_pipeline = v2.Compose([
         # AlignedResize(scale=(512.0, 2048.0), size_divisor=32),
         v2.Resize((512, 21 * 32)),
@@ -91,8 +94,9 @@ def main(args):
 
     dataset.set_transform(transform)
 
-    id2label = json.load(open(hf_hub_download(
-        "huggingface/label-files", "ade20k-id2label.json", repo_type="dataset"), "r"))
+    repo_id = "huggingface/label-files"
+    filename = "ade20k-id2label.json"
+    id2label = json.load(open(hf_hub_download(repo_id, filename, repo_type="dataset"), "r"))
     id2label = {int(k): v for k, v in id2label.items()}
     class_names = list(id2label.values())
     num_classes = len(class_names)
@@ -107,21 +111,27 @@ def main(args):
 
     from torch.library import Library, impl
 
-    m = Library("my_custom_library", "DEF")
+    template = (
+        "interpolate(Tensor input, SymInt[] size, float[]? scale_factor = None,"
+        "str mode = 'nearest', bool? align_corners = None, "
+        "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor"
+    )
 
-    m.define("my_interpolate(Tensor input, SymInt[] size, float[]? scale_factor = None, str mode = 'nearest', bool? align_corners = None, bool? recompute_scale_factor = None, bool antialias = False) -> Tensor")
+    m = Library("my_custom_library", "DEF")
+    m.define(template)
 
     orig_interpolate = F.interpolate
 
-    @impl(m, "my_interpolate", "CompositeExplicitAutograd")
-    def my_interpolate(*args, **kwargs):
+    @impl(m, "interpolate", "CompositeExplicitAutograd")
+    def interpolate(*args, **kwargs):
         return orig_interpolate(*args, **kwargs)
 
-    F.interpolate = torch.ops.my_custom_library.my_interpolate
+    F.interpolate = torch.ops.my_custom_library.interpolate
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
         train_dataset.set_transform(transform)
+
         for i, data in enumerate(tqdm(train_dataset)):
             pixel_values = data["pixel_values"].to(device)
             with torch.no_grad():
@@ -129,10 +139,12 @@ def main(args):
             if i == args.max_calibrate_steps:
                 break
 
+        for module in model.modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.disable_observer()
+
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = quantize_pt2e(model, args, example_args, run_fn=calibrate)
-
-    # model.graph.print_tabular()
 
     results = []
     gt_seg_maps = []
