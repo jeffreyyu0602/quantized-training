@@ -70,6 +70,8 @@ def  _get_amax(x, qscheme, axis=1, block_size=32):
         dim = dim[:axis] + dim[axis + 1:]
         amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
     elif qscheme.value == "per_vector":
+        # TODO: handle cases where the vector dimension is not divisible
+        # by block_size
         x_shape = x.size()
         new_x_shape = (
             x_shape[:axis] +
@@ -199,7 +201,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.amax_history = torch.roll(self.amax_history, -1, 0)
             self.amax_history[0] = curr_amax.float()
 
-            sf = torch.pow(2, torch.floor(torch.log2(self.quant_max / amax)))
+            # sf = torch.pow(2, torch.floor(torch.log2(self.quant_max / amax)))
+            sf = self.quant_max / amax
             self.scale = torch.where(torch.isfinite(sf), sf, self.scale)
 
         if self.fake_quant_enabled[0] == 1:

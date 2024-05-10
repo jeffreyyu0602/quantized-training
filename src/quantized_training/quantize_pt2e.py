@@ -34,9 +34,11 @@ def quantize_pt2e(
 
     for name, param in model.named_parameters():
         if not 'bias' in name:
-            param.data = qconfig.weight(device=param.device)(param.data)
+            weight_fake_quant = qconfig.weight(device=param.device)
+            weight_fake_quant(param.data)
+            param.data = weight_fake_quant(param.data)
 
-    ops = args.quantize_forward.split(',')
+    ops = args.quantize_forward.split(',') if args.activation is not None else []
     node_list = tuple(node for op in ops for node in QUANTIZATION_OPERATORS[op.lower()])
 
     # torch.export does not support training due to inplace operations
@@ -64,7 +66,7 @@ def quantize_pt2e(
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    if args.scaling_fwd[0] and run_fn is not None:
+    if args.activation and args.activation.qscheme and run_fn is not None:
         run_fn(model)
 
     return model
