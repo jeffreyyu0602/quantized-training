@@ -83,19 +83,6 @@ def  _get_amax(x, qscheme, axis=1, block_size=32):
     return amax
 
 
-def _calculate_qparams_symmetric(min_val, max_val, qmin, qmax):
-    if min_val < 0 and max_val > 0:
-        symmetric_qmin = -((qmax - qmin) / 2 + 1)
-        symmetric_qmax = (qmax - qmin) / 2
-        max_scale = max(abs(min_val / symmetric_qmin), abs(max_val / symmetric_qmax))
-        min_val = max_scale * symmetric_qmin
-        max_val = max_scale * symmetric_qmax
-    min_val = min(min_val, 0)
-    max_val = max(max_val, 0)
-    scale = (max_val - min_val) / (qmax - qmin)
-    return scale
-
-
 # TODO: perform fake quantization directly for simple data types
 class FakeQuantFunction(torch.autograd.Function):
     @staticmethod
@@ -170,8 +157,6 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.register_buffer("histogram", torch.zeros(254, **factory_kwargs))
         self.record_histogram = record_histogram
 
-        self.observer = torch.ao.quantization.MovingAverageMinMaxObserver()
-
     @torch.jit.export
     def calculate_qparams(self):
         return self.scale
@@ -215,11 +200,6 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.amax_history = torch.zeros(
                     (self.amax_history_len, *curr_amax.shape), device=curr_amax.device
                 )
-
-            # self.observer(X)
-            # min_val = self.observer.min_val
-            # max_val = self.observer.max_val
-            # sf = _calculate_qparams_symmetric(min_val, max_val, -128, 127)
 
             amax = torch.amax(self.amax_history, dim=0)
             self.amax_history = torch.roll(self.amax_history, -1, 0)

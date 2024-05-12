@@ -135,6 +135,11 @@ def main(args):
 
     F.interpolate = torch.ops.custom.interpolate
 
+    # fuse conv with batch norm
+    modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
+    model.eval()
+    model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
+
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
         train_dataset.set_transform(transform)
@@ -150,7 +155,8 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
-    qconfig = get_qconfig(args.activation, args.weight, args.error, args.record_histogram)
+    qconfig = get_qconfig(args.activation, args.weight, args.error,
+                          args.record_histogram, args.force_scale_power_of_two)
     operations = args.quantize_forward.lower().split(",")
     qconfig_mapping = get_qconfig_mapping(qconfig, operations)
 
