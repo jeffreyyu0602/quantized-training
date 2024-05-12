@@ -1,58 +1,40 @@
-import re
 from typing import Dict
 
 import torch
 from torch import nn
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
-from torch.export import export
 from torch.fx import GraphModule, Graph, Node
 
-from .fake_quantize import FusedAmaxObsFakeQuantize
-from .qconfig import QConfig
-from .quantization_mappings import QUANTIZATION_OPERATORS
-
-
-def _create_fake_quant(qconfig, args):
-    if qconfig is None:
-        return nn.Identity
-
-    return FusedAmaxObsFakeQuantize.with_args(
-        **qconfig.to_dict(), record_histogram=args.record_histogram
-    )
+from .qconfig_mapping import (
+    _OBJECT_TYPE_DICT_KEY,
+    _OBJECT_TYPE_ORDER_DICT_KEY,
+    _MODULE_NAME_OBJECT_TYPE_ORDER_DICT_KEY,
+)
 
 
 def quantize_pt2e(
-        model, args, example_args, example_kwargs=None, dynamic_shapes=None,
-        run_fn=None):
-    act_fake_quant = _create_fake_quant(args.activation, args)
-    wt_fake_quant = _create_fake_quant(args.weight, args)
-    error_fake_quant = _create_fake_quant(args.error, args)
-    qconfig = QConfig(
-        activation=act_fake_quant, weight=wt_fake_quant, error=error_fake_quant
-    )
-
-    for name, param in model.named_parameters():
-        if not 'bias' in name:
-            weight_fake_quant = qconfig.weight(device=param.device)
-            weight_fake_quant(param.data)
-            param.data = weight_fake_quant(param.data)
-
-    ops = args.quantize_forward.split(',') if args.activation is not None else []
-    node_list = tuple(node for op in ops for node in QUANTIZATION_OPERATORS[op.lower()])
+        model, args, qconfig_mapping, example_args, example_kwargs=None,
+        dynamic_shapes=None, run_fn=None):
+    object_type_mappings = qconfig_mapping.object_type_qconfigs
+    for name, module in model.named_modules():
+        if (
+            (qconfig := object_type_mappings.get(type(module))) is not None
+            and type(qconfig.weight) != nn.Identity
+        ):
+            weight_fake_quant = qconfig.weight(device=module.weight.device)
+            weight_fake_quant(module.weight)
+            module.weight.data = weight_fake_quant(module.weight.data)
 
     # torch.export does not support training due to inplace operations
+    # from torch.export import export
     # exported_program: torch.export.ExportedProgram = export(
     #     model,
     #     args=example_args,
     #     kwargs=example_kwargs,
     #     dynamic_shapes=dynamic_shapes,
     # )
-    # model = prepare_pt2e(exported_program.module(), node_list, qconfig=qconfig)
-
-    # from torch.export._trace import _export
-    # ep = _export(model, example_args, example_kwargs, dynamic_shapes, pre_dispatch=True)
-    # model = prepare_pt2e(ep.module(), node_list, qconfig=qconfig)
+    # model = prepare_pt2e(exported_program.module(), qconfig_mapping)
 
     from torch._export import capture_pre_autograd_graph
     model = capture_pre_autograd_graph(
@@ -61,7 +43,7 @@ def quantize_pt2e(
         kwargs=example_kwargs,
         dynamic_shapes=dynamic_shapes,
     )
-    model = prepare_pt2e(model, node_list, qconfig=qconfig)
+    model = prepare_pt2e(model, qconfig_mapping)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
@@ -99,46 +81,54 @@ def _insert_obs_or_fq(
     return new_obs
 
 
-def prepare_pt2e(model, fwd_obs_or_fq_node_list, qconfig=None):
+def _get_matched_qconfig(node, field, mappings, match=None):
+    if match is not None:
+        return match
+    for mapping in mappings:
+        if getattr(node, field) == mapping[0]:
+            return mapping
+    return match
+
+
+def prepare_pt2e(model, qconfig_mapping):
     observed_ops = []
     unobserved_ops = []
+    qconfig_dict = qconfig_mapping.to_dict()
     # Go through all the nodes in the Graph
     nodes_before_observation = list(model.graph.nodes)
     for node in nodes_before_observation:
-        matching_pattern = None
-        for pattern in fwd_obs_or_fq_node_list:
-            if node.target == (pattern[0] if isinstance(pattern, tuple) else pattern):
-                matching_pattern = pattern
-                break
-
-        if matching_pattern is not None:
+        # TODO: check all the patterns
+        # Match primary field
+        match = _get_matched_qconfig(node, 'name', qconfig_dict[_MODULE_NAME_OBJECT_TYPE_ORDER_DICT_KEY])
+        match = _get_matched_qconfig(node, 'target', qconfig_dict[_OBJECT_TYPE_ORDER_DICT_KEY], match)
+        match = _get_matched_qconfig(node, 'target', qconfig_dict[_OBJECT_TYPE_DICT_KEY], match)
+        if match is not None:
             observed_ops.append(str(node.target))
             named_modules = dict(model.named_modules(remove_duplicate=False))
             new_args = []
             for i, arg in enumerate(node.args):
                 if (
-                    not isinstance(arg, Node) or
-                    isinstance(matching_pattern, tuple)
-                    and i not in matching_pattern[1]
+                    not isinstance(arg, Node)
+                    or len(match) > 2 and match[-2] != i # argument order doesn't match
                 ):
                     new_args.append(arg)
                     continue
-                # TODO: fake quant class does not accept name argument
-                input_obs_or_fq = qconfig.activation()
+                qconfig = match[-1]
+                # PyTorch fake quant class does not accept name as an argument
+                try:
+                    input_obs_or_fq = qconfig.activation(name=f"{node.name}.{i}")
+                except TypeError:
+                    input_obs_or_fq = qconfig.activation()
                 new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
                 new_args.append(new_arg)
             node.args = tuple(new_args)
         elif node.op == 'call_function':
             unobserved_ops.append(str(node.target))
 
-        # TODO: handle backward residual
-        if len(list(node.users)) > 1:
-            pass
-
-    print("=" * 80)
+    print("=" * 40)
     print("Observed ops: ")
     print('\n'.join(list(set(observed_ops))))
-    print("=" * 80)
+    print("=" * 40)
     print("Unobserved ops: ")
     print('\n'.join(list(set(unobserved_ops))))
     return GraphModule(model, model.graph)

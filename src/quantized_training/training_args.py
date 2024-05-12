@@ -9,6 +9,7 @@ from .utils import SLURM_ARGS
 
 __all__ = [
     "add_training_args",
+    "QuantizationConfig",
 ]
 
 
@@ -156,9 +157,9 @@ class QuantizationArguments:
             "const": ""
         }
     )
-    # =============================================================================
-    # ================= GENERAL TRAINING ARGUMENTS SECTION ========================
-    # =============================================================================
+    #----------------------------------------------------
+    # Training arguments
+    #----------------------------------------------------
     gpu: Optional[int] = field(default=None, metadata={"help": "GPU to use."})
     do_train: bool = field(
         default=False, metadata={"help": "Whether to run training"}
@@ -194,9 +195,9 @@ class QuantizationArguments:
             "type": lambda x: x.split(','),
         }
     )
-    # =============================================================================
-    # ================= QUANTIZATION ARGUMENTS SECTION ============================
-    # =============================================================================
+    #----------------------------------------------------
+    # Quantization arguments
+    #----------------------------------------------------
     activation: str = field(
         default=None,
         metadata={
@@ -254,9 +255,9 @@ class QuantizationArguments:
 def add_training_args(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="Run quantized inference or training.")
-    # =============================================================================
-    # ================= W&B RELATED ARGUMENTS SECTION =============================
-    # =============================================================================
+    #----------------------------------------------------
+    # Wandb and logging arguments
+    #----------------------------------------------------
     parser.add_argument(
         '--project',
         default=None,
@@ -288,9 +289,6 @@ def add_training_args(parser=None):
         default=None,
         help="The number of sweep config trials to try."
     )
-    # =============================================================================
-    # ================= LOGGING ARGUMENTS SECTION =================================
-    # =============================================================================
     parser.add_argument(
         "--log_level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -304,9 +302,9 @@ def add_training_args(parser=None):
         default=None,
         help="Set the logging file. If not specified, the log will be printed to stdout."
     )
-    # =============================================================================
-    # ================= GENERAL TRAINING ARGUMENTS SECTION ========================
-    # =============================================================================
+    #----------------------------------------------------
+    # Training arguments
+    #----------------------------------------------------
     parser.add_argument("--gpu", type=int, default=None, help="GPU to use.")
     parser.add_argument(
         "--do_train", action="store_true", help="Whether to run training"
@@ -354,9 +352,9 @@ def add_training_args(parser=None):
         default=None,
         help="Name of path of pre-trained peft adapter."
     )
-    # =============================================================================
-    # ================= QUANTIZATION ARGUMENTS SECTION ============================
-    # =============================================================================
+    #----------------------------------------------------
+    # Quantization arguments
+    #----------------------------------------------------
     parser.add_argument(
         "--activation",
         default=None,
@@ -401,6 +399,16 @@ def add_training_args(parser=None):
         ),
     )
     parser.add_argument(
+        '--force_scale_power_of_two',
+        action='store_true',
+        help='Whether to force the scaling factor to be a power of two.'
+    )
+    parser.add_argument(
+        '--print_graph',
+        action='store_true',
+        help='Print the extracted graph module.'
+    )
+    parser.add_argument(
         "--op_fusion",
         type=lambda x: x.split(','),
         default=None,
@@ -426,9 +434,9 @@ def add_training_args(parser=None):
         action="store_true",
         help="Whether to store and plot the histogram of tensor value.",
     )
-    # =============================================================================
-    # ================= SLURM RELATED ARGUMENTS SECTION ===========================
-    # =============================================================================
+    #----------------------------------------------------
+    # Slurm arguments
+    #----------------------------------------------------
     subparsers = parser.add_subparsers(help='sub-command help', dest='action')
     parser_slurm = subparsers.add_parser("slurm", help="slurm command help")
     for k, v in SLURM_ARGS.items():

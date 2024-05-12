@@ -14,7 +14,14 @@ from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation
 
 from metrics import eval_metrics
-from quantized_training import add_training_args, quantize_pt2e, run_task
+from quantized_training import (
+    add_training_args,
+    get_qconfig,
+    get_qconfig_mapping,
+    quantize_pt2e,
+    run_task,
+    FusedAmaxObsFakeQuantize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +124,7 @@ def main(args):
         "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor"
     )
 
-    m = Library("my_custom_library", "DEF")
+    m = Library("custom", "DEF")
     m.define(template)
 
     orig_interpolate = F.interpolate
@@ -126,7 +133,7 @@ def main(args):
     def interpolate(*args, **kwargs):
         return orig_interpolate(*args, **kwargs)
 
-    F.interpolate = torch.ops.my_custom_library.interpolate
+    F.interpolate = torch.ops.custom.interpolate
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
@@ -143,8 +150,27 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
+    qconfig = get_qconfig(args.activation, args.weight, args.error, args.record_histogram)
+    operations = args.quantize_forward.lower().split(",")
+    qconfig_mapping = get_qconfig_mapping(qconfig, operations)
+
+    if args.activation is not None:
+        config = args.activation.to_dict()
+        config["quant_max"] = 255
+        activation = FusedAmaxObsFakeQuantize.with_args(
+            **config,
+            record_histogram=args.record_histogram
+        )
+        qconfig_opt = qconfig._replace(activation=activation)
+
+        layers = [f"matmul_{i}" for i in range(1, 17, 2)]
+        for layer in layers:
+            qconfig_mapping.set_module_name_object_type_order(
+                layer, torch.ops.aten.matmul.default, 0, qconfig_opt
+            )
+
     example_args = (dataset[0]["pixel_values"].to(device),)
-    model = quantize_pt2e(model, args, example_args, run_fn=calibrate)
+    model = quantize_pt2e(model, args, qconfig_mapping, example_args, run_fn=calibrate)
 
     results = []
     gt_seg_maps = []

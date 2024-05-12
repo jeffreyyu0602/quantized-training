@@ -178,7 +178,7 @@ def map_operations(node, args):
             "name": node.name,
             "type": "unknown",
             "target": str(node.target),
-            "args": args,
+            # "args": args,
         }
 
 

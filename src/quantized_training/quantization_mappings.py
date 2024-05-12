@@ -71,29 +71,50 @@ QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
 }
 
 aten = torch.ops.aten
-QUANTIZATION_OPERATORS = {
+
+# torch.export output mapping
+# QUANTIZED_OPERATORS = {
+#     "activation": [
+#         (aten._softmax.default, 0),
+#         (aten.gelu.default, 0),
+#         (aten.relu.default, 0),
+#         (aten.sigmoid.default, 0),
+#     ],
+#     "batchnorm": [
+#         (aten._native_batch_norm_legit.default, 0),
+#         (aten._native_batch_norm_legit_no_training.default, 0),
+#     ],
+#     "gemm": [
+#         (aten.convolution.default, 0),
+#         (aten.addmm.default, 1),
+#         (aten.mm.default, 0),
+#         aten.bmm.default,
+#     ],
+#     "layernorm": [
+#         (aten.native_layer_norm.default, 0)
+#     ],
+#     "residual": [aten.add.Tensor],
+#     "scaling": [aten.div.Tensor],
+# }
+
+# capture_pre_autograd_graph output mapping
+QUANTIZED_OPERATORS = {
     "activation": [
-        (aten._softmax.default, (0,)),
-        (aten.gelu.default, (0,)),
-        (aten.relu.default, (0,)),
-        (aten.sigmoid.default, (0,)),
+        (aten.gelu.default, 0),
+        (aten.relu.default, 0),
+        (aten.sigmoid.default, 0),
+        (aten.softmax.int, 0),
     ],
     "batchnorm": [
-        (aten._native_batch_norm_legit.default, (0,)),
-        (aten._native_batch_norm_legit_no_training.default, (0,)),
+        (aten.cudnn_batch_norm.default, 0),
     ],
-    # "gemm": [
-    #     (aten.convolution.default, (0,)),
-    #     (aten.addmm.default, (1,)),
-    #     aten.bmm.default,
-    #     (aten.mm.default, (0,)),
-    # ],
     "gemm": [
-        (aten.conv2d.default, (0,)),
-        (aten.linear.default, (0,)),
+        (aten.conv2d.default, 0),
+        (aten.linear.default, 0),
+        aten.matmul.default,
     ],
     "layernorm": [
-        (aten.native_layer_norm.default, (0,))
+        (aten.layer_norm.default, 0)
     ],
     "residual": [aten.add.Tensor],
     "scaling": [aten.div.Tensor],

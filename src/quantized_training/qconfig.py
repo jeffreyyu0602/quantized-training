@@ -1,8 +1,10 @@
 from collections import namedtuple
+from torch import nn
+from .fake_quantize import FusedAmaxObsFakeQuantize
 
 __all__ = [
     "QConfig",
-    "get_default_qconfig",
+    "get_qconfig",
 ]
 
 class QConfig(namedtuple('QConfig', ['activation', 'weight', 'error'])):
@@ -26,3 +28,38 @@ class QConfig(namedtuple('QConfig', ['activation', 'weight', 'error'])):
     """
     def __new__(cls, activation, weight, error):
         return super().__new__(cls, activation, weight, error)
+
+def _create_fake_quant(qconfig, record_histogram):
+    if qconfig is None:
+        return nn.Identity
+
+    return FusedAmaxObsFakeQuantize.with_args(
+        **qconfig.to_dict(),
+        record_histogram=record_histogram
+    )
+
+def get_qconfig(activation, weight, error, record_histogram=False,
+                force_scale_power_of_two=False):
+    return QConfig(
+        activation=_create_fake_quant(activation, record_histogram),
+        weight=_create_fake_quant(weight, record_histogram),
+        error=_create_fake_quant(error, record_histogram)
+    )
+
+    import torch
+    from torch.ao.quantization import (
+        MovingAverageMinMaxObserver,
+        FusedMovingAvgObsFakeQuantize,
+    )
+    act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(
+        observer=MovingAverageMinMaxObserver,
+        quant_min=-128,
+        quant_max=127,
+        dtype=torch.qint8,
+        qscheme=torch.per_tensor_symmetric,
+    )
+    return QConfig(
+        activation=act_fake_quant,
+        weight=_create_fake_quant(weight, record_histogram),
+        error=_create_fake_quant(error, record_histogram)
+    )
