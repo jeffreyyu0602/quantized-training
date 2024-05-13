@@ -1,6 +1,5 @@
 import torch
-from torch import nn, Tensor
-from torch.autograd import Function
+from torch import nn
 
 
 POSIT_EXP_FILE = "src/quantized_training/posit_gold/posit16_1_exp.txt"
@@ -8,17 +7,22 @@ POSIT_EXP_SHIFTED_FILE = "src/quantized_training/posit_gold/posit16_1_exp_shifte
 POSIT_RECIPROCAL_FILE = "src/quantized_training/posit_gold/posit16_1_reciprocal.txt"
 
 def _convert(input: torch.Tensor, values: torch.Tensor):
-    if input.dtype == torch.float16:
+    # Keep 8 exponent bits and 14 fraction bits, which is the maximum number
+    # of fraction bits for a 16-bit posit.
+    if input.dtype == torch.bfloat16:
         indices = (input.view(torch.int16).int() << 7) & 0x3fffff
     else:
         raw_bits = input.float().view(torch.int32)
         indices = ((raw_bits >> 9) & 0x3fffff) | ((raw_bits & 0x1ff) != 0).int()
     return values[indices].to(input.dtype)
 
-class PositSoftmax(Function):
+class PositSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, i, dim, posit_exp=None, posit_reciprocal=None):
-        exp_x = torch.exp(i) if posit_exp is None else _convert(i, posit_exp)
+        if posit_exp is None:
+            exp_x = torch.exp(i)
+        else:
+            exp_x = _convert(i, posit_exp)
         exp_x_sum = torch.sum(exp_x, dim=dim, keepdim=True)
 
         if posit_reciprocal is None:
@@ -46,35 +50,14 @@ class PositSoftmax(Function):
 
         return grad_input, None, None, None
 
-class MinotaurSoftmax(Function):
-    @staticmethod
-    def forward(ctx, i, dim, posit_exp, posit_reciprocal):
-        amax = torch.amax(i, dim=dim, keepdim=True)
-        amax = torch.clamp(amax, min=0)  # emulate the max reduction bug on the chip
-        i = i - amax
-
-        exp_x = _convert(i, posit_exp)
-        exp_x_sum = torch.sum(exp_x, dim=dim, keepdim=True)
-        output = exp_x * _convert(exp_x_sum, posit_reciprocal)
-        ctx.save_for_backward(output)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        output, = ctx.saved_tensors
-        grad_input = output * grad_output
-        sum_grad = torch.sum(grad_input, dim=-1, keepdims=True)
-        grad_input -= output * sum_grad
-        return grad_input, None, None, None
-
-def read_file(filepath):
+def _read_tensor(filepath, dtype=None, device=None):
     with open(filepath, 'r') as file:
         values = [float.fromhex(line.rstrip()) for line in file]
-    return torch.tensor(values)
+    return torch.tensor(values, dtype=dtype, device=device)
 
 class Softmax(nn.Softmax):
-    posit_exp: Tensor
-    posit_reciprocal: Tensor
+    posit_exp: torch.Tensor
+    posit_reciprocal: torch.Tensor
 
     def __init__(
         self,
@@ -87,21 +70,16 @@ class Softmax(nn.Softmax):
         super().__init__(dim)
         dtype = kwargs.get("dtype", None)
         device = kwargs.get("device", None)
-        factory_kwargs = {'device': device, 'dtype': dtype}
+        factory_kwargs = {'dtype': dtype, 'device': device}
         self.posit_exp = None
         if posit_exp:
-            self.posit_exp = read_file(POSIT_EXP_FILE).to(**factory_kwargs)
+            self.posit_exp = _read_tensor(POSIT_EXP_FILE, **factory_kwargs)
         elif posit_exp_shifted:
-            self.posit_exp = read_file(POSIT_EXP_SHIFTED_FILE).to(**factory_kwargs)
-        self.posit_reciprocal = (
-            read_file(POSIT_RECIPROCAL_FILE).to(**factory_kwargs) if posit_reciprocal else None
-        )
+            self.posit_exp = _read_tensor(POSIT_EXP_SHIFTED_FILE, **factory_kwargs)
+        self.posit_reciprocal = None
+        if posit_reciprocal:
+            self.posit_reciprocal = _read_tensor(POSIT_RECIPROCAL_FILE, **factory_kwargs)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input - torch.amax(input, dim=self.dim, keepdim=True)
-        return PositSoftmax.apply(
-            input, self.dim, self.posit_exp, self.posit_reciprocal
-        )
-        # return MinotaurSoftmax.apply(
-        #     input, self.dim, self.posit_exp, self.posit_reciprocal
-        # )
+        return PositSoftmax.apply(input, self.dim, self.posit_exp, self.posit_reciprocal)

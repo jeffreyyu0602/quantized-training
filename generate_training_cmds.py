@@ -26,7 +26,7 @@ def generate_commands():
                     model_id = "roberta-large-mnli" if (
                         model == "roberta-large" and task == "mrpc") else model
                     cmd = [
-                        "python", "run_quantized_training.py",
+                        "python", "run_asplos_training.py",
                         "--model", model_id,
                         "--task", task,
                         "--run_job", config,

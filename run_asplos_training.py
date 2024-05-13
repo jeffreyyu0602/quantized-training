@@ -203,8 +203,8 @@ def main():
     else:
         base_cmd = get_base_cmd(args)
         quant_args = ['--quantize_forward', args.quantized_ops, '--quantize_backprop', args.quantized_ops]
-        posit_args = ['--activation', 'posit8_1', '--weight', 'posit8_1', '--error', 'posit8_1,per_tensor,64,10']
-        fp8_args = ['--activation', 'fp8_e4m3', '--weight', 'fp8_e4m3', '--error', 'fp8_e5m2,per_tensor,57344,10']
+        posit_args = ['--activation', 'posit8_1', '--weight', 'posit8_1', '--error', 'posit8_1,qs=per_tensor,qmax=64,ahl=10']
+        fp8_args = ['--activation', 'fp8_e4m3', '--weight', 'fp8_e4m3', '--error', 'fp8_e5m2,qs=per_tensor,qmax=57344,ahl=10']
 
         commands = {
             "bf16": base_cmd,

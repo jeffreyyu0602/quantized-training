@@ -1,3 +1,4 @@
+*.csv
 *.egg-info
 *.log
 *.out
@@ -11,5 +12,6 @@ logs
 models
 plots
 slurm_scripts
+test
 tmp
 wandb

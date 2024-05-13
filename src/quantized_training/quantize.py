@@ -272,9 +272,8 @@ def replace_softmax(
 
     for name, mod in module.named_children():
         if type_before_parametrizations(mod) == nn.Softmax:
-            new_mod = Softmax(
-                posit_exp, posit_exp_shifted, posit_reciprocal, dim=-1, dtype=dtype, device=device
-            )
+            new_mod = Softmax(posit_exp, posit_exp_shifted, posit_reciprocal,
+                              dim=-1, dtype=dtype, device=device)
             setattr(module, name, new_mod)
         else:
             replace_softmax(mod, posit_exp, posit_exp_shifted, posit_reciprocal, dtype, device)
@@ -285,7 +284,7 @@ def get_quantized_model(model, qconfig, op_fusion=None, device=None):
     if device is None:
         devices = _get_unique_devices_(model)
         assert len(devices) <= 1, (
-            f"_add_observer_ only works with cpu or single-device CUDA modules, but got devices {devices}"
+            f"Quantized model only works with cpu or single-device CUDA modules, but got devices {devices}"
         )
         device = next(iter(devices)) if len(devices) > 0 else None
 
