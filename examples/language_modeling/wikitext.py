@@ -3,12 +3,17 @@ import logging
 import os
 
 import torch
-import wandb
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from quantized_training import add_training_args, quantize, run_task, plot_layer_distribution, plot_layer_range
+from quantized_training import (
+    add_training_args,
+    quantize,
+    run_task,
+    plot_layer_distribution,
+    plot_layer_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +107,6 @@ def main(args):
     logger.info(f"max length: {args.max_length}")
     logger.info(f"stride:     {args.stride}")
     logger.info(f"perplexity: {ppl.item()}")
-
-    if wandb.run is not None:
-        wandb.log({"perplexity": ppl.item()})
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

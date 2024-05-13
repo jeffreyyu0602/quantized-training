@@ -5,7 +5,7 @@ import os
 import torch
 from datasets import load_dataset
 from evaluate import load
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 from quantized_training import (
     add_training_args,
@@ -34,10 +34,14 @@ def main(args):
 
     librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 
-    processor = WhisperProcessor.from_pretrained(args.model_id)
-    model = WhisperForConditionalGeneration.from_pretrained(args.model_id, attn_implementation="eager").to(device)
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        args.model_id, attn_implementation="eager", low_cpu_mem_usage=True, use_safetensors=True
+    )
+    model.to(device)
 
-    quantize(model, args, device=device)
+    processor = AutoProcessor.from_pretrained(args.model_id)
+
+    quantize(model, args)
 
     def map_to_pred(batch):
         array = [audio["array"] for audio in batch["audio"]]

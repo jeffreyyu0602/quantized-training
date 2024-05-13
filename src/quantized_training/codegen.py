@@ -360,7 +360,6 @@ class ShapeProp:
                 label += str(node.target)
             label += "}"
             label = label.replace("<", "\<").replace(">", "\>")
-            print(label)
 
             nodes[node.name] = {
                 "label": label,
