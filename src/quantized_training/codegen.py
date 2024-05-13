@@ -1,6 +1,5 @@
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 
 import torch
 from torch import nn
@@ -78,13 +77,19 @@ COMPLEX_VECTOR_OPS_MAPPING = {
     aten.max_pool2d_with_indices.default: "vec2_max_pool2d",
 }
 
-def get_anchor_ops():
+def _get_anchor_ops():
     return set(GEMM_OPS_MAPPING.keys() | COMPLEX_VECTOR_OPS_MAPPING.keys())
 
+def _replace_tensors_with_shapes(obj):
+    if isinstance(obj, torch.Tensor):
+        return tuple(obj.shape)
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(_replace_tensors_with_shapes(item) for item in obj)
+    else:
+        return obj
 
 def map_operations(node, args):
-    # TODO: iteratively replace all tensor arguments with their shapes and node name
-    args = [tuple(arg.shape) if torch.is_tensor(arg) else arg for arg in args]
+    args = _replace_tensors_with_shapes(args)
     if node.target == aten.convolution.default:
         return {
             "name": node.name,
@@ -178,7 +183,7 @@ def map_operations(node, args):
             "name": node.name,
             "type": "unknown",
             "target": str(node.target),
-            # "args": args,
+            "args": args,
         }
 
 
@@ -283,7 +288,7 @@ class ShapeProp:
         return self.load_arg(list(self.graph.nodes)[-1].args)
 
     def transform(self):
-        anchor_ops = get_anchor_ops()
+        anchor_ops = _get_anchor_ops()
         def _is_anchor(node):
             return node.target in anchor_ops
 
@@ -336,3 +341,44 @@ class ShapeProp:
             elif node.op == 'call_function':
                 all_ops.append([map_operations(node, self.load_arg(node.args))])
         return all_ops
+
+    def gen_compute_graph(self, output_file="compute_graph"):
+        nodes = {}
+        edges = []
+        for node in self.graph.nodes:
+            if node.op in ["placeholder", "get_attr"]:
+                continue
+
+            label = "{" + str(node) + "|"
+            if (
+                node.op == "call_module"
+                and (mod := self.modules[node.target])
+                and isinstance(mod, FusedOperations)
+            ):
+                label += "&#92;n".join([str(n.target) for n in mod.nodes])
+            else:
+                label += str(node.target)
+            label += "}"
+            label = label.replace("<", "\<").replace(">", "\>")
+            print(label)
+
+            nodes[node.name] = {
+                "label": label,
+                "shape": "Mrecord",
+            }
+            for n in node.users:
+                edges.append((node.name, n.name))
+
+        import graphviz
+        dot = graphviz.Digraph()
+
+        # Add nodes with attributes to the graph
+        for node, attrs in nodes.items():
+            dot.node(node, **attrs)
+
+        # Add edges to the graph
+        for edge in edges:
+            dot.edge(edge[0], edge[1])
+
+        # Render and save the graph
+        dot.render(output_file, format='png', cleanup=True)

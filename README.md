@@ -1,11 +1,11 @@
 # Quantized-Training
 
-Quantized-Training is a Python package designed to facilitate the efficient quantization of Transformer networks and other Deep Neural Networks (DNNs), with a particular focus on Huggingface's Transformers implementation. It supports quantization using FP8 and Posit8 data types, aiming to enhance performance and efficiency in machine learning tasks, especially those involving large Transformer models.
+Quantized-Training is a Python package designed to facilitate the efficient quantization of Transformer networks and other Deep Neural Networks (DNNs), with a particular focus on Huggingface's Transformers implementation. It supports quantization using integer, FP and posit data types, aiming to enhance performance and efficiency in machine learning tasks, especially those involving large Transformer models.
 
 ## Features
 
 - **Support for Custom Models:** Provides flexibility by allowing users to add their own model implementations for quantization.
-- **Quantization Data Types:** Supports FP8 (E4M3 and E5M2) and posit with arbitrary nbits and es
+- **Quantization Data Types:** Supports integer with arbitrary bit width, FP8 (E4M3 and E5M2), and posit with customizable nbits and es
 - **Ease of Use:** Comes in a packaged format for simple installation and includes example usage to help users get started quickly.
 
 ## Prerequisites

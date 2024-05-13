@@ -84,6 +84,7 @@ def _insert_obs_or_fq(
 def _get_matched_qconfig(node, field, mappings, match=None):
     if match is not None:
         return match
+    # TODO: check all fields
     for mapping in mappings:
         if getattr(node, field) == mapping[0]:
             return mapping

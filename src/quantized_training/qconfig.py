@@ -65,6 +65,6 @@ def get_qconfig(activation, weight, error, record_histogram=False,
     )
     return QConfig(
         activation=act_fake_quant,
-        weight=_create_fake_quant(weight, record_histogram),
-        error=_create_fake_quant(error, record_histogram)
+        weight=_create_fake_quant(weight, **kwargs),
+        error=_create_fake_quant(error, **kwargs)
     )
