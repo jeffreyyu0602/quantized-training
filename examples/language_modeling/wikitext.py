@@ -71,7 +71,8 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
-    quantize(model, args, run_fn=calibrate)
+    do_scaling = args.activation and args.activation.qscheme
+    quantize(model, args, run_fn=calibrate if do_scaling else None)
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
