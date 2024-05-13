@@ -10,9 +10,8 @@ from torch.nn.utils.parametrize import type_before_parametrizations
 from accelerate import dispatch_model
 from transformers import PretrainedConfig
 
-from .fake_quantize import FusedAmaxObsFakeQuantize
 from .modules import Softmax, modeling_bert, modeling_mobilebert
-from .qconfig import QConfig
+from .qconfig import get_qconfig
 from .quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
@@ -40,30 +39,15 @@ def propagate_config(module, name, qconfig):
     for child in module.children():
         propagate_config(child, name, qconfig)
 
-def _create_fake_quant(qconfig, args):
-    if qconfig is None:
-        return nn.Identity
-
-    return FusedAmaxObsFakeQuantize.with_args(
-        **qconfig.to_dict(), record_histogram=args.record_histogram
-    )
-
 def quantize(model, args, run_fn=None, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
-    act_fake_quant = _create_fake_quant(args.activation, args)
-    wt_fake_quant = _create_fake_quant(args.weight, args)
-    error_fake_quant = _create_fake_quant(args.error, args)
-    qconfig = QConfig(
-        activation=act_fake_quant, weight=wt_fake_quant, error=error_fake_quant
-    )
-
     if (
-        (args.activation or args.error or args.posit_exp or
-            args.posit_exp_shifted or args.posit_reciprocal) and
-        hasattr(model, 'config') and
-        isinstance(model.config, PretrainedConfig)
+        (args.activation or args.error or args.posit_exp
+            or args.posit_exp_shifted or args.posit_reciprocal)
+        and hasattr(model, 'config')
+        and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
         convert(model, inplace=True,
@@ -85,6 +69,9 @@ def quantize(model, args, run_fn=None, inplace=True):
         args.quantize_forward = None
     if args.error is None:
         args.quantize_backprop = None
+
+    qconfig = get_qconfig(args.activation, args.weight, args.error,
+                          args.record_histogram, args.force_scale_power_of_two)
 
     propagate_config(model, 'qconfig', qconfig)
     convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
