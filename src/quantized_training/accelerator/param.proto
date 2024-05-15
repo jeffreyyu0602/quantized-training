@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package example;
+
+// Define a message for VectorParam
+message VectorParam {
+  string opcode = 1;
+  repeated int32 input = 2;
+  repeated int32 other = 3;
+}
+
+// Define a message for ReductionParam
+message ReductionParam {
+  string opcode = 1;
+  repeated int32 input = 2;
+  repeated int32 dim = 3;
+  bool keepdim = 4;
+}
+
+// Define a message for MatrixParam
+message MatrixParam {
+  string opcode = 1;
+  repeated int32 input = 2;
+  repeated int32 weight = 3;
+  repeated int32 bias = 4;
+  repeated int32 stride = 5;
+  repeated int32 padding = 6;
+  repeated int32 dilation = 7;
+  bool transposed = 8;
+  bool ceil_mode = 9;
+  repeated VectorParam vector_ops = 10;
+  ReductionParam reduce_op = 11;
+}
