@@ -1,3 +1,4 @@
+import re
 from typing import Dict
 
 import torch
@@ -9,6 +10,8 @@ from torch.fx import GraphModule, Graph, Node
 from .qconfig_mapping import (
     _OBJECT_TYPE_DICT_KEY,
     _OBJECT_TYPE_ORDER_DICT_KEY,
+    _MODULE_NAME_DICT_KEY,
+    _MODULE_NAME_REGEX_DICT_KEY,
     _MODULE_NAME_OBJECT_TYPE_ORDER_DICT_KEY,
 )
 
@@ -81,47 +84,70 @@ def _insert_obs_or_fq(
     return new_obs
 
 
-def _get_matched_qconfig(node, field, mappings, match=None):
-    if match is not None:
-        return match
-    # TODO: check all fields
+def _match_fields(fields, patterns):
+    if len(fields) != len(patterns):
+        return False
+
+    for pattern, value in zip(patterns, fields):
+        if pattern == value:
+            continue
+        if isinstance(pattern, str):
+            try:
+                if re.fullmatch(pattern, value):
+                    continue
+            except re.error:
+                pass
+        return False
+    return True
+
+
+def _get_qconfig(fields, mappings, qconfig=None):
+    if qconfig is not None:
+        return qconfig
     for mapping in mappings:
-        if getattr(node, field) == mapping[0]:
-            return mapping
-    return match
+        # TODO: enforce pattern type
+        if _match_fields(fields, mapping[:-1]):  # the last element is the qconfig
+            return mapping[-1]
+    return qconfig
+
+
+def _get_qconfig_for_node(node, order, qconfig_mapping):
+    if not isinstance(node, Node):
+        return None
+    qconfig_dict = qconfig_mapping.to_dict()
+    qconfig = _get_qconfig((node.name, node.target, order), qconfig_dict[_MODULE_NAME_OBJECT_TYPE_ORDER_DICT_KEY])
+    qconfig = _get_qconfig((node.name,), qconfig_dict[_MODULE_NAME_DICT_KEY], qconfig)
+    qconfig = _get_qconfig((node.name,), qconfig_dict[_MODULE_NAME_REGEX_DICT_KEY], qconfig)
+    qconfig = _get_qconfig((node.target, order), qconfig_dict[_OBJECT_TYPE_ORDER_DICT_KEY], qconfig)
+    qconfig = _get_qconfig((node.target,), qconfig_dict[_OBJECT_TYPE_DICT_KEY], qconfig)
+    return qconfig
 
 
 def prepare_pt2e(model, qconfig_mapping):
     observed_ops = []
     unobserved_ops = []
-    qconfig_dict = qconfig_mapping.to_dict()
     # Go through all the nodes in the Graph
     nodes_before_observation = list(model.graph.nodes)
     for node in nodes_before_observation:
-        # TODO: check all the patterns
-        # Match primary field
-        match = _get_matched_qconfig(node, 'name', qconfig_dict[_MODULE_NAME_OBJECT_TYPE_ORDER_DICT_KEY])
-        match = _get_matched_qconfig(node, 'target', qconfig_dict[_OBJECT_TYPE_ORDER_DICT_KEY], match)
-        match = _get_matched_qconfig(node, 'target', qconfig_dict[_OBJECT_TYPE_DICT_KEY], match)
-        if match is not None:
+        named_modules = dict(model.named_modules(remove_duplicate=False))
+        new_args = []
+        args_updated = False
+        for i, arg in enumerate(node.args):
+            qconfig = _get_qconfig_for_node(node, i, qconfig_mapping)
+            if qconfig is None:
+                new_args.append(arg)
+                continue
+            args_updated = True
             observed_ops.append(str(node.target))
-            named_modules = dict(model.named_modules(remove_duplicate=False))
-            new_args = []
-            for i, arg in enumerate(node.args):
-                if (
-                    not isinstance(arg, Node)
-                    or len(match) > 2 and match[-2] != i # argument order doesn't match
-                ):
-                    new_args.append(arg)
-                    continue
-                qconfig = match[-1]
-                # PyTorch fake quant class does not accept name as an argument
-                try:
-                    input_obs_or_fq = qconfig.activation(name=f"{node.name}.{i}")
-                except TypeError:
-                    input_obs_or_fq = qconfig.activation()
-                new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
-                new_args.append(new_arg)
+            # PyTorch fake quant classes do not accept name as an argument
+            try:
+                input_obs_or_fq = qconfig.activation(name=f"{node.name}.{i}")
+            except TypeError:
+                input_obs_or_fq = qconfig.activation()
+            new_arg = _insert_obs_or_fq(arg, input_obs_or_fq, model, named_modules, model.graph)
+            new_args.append(new_arg)
+
+        if args_updated:
             node.args = tuple(new_args)
         elif node.op == 'call_function':
             unobserved_ops.append(str(node.target))

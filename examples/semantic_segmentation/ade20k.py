@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
+from torch.ao.quantization import FakeQuantizeBase
 from torchvision.transforms import v2
 from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation
@@ -74,7 +75,7 @@ def parse_args():
     parser.add_argument(
         '--model_id', required=True, help='Fine-tuned model identifier'
     )
-    parser.add_argument('--max_calibrate_steps', type=int, default=1000)
+    parser.add_argument('--max_calibration_steps', type=int, default=1000)
     add_training_args(parser)
     return parser.parse_args()
 
@@ -148,11 +149,11 @@ def main(args):
             pixel_values = data["pixel_values"].to(device)
             with torch.no_grad():
                 model(pixel_values)
-            if i == args.max_calibrate_steps:
+            if i == args.max_calibration_steps:
                 break
 
         for module in model.modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+            if isinstance(module, FakeQuantizeBase):
                 module.disable_observer()
 
     qconfig = get_qconfig(args.activation, args.weight, args.error,
@@ -165,15 +166,13 @@ def main(args):
         config["quant_max"] = 255
         activation = FusedAmaxObsFakeQuantize.with_args(
             **config,
-            record_histogram=args.record_histogram
+            record_histogram=args.record_histogram,
+            force_scale_power_of_two=args.force_scale_power_of_two,
         )
         qconfig_opt = qconfig._replace(activation=activation)
-
-        layers = [f"matmul_{i}" for i in range(1, 17, 2)]
-        for layer in layers:
-            qconfig_mapping.set_module_name_object_type_order(
-                layer, torch.ops.aten.matmul.default, 0, qconfig_opt
-            )
+        qconfig_mapping.set_module_name_object_type_order(
+            r'^matmul_(\d*[13579])$', torch.ops.aten.matmul.default, 0, qconfig_opt
+        )
 
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = quantize_pt2e(model, args, qconfig_mapping, example_args, run_fn=calibrate)
