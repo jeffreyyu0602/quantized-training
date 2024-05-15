@@ -31,3 +31,7 @@ message MatrixParam {
   repeated VectorParam vector_ops = 10;
   ReductionParam reduce_op = 11;
 }
+
+message ModelParams {
+    repeated MatrixParam params = 1;
+}

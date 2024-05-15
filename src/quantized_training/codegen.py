@@ -174,17 +174,18 @@ class ShapeProp:
         return all_ops
 
     def gen_code(self):
-        params = []
+        from .accelerator.build import param_pb2
+        params = param_pb2.ModelParams()
         for node in self.graph.nodes:
             if (
                 node.op == 'call_module' and
                 isinstance(self.modules[node.target], FusedOperations)
             ):
-                params.append(map_operation(self.modules[node.target]))
+                params.params.append(map_operation(self.modules[node.target]))
             elif node.op == 'call_function':
                 op = FusedOperations([node], [self.load_arg(node.args)])
                 if (param := map_operation(op)) is not None:
-                    params.append(param)
+                    params.params.append(param)
         return params
 
     def gen_compute_graph(self, output_file="compute_graph"):

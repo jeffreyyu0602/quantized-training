@@ -7,20 +7,30 @@ then
     exit 1
 fi
 
+# Absolute path to this script, regardless of where it is called from
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
 # Directory where your .proto files are stored
-PROTO_DIR="./src/quantized_training/accelerator/"  # Adjust this path to where your .proto files are located.
+PROTO_DIR=$SCRIPT_DIR
 
 # Directory where you want to output the compiled Python files
-OUT_DIR="./src/quantized_training/accelerator/build" # Adjust this to your preferred output directory.
+OUT_DIR="$SCRIPT_DIR/build"
 
 # Create the output directory if it does not exist
 mkdir -p "$OUT_DIR"
 
-# Compile all .proto files in the PROTO_DIR
-for PROTO_FILE in "$PROTO_DIR"/*.proto
+# Change to the directory containing the .proto files
+cd "$PROTO_DIR"
+
+# Compile all .proto files in the current directory
+for PROTO_FILE in *.proto
 do
     echo "Compiling $PROTO_FILE"
+    # Ensure the output path is absolute or correctly relative to the script's execution location
     protoc --python_out="$OUT_DIR" "$PROTO_FILE"
 done
+
+# Optionally, change back to the original directory if needed
+# cd -
 
 echo "Compilation complete. Output files are in $OUT_DIR"

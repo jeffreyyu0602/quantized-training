@@ -1,7 +1,4 @@
 import torch
-from google.protobuf.descriptor import FieldDescriptor
-
-from .build.src.quantized_training.accelerator import param_pb2
 
 
 aten = torch.ops.aten
@@ -93,6 +90,7 @@ def _convert_arg(arg):
 
 
 def generate_param(node, args):
+    from .build import param_pb2
     aten = torch.ops.aten
     args = _convert_arg(args)
     if node.target == aten.convolution.default:
@@ -161,6 +159,7 @@ def generate_param(node, args):
         param.dilation.extend(default_args[4])
         param.ceil_mode = default_args[5]
     else:
+        print('-' * 40)
         print("Unsupported operation")
         print(node.name)
         print(node.target)
@@ -169,32 +168,13 @@ def generate_param(node, args):
 
 
 def map_operation(op):
+    from .build import param_pb2
     params = [generate_param(*args) for args in zip(op.nodes, op.args)]
     params = [param for param in params if param is not None]
     if len(params) == 0:
         return None
-    vec_params = [param for param in params if isinstance(param, param_pb2.VectorParam)]
+    matrix_param = params[0]
+    vector_params = [param for param in params if isinstance(param, param_pb2.VectorParam)]
     reduce_params = [param for param in params if isinstance(param, param_pb2.ReductionParam)]
-    param = params[0]
-    param.vector_ops.extend(vec_params)
-    return param
-
-
-def format_protobuf_message(message):
-    output = []
-    for field, value in message.ListFields():
-        if field.label == FieldDescriptor.LABEL_REPEATED:
-            formatted_value = list(value)  # Convert repeated fields to a list
-        else:
-            formatted_value = value
-        
-        # Handle nested messages
-        if field.type == FieldDescriptor.TYPE_MESSAGE:
-            if field.label == FieldDescriptor.LABEL_REPEATED:
-                formatted_value = [format_protobuf_message(v) for v in value]
-            else:
-                formatted_value = format_protobuf_message(value)
-        
-        output.append(f"{field.name}: {formatted_value}")
-    
-    return "{" + ", ".join(output) + "}"
+    matrix_param.vector_ops.extend(vector_params)
+    return matrix_param
