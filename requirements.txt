@@ -12,3 +12,4 @@ librosa
 soundfile
 jiwer
 tabulate
+protobuf

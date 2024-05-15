@@ -95,6 +95,7 @@ def generate_param(node, args):
     args = _convert_arg(args)
     if node.target == aten.convolution.default:
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
         param.input.extend(args[0])
         param.weight.extend(args[1])
@@ -107,28 +108,33 @@ def generate_param(node, args):
         # param.groups = args[8]
     elif node.target == aten.addmm.default:
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
         param.input.extend(args[1])
         param.weight.extend(args[2])
         param.bias.extend(args[0])
     elif node.target in [aten.mm.default, aten.bmm.default]:
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
         param.input.extend(args[0])
         param.weight.extend(args[1])
     elif node.target in VECTOR_OPS_MAPPING:
         param = param_pb2.VectorParam()
+        param.name = node.name
         param.opcode = VECTOR_OPS_MAPPING[node.target]
         param.input.extend(args[0])
         if len(args) > 1:
             param.other.extend(args[1])
     elif node.target in REDUCE_OPS_MAPPING:
         param = param_pb2.ReductionParam()
+        param.name = node.name
         param.opcode = REDUCE_OPS_MAPPING[node.target]
         param.input.extend(args[0])
         param.dim.extend(args[1])
     elif node.target == aten.native_layer_norm.default:
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
         param.input.extend(args[0])
         param.weight.extend(args[1])
@@ -139,6 +145,7 @@ def generate_param(node, args):
         default_args = [None, None, [], [0], False, True, None]
         default_args[:len(args)] = args
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
         param.input.extend(default_args[0])
         param.weight.extend(default_args[1])
@@ -151,6 +158,7 @@ def generate_param(node, args):
         default_args = [None, None, [], [0], [1], False]
         default_args[:len(args)] = args
         param = param_pb2.MatrixParam()
+        param.name = node.name
         param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
         param.input.extend(default_args[0])
         param.weight.extend(default_args[1])
@@ -177,4 +185,5 @@ def map_operation(op):
     vector_params = [param for param in params if isinstance(param, param_pb2.VectorParam)]
     reduce_params = [param for param in params if isinstance(param, param_pb2.ReductionParam)]
     matrix_param.vector_ops.extend(vector_params)
+    # TODO: add reduction param
     return matrix_param
