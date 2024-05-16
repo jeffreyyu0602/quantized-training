@@ -10,16 +10,7 @@ message VectorParam {
   repeated int32 other = 4;
 }
 
-// Define a message for ReductionParam
-message ReductionParam {
-  string name = 1;
-  string opcode = 2;
-  repeated int32 input = 3;
-  repeated int32 dim = 4;
-  bool keepdim = 5;
-}
-
-// Define a message for MatrixParam
+// message for GEMM, pooling, and layer norm
 message MatrixParam {
   string name = 1;
   string opcode = 2;
@@ -31,10 +22,36 @@ message MatrixParam {
   repeated int32 dilation = 8;
   bool transposed = 9;
   bool ceil_mode = 10;
-  repeated VectorParam vector_ops = 11;
-  ReductionParam reduce_op = 12;
+}
+
+// message for reduction and softmax
+message ReduceParam {
+  string name = 1;
+  string opcode = 2;
+  repeated int32 input = 3;
+  repeated int32 dim = 4;
+  bool keepdim = 5;
+}
+
+// message for transpose and permute
+message ShapeParam {
+  string name = 1;
+  string opcode = 2;
+  repeated int32 input = 3;
+  repeated int32 dims = 4;
+}
+
+// One of GEMM, reduce, or shape change
+message Param {
+  oneof param_type {
+    MatrixParam matrix_param = 1;
+    ReduceParam reduce_param = 2;
+    ShapeParam shape_param = 3;
+  }
+  repeated VectorParam vector_params = 4;
+  bool fused = 5;
 }
 
 message ModelParams {
-    repeated MatrixParam params = 1;
+    repeated Param params = 1;
 }

@@ -19,6 +19,7 @@ def replace_interpolate():
         "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor"
     )
 
+    global m
     m = Library("custom", "DEF")
     m.define(template)
 
@@ -57,12 +58,12 @@ def _pair_conv_bn(layers):
     return pairs
 
 
-def transform(model, example_args, output_file):
+def transform(model, example_args, generate_graph=False, output_file="compute_graph"):
     exported_program: torch.export.ExportedProgram = \
         export(model, example_args)
 
     # print(exported_program)
-    # exported_program.graph.print_tabular()
+    exported_program.graph.print_tabular()
 
     shape_prop = ShapeProp(exported_program.module())
     shape_prop.transform()
@@ -76,21 +77,13 @@ def transform(model, example_args, output_file):
         f.write(params.SerializeToString())
 
     import json
-    from google.protobuf.json_format import MessageToJson, MessageToDict
-
-    class CompactListEncoder(json.JSONEncoder):
-        def iterencode(self, o, _one_shot=False):
-            """Encode the given object and yield each string representation as available."""
-            if isinstance(o, list):
-                yield '[' + ', '.join(json.dumps(el, cls=CompactListEncoder) for el in o) + ']'
-            else:
-                for chunk in super().iterencode(o, _one_shot=_one_shot):
-                    yield chunk
+    from google.protobuf.json_format import MessageToDict
 
     data = MessageToDict(params)
-    print(json.dumps(data, indent=4, cls=CompactListEncoder))
+    print(json.dumps(data, indent=4))
 
-    shape_prop.gen_compute_graph(output_file)
+    if generate_graph:
+        shape_prop.gen_compute_graph(output_file)
 
     return (shape_prop, pt_out, gm_out)
 
@@ -100,6 +93,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", type=str, default="resnet50")
+    parser.add_argument("--generate_graph", action="store_true")
     args = parser.parse_args()
 
     if "resnet50" in args.models:
@@ -112,17 +106,22 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 224, 224),)
-        transform(model, example_args, "resnet50")
+        transform(model, example_args, args.generate_graph, "resnet50")
 
     if "segformer" in args.models:
         replace_interpolate()
         model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
         example_args = (torch.randn(1, 3, 512, 672),)
-        _, pt_out, gm_out = transform(model, example_args, "segformer")
-        assert torch.all(pt_out == gm_out), "Outputs do not match"
+        _, pt_out, gm_out = transform(model, example_args, args.generate_graph, "segformer")
+        torch.set_printoptions(precision=8)
+        diff = pt_out.logits != gm_out
+        print(torch.sum(diff))
+        print(pt_out.logits[diff])
+        print(gm_out[diff])
+        assert torch.all(pt_out.logits == gm_out), "Outputs do not match"
 
     if "mobilebert" in args.models:
         model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
         example_args = (torch.randint(0, 30522, (1, 128), dtype=torch.long),)
-        _, pt_out, gm_out = transform(model, example_args, "mobilebert")
-        assert torch.all(pt_out == gm_out), "Outputs do not match"
+        _, pt_out, gm_out = transform(model, example_args, args.generate_graph, "mobilebert")
+        assert torch.all(pt_out.logits == gm_out), "Outputs do not match"

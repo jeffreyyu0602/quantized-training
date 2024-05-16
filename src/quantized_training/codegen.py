@@ -8,26 +8,12 @@ from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 
 from .accelerator.map_operation import (
     GEMM_OPS_MAPPING,
-    COMPLEX_VECTOR_OPS_MAPPING,
+    VECTOR_OPS_MAPPING,
+    NOP_MAPPING,
     map_operation
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _get_anchor_ops():
-    return set(GEMM_OPS_MAPPING.keys() | COMPLEX_VECTOR_OPS_MAPPING.keys())
-
-
-class Attribute(nn.Module):
-    def __init__(self, nodes: List[Node]):
-        self.nodes = nodes
-
-    def forward(self, args, kwargs):
-        pass
-
-    def __repr__(self):
-        return f"attr: {' -> '.join([str(node) for node in self.nodes])}"
 
 
 class FusedOperations(nn.Module):
@@ -35,7 +21,6 @@ class FusedOperations(nn.Module):
         super().__init__()
         self.nodes = nodes
         self.args = args
-        self.operations = []
 
     def forward(self, args_list, kwargs_list):
         result = None
@@ -118,13 +103,9 @@ class ShapeProp:
         return self.load_arg(list(self.graph.nodes)[-1].args)
 
     def transform(self):
-        anchor_ops = _get_anchor_ops()
-        def _is_anchor(node):
-            return node.target in anchor_ops
-
         visited : Dict[Node, None] = {}
         for node in self.graph.nodes:
-            if _is_anchor(node):
+            if node.target in GEMM_OPS_MAPPING or node.target in VECTOR_OPS_MAPPING:
                 fused_ops = [node]
                 new_args = [node.args]
                 cur_node = node
@@ -133,7 +114,11 @@ class ShapeProp:
                     all_args_computed = all(
                         _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
                     )
-                    if _is_anchor(user) or user.target == 'output' or not all_args_computed:
+                    # Only perform fusion if the following op is a simple vector op and all arguments are computed
+                    if (
+                        user.target not in (VECTOR_OPS_MAPPING.keys() | NOP_MAPPING.keys())
+                        or not all_args_computed
+                    ):
                         break
                     fused_ops.append(user)
                     new_args.append(tuple(arg if arg != cur_node else 'placeholder' for arg in user.args))
@@ -156,7 +141,6 @@ class ShapeProp:
                 visited[new_node] = None
             else:
                 visited[node] = None
-                # TODO: fuse get_attr with shape mutation operations
 
         self.mod = GraphModule(self.mod, self.graph)
 
