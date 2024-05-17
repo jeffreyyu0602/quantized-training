@@ -13,5 +13,6 @@ models
 plots
 slurm_scripts
 test
+!test/test_codgen.py
 tmp
 wandb

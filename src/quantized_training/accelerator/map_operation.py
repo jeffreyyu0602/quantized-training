@@ -1,3 +1,4 @@
+import operator
 import torch
 
 
@@ -77,9 +78,19 @@ SHAPE_OPS_MAPPING = {
 }
 
 NOP_MAPPING = {
+    # TODO: cat operation should be handled by the accelerator
+    # cat(Tensor[] tensors, int dim=0) -> Tensor
+    aten.cat.default: "nop",
+    # clone(Tensor self, *, MemoryFormat? memory_format=None) -> Tensor
+    aten.clone.default: "nop",
+    # expand(Tensor(a) self, SymInt[] size, *, bool implicit=False) -> Tensor(a)
+    aten.expand.default: "nop",
+    aten.t.default: "nop",
+    # unsqueeze(Tensor(a) self, int dim) -> Tensor(a)
+    aten.unsqueeze.default: "nop",
     # view(Tensor(a) self, SymInt[] size) -> Tensor(a)
     aten.view.default: "nop",
-    aten.clone.default: "nop",
+    operator.getitem: "nop",
 }
 
 

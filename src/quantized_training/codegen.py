@@ -105,42 +105,45 @@ class ShapeProp:
     def transform(self):
         visited : Dict[Node, None] = {}
         for node in self.graph.nodes:
-            if node.target in GEMM_OPS_MAPPING or node.target in VECTOR_OPS_MAPPING:
-                fused_ops = [node]
-                new_args = [node.args]
-                cur_node = node
-                while len(cur_node.users) == 1:
-                    user = next(iter(cur_node.users))
-                    all_args_computed = all(
-                        _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
-                    )
-                    # Only perform fusion if the following op is a simple vector op and all arguments are computed
-                    if (
-                        user.target not in (VECTOR_OPS_MAPPING.keys() | NOP_MAPPING.keys())
-                        or not all_args_computed
-                    ):
-                        break
-                    fused_ops.append(user)
-                    new_args.append(tuple(arg if arg != cur_node else 'placeholder' for arg in user.args))
-                    cur_node = user
-                if len(fused_ops) == 1:
-                    visited[node] = None
-                    continue
-                new_kwargs = tuple([n.kwargs for n in fused_ops])
-                fused_mod = FusedOperations(fused_ops)
-                get_new_node_name = get_new_attr_name_with_prefix('fused_op_')
-                node_name = get_new_node_name(self.mod)
-                setattr(self.mod, node_name, fused_mod)
-                self.modules[node_name] = fused_mod
-                with self.graph.inserting_before(node):
-                    new_node = self.graph.create_node(
-                        'call_module', node_name, (new_args, new_kwargs), {})
-                fused_ops[-1].replace_all_uses_with(new_node)
-                for node in reversed(fused_ops):
-                    self.graph.erase_node(node)
-                visited[new_node] = None
-            else:
+            if node.op != 'call_function':
+                continue
+            all_nodes = [node]
+            new_args = [node.args]
+            cur_node = node
+            is_gemm_or_vector_op = node.target in GEMM_OPS_MAPPING or node.target in VECTOR_OPS_MAPPING
+            while len(cur_node.users) == 1:
+                user = next(iter(cur_node.users))
+                all_args_computed = all(
+                    _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
+                )
+                # Perform fusion if
+                # 1) the user is a NOP operation
+                # 2) the node is a GEMM or vector op and the user is a vector operation
+                if (
+                    not user.target in NOP_MAPPING
+                    and not (is_gemm_or_vector_op and user.target in VECTOR_OPS_MAPPING)
+                    or not all_args_computed
+                ):
+                    break
+                all_nodes.append(user)
+                new_args.append(tuple(arg if arg != cur_node else 'placeholder' for arg in user.args))
+                cur_node = user
+            if len(all_nodes) == 1:
                 visited[node] = None
+                continue
+            new_kwargs = tuple([n.kwargs for n in all_nodes])
+            fused_mod = FusedOperations(all_nodes)
+            get_new_node_name = get_new_attr_name_with_prefix('fused_op_')
+            node_name = get_new_node_name(self.mod)
+            setattr(self.mod, node_name, fused_mod)
+            self.modules[node_name] = fused_mod
+            with self.graph.inserting_before(node):
+                new_node = self.graph.create_node(
+                    'call_module', node_name, (new_args, new_kwargs), {})
+            all_nodes[-1].replace_all_uses_with(new_node)
+            for node in reversed(all_nodes):
+                self.graph.erase_node(node)
+            visited[new_node] = None
 
         self.mod = GraphModule(self.mod, self.graph)
 
@@ -161,15 +164,17 @@ class ShapeProp:
         from .accelerator.build import param_pb2
         params = param_pb2.ModelParams()
         for node in self.graph.nodes:
+            param = None
             if (
                 node.op == 'call_module' and
                 isinstance(self.modules[node.target], FusedOperations)
             ):
-                params.params.append(map_operation(self.modules[node.target]))
+                param = map_operation(self.modules[node.target])
             elif node.op == 'call_function':
                 op = FusedOperations([node], [self.load_arg(node.args)])
-                if (param := map_operation(op)) is not None:
-                    params.params.append(param)
+                param = map_operation(op)
+            if param is not None:
+                params.params.append(param)
         return params
 
     def gen_compute_graph(self, output_file="compute_graph"):
