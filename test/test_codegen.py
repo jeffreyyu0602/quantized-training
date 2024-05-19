@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 
 import torch
 from torch.export import export
@@ -70,7 +71,7 @@ def flatten(mixed_list):
 
 def transform(
         model, example_args, example_kwargs=None, *, print_graph=False,
-        generate_graph=False, output_file="compute_graph"):
+        generate_graph=False, output_file="compute_graph", output_dir=None):
     if example_kwargs is None:
         example_kwargs = {}
 
@@ -91,8 +92,8 @@ def transform(
     gm_out = shape_prop.propagate(*uplifted_args)[0][0]
     # gm_out = shape_prop.mod(*example_args, *list(example_kwargs.values()))
 
-    params = shape_prop.gen_code()
-    with open('params.pb', 'wb') as f:
+    params = shape_prop.gen_code(os.path.join(output_dir, "tensor_files"))
+    with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
     import json
@@ -102,7 +103,7 @@ def transform(
     print(json.dumps(data, indent=4))
 
     if generate_graph:
-        shape_prop.gen_compute_graph(output_file)
+        shape_prop.gen_compute_graph(os.path.join(output_dir, output_file))
 
     return (shape_prop, pt_out, gm_out)
 
@@ -114,6 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--print_graph", action="store_true")
     parser.add_argument("--generate_graph", action="store_true")
+    parser.add_argument("--output_dir", default=None, help="Output directory for generated tensor files")
     args = parser.parse_args()
 
     if "resnet50" == args.model:
@@ -131,7 +133,8 @@ if __name__ == "__main__":
             example_args,
             print_graph=args.print_graph,
             generate_graph=args.generate_graph,
-            output_file="plots/resnet50"
+            output_file="resnet50",
+            output_dir=args.output_dir,
         )
 
     if "segformer" == args.model:
@@ -148,7 +151,8 @@ if __name__ == "__main__":
             example_args,
             print_graph=args.print_graph,
             generate_graph=args.generate_graph,
-            output_file="plots/segformer"
+            output_file="segformer",
+            output_dir=args.output_dir,
         )
         pt_out = pt_out.logits
 
@@ -160,7 +164,8 @@ if __name__ == "__main__":
             example_args,
             print_graph=args.print_graph,
             generate_graph=args.generate_graph,
-            output_file="plots/mobilebert"
+            output_file="mobilebert",
+            output_dir=args.output_dir,
         )
         pt_out = pt_out.logits
 
@@ -193,7 +198,8 @@ if __name__ == "__main__":
             example_kwargs,
             print_graph=args.print_graph,
             generate_graph=args.generate_graph,
-            output_file="plots/mobilebert"
+            output_file="mobilebert",
+            output_dir=args.output_dir,
         )
         pt_out = pt_out[0]
 

@@ -1,4 +1,7 @@
 import operator
+import os
+import struct
+
 import torch
 from torch.fx import Node
 
@@ -94,7 +97,15 @@ NOP_MAPPING = {
 }
 
 
-def _set_repeated_field(obj, attr_path, value):
+def _write_tensor_to_file(tensor, filename):
+    tensor = tensor.float().flatten()
+    packed_data = struct.pack(f'{tensor.numel()}f', *tensor.tolist())
+    with open(filename, 'wb') as f:
+        f.write(packed_data)
+    print(f"Writing tensor to {filename}")
+
+
+def _set_repeated_field(obj, attr_path, value, output_dir=None):
     attributes = attr_path.split('.')
     for attr in attributes:
         obj = getattr(obj, attr)
@@ -102,13 +113,17 @@ def _set_repeated_field(obj, attr_path, value):
     if isinstance(value, Node):
         obj.node = value.name
         obj.shape.extend(list(value.tensor_value.shape))
+        if output_dir is not None:
+            _write_tensor_to_file(
+                value.tensor_value, os.path.join(output_dir, f"{value.name}.bin")
+            )
     elif isinstance(value, (tuple, list)):
         obj.extend(value)
     elif value is not None:
         obj.append(value)
 
 
-def generate_param(node, args):
+def generate_param(node, args, output_dir):
     from .build import param_pb2
     aten = torch.ops.aten
     param = None
@@ -116,9 +131,9 @@ def generate_param(node, args):
         param = param_pb2.MatrixParam()
         param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[0])
-        _set_repeated_field(param, "weight", args[1])
-        _set_repeated_field(param, "bias", args[2])
+        _set_repeated_field(param, "input", args[0], output_dir)
+        _set_repeated_field(param, "weight", args[1], output_dir)
+        _set_repeated_field(param, "bias", args[2], output_dir)
         _set_repeated_field(param, "stride", args[3])
         _set_repeated_field(param, "padding", args[4])
         _set_repeated_field(param, "dilation", args[5])
@@ -127,15 +142,15 @@ def generate_param(node, args):
         param = param_pb2.MatrixParam()
         param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[1])
-        _set_repeated_field(param, "weight", args[2])
-        _set_repeated_field(param, "bias", args[0])
+        _set_repeated_field(param, "input", args[1], output_dir)
+        _set_repeated_field(param, "weight", args[2], output_dir)
+        _set_repeated_field(param, "bias", args[0], output_dir)
     elif node.target in [aten.mm.default, aten.bmm.default]:
         param = param_pb2.MatrixParam()
         param.name = node.name
         param.opcode = GEMM_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[0])
-        _set_repeated_field(param, "weight", args[1])
+        _set_repeated_field(param, "input", args[0], output_dir)
+        _set_repeated_field(param, "weight", args[1], output_dir)
     elif node.target in VECTOR_OPS_MAPPING:
         param = param_pb2.VectorParam()
         param.name = node.name
@@ -143,21 +158,21 @@ def generate_param(node, args):
         _set_repeated_field(param, "input", args[0])
         if len(args) > 1:
             if isinstance(args[1], Node):
-                _set_repeated_field(param, "other", args[1])
+                _set_repeated_field(param, "other", args[1], output_dir)
             else:
                 param.scalar = args[1]  # second argument is a scalar
     elif node.target == aten.native_layer_norm.default:
         param = param_pb2.MatrixParam()
         param.name = node.name
         param.opcode = "layer_norm"
-        _set_repeated_field(param, "input", args[0])
-        _set_repeated_field(param, "weight", args[2])
-        _set_repeated_field(param, "bias", args[3])
+        _set_repeated_field(param, "input", args[0], output_dir)
+        _set_repeated_field(param, "weight", args[2], output_dir)
+        _set_repeated_field(param, "bias", args[3], output_dir)
     elif node.target in REDUCE_OPS_MAPPING:
         param = param_pb2.ReduceParam()
         param.name = node.name
         param.opcode = REDUCE_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[0])
+        _set_repeated_field(param, "input", args[0], output_dir)
         _set_repeated_field(param, "dim", args[1])
     elif node.target == aten.avg_pool2d.default:
         default_args = [None, None, [], 0, False, True, None]
@@ -165,7 +180,7 @@ def generate_param(node, args):
         param = param_pb2.PoolingParam()
         param.name = node.name
         param.opcode = POOLING_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", default_args[0])
+        _set_repeated_field(param, "input", default_args[0], output_dir)
         _set_repeated_field(param, "kernel_size", default_args[1])
         _set_repeated_field(param, "stride", default_args[2])
         _set_repeated_field(param, "padding", default_args[3])
@@ -178,7 +193,7 @@ def generate_param(node, args):
         param = param_pb2.PoolingParam()
         param.name = node.name
         param.opcode = POOLING_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", default_args[0])
+        _set_repeated_field(param, "input", default_args[0], output_dir)
         _set_repeated_field(param, "kernel_size", default_args[1])
         _set_repeated_field(param, "stride", default_args[2])
         _set_repeated_field(param, "padding", default_args[3])
@@ -188,7 +203,7 @@ def generate_param(node, args):
         param = param_pb2.ShapeParam()
         param.name = node.name
         param.opcode = SHAPE_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[0])
+        _set_repeated_field(param, "input", args[0], output_dir)
         if node.target == aten.permute.default:
             _set_repeated_field(param, "dims", args[1])
         elif node.target == aten.transpose.int:
@@ -201,14 +216,14 @@ def generate_param(node, args):
     return param
 
 
-def map_operation(op, name):
-    from .build import param_pb2
-    params = [generate_param(*args) for args in zip(op.nodes, op.all_input_nodes)]
+def map_operation(op, name, output_dir):
+    params = [generate_param(*args, output_dir) for args in zip(op.nodes, op.all_input_nodes)]
     params = [param for param in params if param is not None]
 
     if len(params) == 0:
         return None
 
+    from .build import param_pb2
     param = param_pb2.Param()
     param.name = name
     if params[0].opcode in ["conv", "gemm"]:
@@ -222,9 +237,9 @@ def map_operation(op, name):
         param.vector_params.extend(params)
         return param
 
-    if len(params) > 1:
-        print(params)
-        raise ValueError("Reduction, pooling, and shape permutation operation cannot be fused with other operations")
+    assert len(params) == 1, (
+        "Reduction, pooling, and shape permutation operation cannot be fused with other operations"
+    )
 
     if params[0].opcode == "layer_norm":
         param.matrix_param.CopyFrom(params[0])

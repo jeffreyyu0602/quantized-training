@@ -3,9 +3,8 @@ syntax = "proto3";
 package example;
 
 message Tensor {
-  optional string node = 1;
-  optional string filepath = 2;
-  repeated int32 shape = 3;
+  string node = 1;
+  repeated int32 shape = 2;
 }
 
 // Define message for elementwise operations
@@ -68,9 +67,9 @@ message Param {
   string name = 1;
   oneof param_type {
     MatrixParam matrix_param = 2;
-    ReduceParam reduce_param = 3;
-    ShapeParam shape_param = 4;
-    PoolingParam pooling_param = 5;
+    PoolingParam pooling_param = 3;
+    ReduceParam reduce_param = 4;
+    ShapeParam shape_param = 5;
   }
   repeated VectorParam vector_params = 6;
   bool fused = 7;

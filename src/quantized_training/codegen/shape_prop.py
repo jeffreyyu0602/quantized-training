@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Dict, List
 
 import torch
@@ -164,7 +165,10 @@ class ShapeProp:
 
         self.mod = GraphModule(self.mod, self.graph)
 
-    def gen_code(self, generate_tensor_files=False, output_dir="build"):
+    def gen_code(self, output_dir=None):
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
+
         from .build import param_pb2
         params = param_pb2.ModelParams()
         for node in self.graph.nodes:
@@ -173,11 +177,11 @@ class ShapeProp:
                 node.op == 'call_module' and
                 isinstance(self.modules[node.target], FusedOperations)
             ):
-                param = map_operation(self.modules[node.target], node.name)
+                param = map_operation(self.modules[node.target], node.name, output_dir)
             elif node.op == 'call_function':
-                all_input_nodes = _annotate_node_with_tensor_value(node.args, self.load_arg(node.args))
-                op = FusedOperations([node], all_input_nodes=[all_input_nodes])
-                param = map_operation(op, node.name)
+                nodes = _annotate_node_with_tensor_value(node.args, self.load_arg(node.args))
+                op = FusedOperations([node], all_input_nodes=[nodes])
+                param = map_operation(op, node.name, output_dir)
             if param is not None:
                 params.params.append(param)
         return params
@@ -211,13 +215,10 @@ class ShapeProp:
         import graphviz
         g = graphviz.Digraph()
 
-        # Add nodes with attributes to the graph
         for node, attrs in nodes.items():
             g.node(node, **attrs)
 
-        # Add edges to the graph
         for edge in edges:
             g.edge(edge[0], edge[1])
 
-        # Render and save the graph
         g.render(output_file, format='svg', cleanup=True)
