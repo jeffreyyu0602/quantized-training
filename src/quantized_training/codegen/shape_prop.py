@@ -6,7 +6,7 @@ from torch import nn
 from torch.fx import GraphModule, Node
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 
-from .accelerator.map_operation import (
+from .map_operation import (
     GEMM_OPS_MAPPING,
     VECTOR_OPS_MAPPING,
     NOP_MAPPING,
@@ -16,20 +16,36 @@ from .accelerator.map_operation import (
 logger = logging.getLogger(__name__)
 
 
+def _annotate_node_with_tensor_value(nodes, values, last_node=None):
+    all_input_nodes = []
+    for n, v in zip(nodes, values):
+        if isinstance(v, torch.Tensor):
+            node = last_node if n == 'placeholder' else n
+            assert node is not None, "Node must not be None when value is a tensor"
+            setattr(node, 'tensor_value', v)
+            all_input_nodes.append(node)
+        else:
+            all_input_nodes.append(n)
+    return all_input_nodes
+
+
 class FusedOperations(nn.Module):
-    def __init__(self, nodes: List[Node], args=None):
+    def __init__(self, nodes: List[Node], args=None, all_input_nodes=None):
         super().__init__()
         self.nodes = nodes
         self.args = args
+        self.all_input_nodes = all_input_nodes
 
-    def forward(self, args_list, kwargs_list):
+    def forward(self, args, kwargs):
         result = None
-        self.args = []
+        last_node = None
+        self.all_input_nodes = []
         for i, node in enumerate(self.nodes):
             assert node.op == 'call_function', "Only call_function is supported"
-            args = tuple(arg if arg != 'placeholder' else result for arg in args_list[i])
-            result = node.target(*args, **kwargs_list[i])
-            self.args.append(args)
+            active_args = tuple(arg if arg != 'placeholder' else result for arg in args[i])
+            result = node.target(*active_args, **kwargs[i])
+            self.all_input_nodes.append(_annotate_node_with_tensor_value(self.args[i], active_args, last_node))
+            last_node = node
         return result
 
     def __repr__(self):
@@ -108,7 +124,7 @@ class ShapeProp:
             if node.op != 'call_function':
                 visited[node] = None
                 continue
-            all_nodes = [node]
+            fused_nodes = [node]
             new_args = [node.args]
             cur_node = node
             is_gemm_or_vector_op = node.target in GEMM_OPS_MAPPING or node.target in VECTOR_OPS_MAPPING
@@ -126,14 +142,14 @@ class ShapeProp:
                     or not all_args_computed
                 ):
                     break
-                all_nodes.append(user)
+                fused_nodes.append(user)
                 new_args.append(tuple(arg if arg != cur_node else 'placeholder' for arg in user.args))
                 cur_node = user
-            if len(all_nodes) == 1:
+            if len(fused_nodes) == 1:
                 visited[node] = None
                 continue
-            new_kwargs = tuple([n.kwargs for n in all_nodes])
-            fused_mod = FusedOperations(all_nodes)
+            new_kwargs = tuple([n.kwargs for n in fused_nodes])
+            fused_mod = FusedOperations(fused_nodes, new_args)
             get_new_node_name = get_new_attr_name_with_prefix('fused_op_')
             node_name = get_new_node_name(self.mod)
             setattr(self.mod, node_name, fused_mod)
@@ -141,28 +157,15 @@ class ShapeProp:
             with self.graph.inserting_before(node):
                 new_node = self.graph.create_node(
                     'call_module', node_name, (new_args, new_kwargs), {})
-            all_nodes[-1].replace_all_uses_with(new_node)
-            for node in reversed(all_nodes):
+            fused_nodes[-1].replace_all_uses_with(new_node)
+            for node in reversed(fused_nodes):
                 self.graph.erase_node(node)
             visited[new_node] = None
 
         self.mod = GraphModule(self.mod, self.graph)
 
-    def get_operations(self):
-        all_ops = []
-        for node in self.graph.nodes:
-            if (
-                node.op == 'call_module' and
-                isinstance(self.modules[node.target], FusedOperations)
-            ):
-                all_ops.append(self.modules[node.target])
-            elif node.op == 'call_function':
-                op = FusedOperations([node], [self.load_arg(node.args)])
-                all_ops.append(op)
-        return all_ops
-
-    def gen_code(self):
-        from .accelerator.build import param_pb2
+    def gen_code(self, generate_tensor_files=False, output_dir="build"):
+        from .build import param_pb2
         params = param_pb2.ModelParams()
         for node in self.graph.nodes:
             param = None
@@ -170,10 +173,11 @@ class ShapeProp:
                 node.op == 'call_module' and
                 isinstance(self.modules[node.target], FusedOperations)
             ):
-                param = map_operation(self.modules[node.target])
+                param = map_operation(self.modules[node.target], node.name)
             elif node.op == 'call_function':
-                op = FusedOperations([node], [self.load_arg(node.args)])
-                param = map_operation(op)
+                all_input_nodes = _annotate_node_with_tensor_value(node.args, self.load_arg(node.args))
+                op = FusedOperations([node], all_input_nodes=[all_input_nodes])
+                param = map_operation(op, node.name)
             if param is not None:
                 params.params.append(param)
         return params

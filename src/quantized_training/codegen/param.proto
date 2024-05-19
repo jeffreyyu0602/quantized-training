@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package example;
+
+message Tensor {
+  optional string node = 1;
+  optional string filepath = 2;
+  repeated int32 shape = 3;
+}
+
+// Define message for elementwise operations
+message VectorParam {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  oneof other_type {
+    Tensor other = 4;
+    float scalar = 5;
+  }
+}
+
+// Define message for GEMM, and layer norm
+message MatrixParam {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  Tensor weight = 4;
+  Tensor bias = 5;
+  repeated int32 stride = 6;
+  repeated int32 padding = 7;
+  repeated int32 dilation = 8;
+  bool transposed = 9;
+}
+
+// Define message for pooling operations
+message PoolingParam {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  repeated int32 kernel_size = 4;
+  repeated int32 stride = 5;
+  repeated int32 padding = 6;
+  repeated int32 dilation = 7;  // only for max_pool
+  bool ceil_mode = 8;
+  bool count_include_pad = 9;   // only for avg_pool
+  int32 divisor_override = 10;  // only for avg_pool
+}
+
+// Define message for reduction and softmax operations
+message ReduceParam {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  repeated int32 dim = 4;
+  bool keepdim = 5;
+}
+
+// Define message for transpose and permute operations
+message ShapeParam {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  repeated int32 dims = 4;
+}
+
+// One of GEMM, reduce, or shape change
+message Param {
+  string name = 1;
+  oneof param_type {
+    MatrixParam matrix_param = 2;
+    ReduceParam reduce_param = 3;
+    ShapeParam shape_param = 4;
+    PoolingParam pooling_param = 5;
+  }
+  repeated VectorParam vector_params = 6;
+  bool fused = 7;
+}
+
+message ModelParams {
+    repeated Param params = 1;
+}

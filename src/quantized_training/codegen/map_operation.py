@@ -1,10 +1,11 @@
 import operator
 import torch
+from torch.fx import Node
 
 
 aten = torch.ops.aten
 
-# GEMM operations
+# GEMM and layer norm
 GEMM_OPS_MAPPING = {
     # convolution(Tensor input, Tensor weight, Tensor? bias,
     # SymInt[] stride, SymInt[] padding, SymInt[] dilation, bool
@@ -16,6 +17,9 @@ GEMM_OPS_MAPPING = {
     aten.mm.default:    "gemm",
     # bmm(Tensor self, Tensor mat2) -> Tensor
     aten.bmm.default:   "gemm",
+    # native_layer_norm(Tensor input, SymInt[] normalized_shape,
+    # Tensor? weight, Tensor? bias, float eps) -> (Tensor, Tensor, Tensor)
+    aten.native_layer_norm.default: "layer_norm",
 }
 
 # Vector operations that can be fused with GEMM
@@ -55,19 +59,15 @@ REDUCE_OPS_MAPPING = {
     aten._softmax.default: "reduce_softmax",
 }
 
-# Vector operations that can not be fused with GEMM
-COMPLEX_VECTOR_OPS_MAPPING = {
-    # native_layer_norm(Tensor input, SymInt[] normalized_shape,
-    # Tensor? weight, Tensor? bias, float eps) -> (Tensor, Tensor, Tensor)
-    aten.native_layer_norm.default: "layer_norm",
+POOLING_OPS_MAPPING = {
     # avg_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[],
     # int[2] padding=0, bool ceil_mode=False, bool count_include_pad=True,
     # int? divisor_override=None) -> Tensor
-    aten.avg_pool2d.default: "avg_pool2d",
+    aten.avg_pool2d.default: "pooling_avg_pool2d",
     # max_pool2d_with_indices(Tensor self, int[2] kernel_size,
     # int[2] stride=[], int[2] padding=0, int[2] dilation=1,
     # bool ceil_mode=False) -> (Tensor, Tensor)
-    aten.max_pool2d_with_indices.default: "max_pool2d",
+    aten.max_pool2d_with_indices.default: "pooling_max_pool2d",
 }
 
 SHAPE_OPS_MAPPING = {
@@ -94,13 +94,18 @@ NOP_MAPPING = {
 }
 
 
-def _set_repeated_field(obj, attr_name, values):
-    if isinstance(values, torch.Tensor):
-        getattr(obj, attr_name).extend(list(values.shape))
-    elif isinstance(values, (tuple, list)):
-        getattr(obj, attr_name).extend(values)
-    elif values is not None:
-        getattr(obj, attr_name).append(values)
+def _set_repeated_field(obj, attr_path, value):
+    attributes = attr_path.split('.')
+    for attr in attributes:
+        obj = getattr(obj, attr)
+
+    if isinstance(value, Node):
+        obj.node = value.name
+        obj.shape.extend(list(value.tensor_value.shape))
+    elif isinstance(value, (tuple, list)):
+        obj.extend(value)
+    elif value is not None:
+        obj.append(value)
 
 
 def generate_param(node, args):
@@ -137,42 +142,44 @@ def generate_param(node, args):
         param.opcode = VECTOR_OPS_MAPPING[node.target]
         _set_repeated_field(param, "input", args[0])
         if len(args) > 1:
-            if isinstance(args[1], torch.Tensor):
+            if isinstance(args[1], Node):
                 _set_repeated_field(param, "other", args[1])
             else:
-                param.other.append(1)
+                param.scalar = args[1]  # second argument is a scalar
+    elif node.target == aten.native_layer_norm.default:
+        param = param_pb2.MatrixParam()
+        param.name = node.name
+        param.opcode = "layer_norm"
+        _set_repeated_field(param, "input", args[0])
+        _set_repeated_field(param, "weight", args[2])
+        _set_repeated_field(param, "bias", args[3])
     elif node.target in REDUCE_OPS_MAPPING:
         param = param_pb2.ReduceParam()
         param.name = node.name
         param.opcode = REDUCE_OPS_MAPPING[node.target]
         _set_repeated_field(param, "input", args[0])
         _set_repeated_field(param, "dim", args[1])
-    elif node.target == aten.native_layer_norm.default:
-        param = param_pb2.MatrixParam()
-        param.name = node.name
-        param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
-        _set_repeated_field(param, "input", args[0])
-        _set_repeated_field(param, "weight", args[1])
-        _set_repeated_field(param, "bias", args[2])
     elif node.target == aten.avg_pool2d.default:
         default_args = [None, None, [], 0, False, True, None]
         default_args[:len(args)] = args
-        param = param_pb2.MatrixParam()
+        param = param_pb2.PoolingParam()
         param.name = node.name
-        param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
+        param.opcode = POOLING_OPS_MAPPING[node.target]
         _set_repeated_field(param, "input", default_args[0])
-        _set_repeated_field(param, "weight", default_args[1])
-        _set_repeated_field(param, "bias", default_args[2])
+        _set_repeated_field(param, "kernel_size", default_args[1])
+        _set_repeated_field(param, "stride", default_args[2])
         _set_repeated_field(param, "padding", default_args[3])
         param.ceil_mode = default_args[4]
+        param.count_include_pad = default_args[5]
+        param.divisor_override = default_args[6]
     elif node.target == aten.max_pool2d_with_indices.default:
         default_args = [None, None, [], 0, 1, False]
         default_args[:len(args)] = args
-        param = param_pb2.MatrixParam()
+        param = param_pb2.PoolingParam()
         param.name = node.name
-        param.opcode = COMPLEX_VECTOR_OPS_MAPPING[node.target]
+        param.opcode = POOLING_OPS_MAPPING[node.target]
         _set_repeated_field(param, "input", default_args[0])
-        _set_repeated_field(param, "weight", default_args[1])
+        _set_repeated_field(param, "kernel_size", default_args[1])
         _set_repeated_field(param, "stride", default_args[2])
         _set_repeated_field(param, "padding", default_args[3])
         _set_repeated_field(param, "dilation", default_args[4])
@@ -194,20 +201,21 @@ def generate_param(node, args):
     return param
 
 
-def map_operation(op):
+def map_operation(op, name):
     from .build import param_pb2
-    params = [generate_param(*args) for args in zip(op.nodes, op.args)]
+    params = [generate_param(*args) for args in zip(op.nodes, op.all_input_nodes)]
     params = [param for param in params if param is not None]
 
     if len(params) == 0:
         return None
 
     param = param_pb2.Param()
+    param.name = name
     if params[0].opcode in ["conv", "gemm"]:
         param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
-            param.fused = True
             param.vector_params.extend(params[1:])
+            param.fused = True
         return param
 
     if params[0].opcode.startswith("vec"):
@@ -216,10 +224,14 @@ def map_operation(op):
 
     if len(params) > 1:
         print(params)
-        raise ValueError("Only one reduce or shape operation is allowed")
+        raise ValueError("Reduction, pooling, and shape permutation operation cannot be fused with other operations")
 
+    if params[0].opcode == "layer_norm":
+        param.matrix_param.CopyFrom(params[0])
     if params[0].opcode.startswith("reduce"):
         param.reduce_param.CopyFrom(params[0])
     elif params[0].opcode.startswith("shape"):
         param.shape_param.CopyFrom(params[0])
+    elif params[0].opcode.startswith("pooling"):
+        param.pooling_param.CopyFrom(params[0])
     return param

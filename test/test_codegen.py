@@ -5,7 +5,7 @@ import torch
 from torch.export import export
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification
 
-from quantized_training.codegen import ShapeProp
+from quantized_training.codegen.shape_prop import ShapeProp
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -87,12 +87,19 @@ def transform(
         shape_prop.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
-    args = flatten(list(example_args)) + list(example_kwargs.values())
-    gm_out = shape_prop.propagate(*args)[0][0]
+    uplifted_args = flatten(list(example_args)) + list(example_kwargs.values())
+    gm_out = shape_prop.propagate(*uplifted_args)[0][0]
+    # gm_out = shape_prop.mod(*example_args, *list(example_kwargs.values()))
 
     params = shape_prop.gen_code()
     with open('params.pb', 'wb') as f:
         f.write(params.SerializeToString())
+
+    import json
+    from google.protobuf.json_format import MessageToDict
+
+    data = MessageToDict(params)
+    print(json.dumps(data, indent=4))
 
     if generate_graph:
         shape_prop.gen_compute_graph(output_file)
