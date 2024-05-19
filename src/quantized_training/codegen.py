@@ -106,6 +106,7 @@ class ShapeProp:
         visited : Dict[Node, None] = {}
         for node in self.graph.nodes:
             if node.op != 'call_function':
+                visited[node] = None
                 continue
             all_nodes = [node]
             new_args = [node.args]
@@ -204,15 +205,15 @@ class ShapeProp:
                 edges.append((node.name, n.name))
 
         import graphviz
-        dot = graphviz.Digraph()
+        g = graphviz.Digraph()
 
         # Add nodes with attributes to the graph
         for node, attrs in nodes.items():
-            dot.node(node, **attrs)
+            g.node(node, **attrs)
 
         # Add edges to the graph
         for edge in edges:
-            dot.edge(edge[0], edge[1])
+            g.edge(edge[0], edge[1])
 
         # Render and save the graph
-        dot.render(output_file, format='png', cleanup=True)
+        g.render(output_file, format='svg', cleanup=True)

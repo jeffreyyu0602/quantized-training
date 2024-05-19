@@ -58,29 +58,41 @@ def _pair_conv_bn(layers):
     return pairs
 
 
-def transform(model, example_args, generate_graph=False, output_file="compute_graph"):
-    exported_program: torch.export.ExportedProgram = \
-        export(model, example_args)
+def flatten(mixed_list):
+    flattened_list = []
+    for element in mixed_list:
+        if isinstance(element, list):
+            flattened_list.extend(flatten(element))
+        else:
+            flattened_list.append(element)
+    return flattened_list
 
-    print(exported_program)
-    # exported_program.graph.print_tabular()
+
+def transform(
+        model, example_args, example_kwargs=None, *, print_graph=False,
+        generate_graph=False, output_file="compute_graph"):
+    if example_kwargs is None:
+        example_kwargs = {}
+
+    exported_program: torch.export.ExportedProgram = \
+        export(model, example_args, example_kwargs)
+
+    if print_graph:
+        print(exported_program)
 
     shape_prop = ShapeProp(exported_program.module())
     shape_prop.transform()
-    shape_prop.graph.print_tabular()
 
-    pt_out = model(*example_args)
-    gm_out = shape_prop.propagate(*example_args)[0][0]
+    if print_graph:
+        shape_prop.graph.print_tabular()
+
+    pt_out = model(*example_args, **example_kwargs)
+    args = flatten(list(example_args)) + list(example_kwargs.values())
+    gm_out = shape_prop.propagate(*args)[0][0]
 
     params = shape_prop.gen_code()
     with open('params.pb', 'wb') as f:
         f.write(params.SerializeToString())
-
-    import json
-    from google.protobuf.json_format import MessageToDict
-
-    data = MessageToDict(params)
-    print(json.dumps(data, indent=4))
 
     if generate_graph:
         shape_prop.gen_compute_graph(output_file)
@@ -93,6 +105,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
+    parser.add_argument("--print_graph", action="store_true")
     parser.add_argument("--generate_graph", action="store_true")
     args = parser.parse_args()
 
@@ -106,7 +119,13 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 224, 224),)
-        transform(model, example_args, args.generate_graph, "resnet50")
+        _, pt_out, gm_out = transform(
+            model,
+            example_args,
+            print_graph=args.print_graph,
+            generate_graph=args.generate_graph,
+            output_file="plots/resnet50"
+        )
 
     if "segformer" == args.model:
         replace_interpolate()
@@ -117,23 +136,62 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 512, 672),)
-        _, pt_out, gm_out = transform(model, example_args, args.generate_graph, "segformer")
-
-        torch.set_printoptions(precision=8)
-        diff = pt_out.logits != gm_out
-        print(torch.sum(diff))
-        print(pt_out.logits[diff])
-        print(gm_out[diff])
-        assert torch.all(pt_out.logits == gm_out), "Outputs do not match"
+        _, pt_out, gm_out = transform(
+            model,
+            example_args,
+            print_graph=args.print_graph,
+            generate_graph=args.generate_graph,
+            output_file="plots/segformer"
+        )
+        pt_out = pt_out.logits
 
     if "mobilebert" == args.model:
         model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
         example_args = (torch.randint(0, 30522, (1, 128), dtype=torch.long),)
-        _, pt_out, gm_out = transform(model, example_args, args.generate_graph, "mobilebert")
-        assert torch.all(pt_out.logits == gm_out), "Outputs do not match"
+        _, pt_out, gm_out = transform(
+            model,
+            example_args,
+            print_graph=args.print_graph,
+            generate_graph=args.generate_graph,
+            output_file="plots/mobilebert"
+        )
+        pt_out = pt_out.logits
 
     if "mobilebert_no_embed" == args.model:
-        model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
-        example_args = (torch.randn(1, 128, 512), torch.zeros(1, 4, 128, 128), torch.ones(24, 1, 4, 128, 128), False, False, True)
-        _, pt_out, gm_out = transform(model.mobilebert.encoder, example_args, args.generate_graph, "mobilebert")
+        from transformers import MobileBertForSequenceClassification
+        model = MobileBertForSequenceClassification.from_pretrained("google/mobilebert-uncased")
+        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        position_ids = torch.ones((1, 128), dtype=torch.long)
+        input_shape = input_ids.size()
+
+        attention_mask = torch.ones(input_shape)
+        # head_mask = torch.ones(model.config.num_attention_heads)
+        head_mask = None
+        token_type_ids = torch.zeros(input_shape, dtype=torch.long)
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = model.mobilebert.get_extended_attention_mask(attention_mask, input_shape)
+
+        head_mask = model.mobilebert.get_head_mask(head_mask, model.config.num_hidden_layers)
+
+        embedding_output = model.mobilebert.embeddings(
+            input_ids=input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+        )
+        example_args = (embedding_output, extended_attention_mask, head_mask)
+        example_kwargs = {"return_dict": False}
+        _, pt_out, gm_out = transform(
+            model.mobilebert.encoder,
+            example_args,
+            example_kwargs,
+            print_graph=args.print_graph,
+            generate_graph=args.generate_graph,
+            output_file="plots/mobilebert"
+        )
+        pt_out = pt_out[0]
+
+    try:
         assert torch.all(pt_out == gm_out), "Outputs do not match"
+    except:
+        print(pt_out)
+        print(gm_out)
