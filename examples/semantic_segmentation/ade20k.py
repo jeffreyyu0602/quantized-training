@@ -141,21 +141,6 @@ def main(args):
     model.eval()
     model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
 
-    def calibrate(model):
-        train_dataset = load_dataset("scene_parse_150", split="train")
-        train_dataset.set_transform(transform)
-
-        for i, data in enumerate(tqdm(train_dataset)):
-            pixel_values = data["pixel_values"].to(device)
-            with torch.no_grad():
-                model(pixel_values)
-            if i == args.max_calibration_steps:
-                break
-
-        for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
-                module.disable_observer()
-
     qconfig = get_qconfig(args.activation, args.weight, args.error,
                           args.record_histogram, args.force_scale_power_of_two)
     operations = args.quantize_forward.lower().split(",")
@@ -175,7 +160,24 @@ def main(args):
         )
 
     example_args = (dataset[0]["pixel_values"].to(device),)
-    model = quantize_pt2e(model, args, qconfig_mapping, example_args, run_fn=calibrate)
+    model = quantize_pt2e(model, args, qconfig_mapping, example_args)
+
+    def calibrate(model):
+        train_dataset = load_dataset("scene_parse_150", split="train")
+        train_dataset.set_transform(transform)
+
+        for i, data in enumerate(tqdm(train_dataset)):
+            pixel_values = data["pixel_values"].to(device)
+            with torch.no_grad():
+                model(pixel_values)
+            if i == args.max_calibration_steps:
+                break
+
+    if args.activation and args.activation.qscheme:
+        calibrate(model)
+        for module in model.modules():
+            if isinstance(module, FakeQuantizeBase):
+                module.disable_observer()
 
     results = []
     gt_seg_maps = []

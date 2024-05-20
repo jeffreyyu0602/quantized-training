@@ -9,7 +9,7 @@ from .utils import SLURM_ARGS
 
 __all__ = [
     "add_training_args",
-    "QuantizationConfig",
+    "QuantizationSpec",
 ]
 
 
@@ -83,7 +83,7 @@ Parameter details:
 """
 
 @dataclass
-class QuantizationConfig:
+class QuantizationSpec:
     dtype: str
     qscheme: str
     quant_max: float
@@ -121,13 +121,13 @@ class QuantizationConfig:
                 f"quant_max is a required for {params['qscheme']}."
             )
 
-        return QuantizationConfig(**params)
+        return QuantizationSpec(**params)
 
     def to_dict(self):
         return asdict(self)
 
 
-class QSpecs(collections.UserDict):
+class QuantizationArguments(collections.UserDict):
     """
     Class for handling quantization parameters.
     """
@@ -138,7 +138,7 @@ class QSpecs(collections.UserDict):
         Args:
             *args:        Passing a dict will initialize using those entries.
         """
-        super(QSpecs, self).__init__(*args, **kwargs)
+        super(QuantizationArguments, self).__init__(*args, **kwargs)
 
         defaults = {
             "activation": None,
@@ -258,21 +258,21 @@ class QuantizationArguments:
     activation: str = field(
         default=None,
         metadata={
-            "type": QuantizationConfig.from_str,
+            "type": QuantizationSpec.from_str,
             "help": "Activation data type and quantization configuration."
         }
     )
     weight: str = field(
         default=None,
         metadata={
-            "type": QuantizationConfig.from_str,
+            "type": QuantizationSpec.from_str,
             "help": "Weight data type and quantization configuration."
         }
     )
     error: str = field(
         default=None,
         metadata={
-            "type": QuantizationConfig.from_str,
+            "type": QuantizationSpec.from_str,
             "help": "Activation gradient data type and quantization configuration."
         }
     )
@@ -415,7 +415,7 @@ def add_training_args(parser=None):
     parser.add_argument(
         "--activation",
         default=None,
-        type=QuantizationConfig.from_str,
+        type=QuantizationSpec.from_str,
         help=(
             "Activation quantization data type and configurations. "
             "Comma-separated key=value pairs using abbreviations or full names. "
@@ -425,7 +425,7 @@ def add_training_args(parser=None):
     parser.add_argument(
         "--weight",
         default=None,
-        type=QuantizationConfig.from_str,
+        type=QuantizationSpec.from_str,
         help=(
             "Weight quantization data type and configurations. Format same as activation."
         ),
@@ -433,7 +433,7 @@ def add_training_args(parser=None):
     parser.add_argument(
         "--error",
         default=None,
-        type=QuantizationConfig.from_str,
+        type=QuantizationSpec.from_str,
         help=(
             "Activation gradient quantization data type and configurations. Format same as activation."
         ),

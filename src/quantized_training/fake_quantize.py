@@ -127,7 +127,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         quant_max: float = None,
         amax_history_len: int = 50,
         ch_axis: int = 1,
-        block_size: int = 16,
+        block_size: int = 32,
         record_histogram: bool = False,
         force_scale_power_of_two = False,
         **kwargs,
@@ -154,7 +154,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
         # Create histogram buffer
         if record_histogram:
-            self.register_buffer("histogram", torch.zeros(254, **factory_kwargs))
+            self.register_buffer("histogram", torch.zeros(254, **factory_kwargs), persistent=False)
         self.record_histogram = record_histogram
 
     @torch.jit.export
@@ -191,7 +191,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         #     X -= attention_mask
 
         if self.record_histogram:
-            self._combine_histograms(X)
+            exp = torch.floor(torch.log2(torch.abs(X.detach().float())))
+            self.histogram += torch.histc(exp, 254, min=-126, max=127)
 
         if self.observer_enabled[0] == 1:
             x = X.detach()  # avoid keeping autograd tape
@@ -220,8 +221,3 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         #     X += attention_mask
 
         return X
-
-    def _combine_histograms(self, X: torch.Tensor) -> None:
-        x = X.detach().float()
-        exp = torch.floor(torch.log2(torch.abs(x)))
-        self.histogram += torch.histc(exp, 254, min=-126, max=127)

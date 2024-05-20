@@ -18,16 +18,15 @@ from .qconfig_mapping import (
 
 def quantize_pt2e(
         model, args, qconfig_mapping, example_args, example_kwargs=None,
-        dynamic_shapes=None, run_fn=None):
-    object_type_mappings = qconfig_mapping.object_type_qconfigs
-    for name, module in model.named_modules():
-        if (
-            (qconfig := object_type_mappings.get(type(module))) is not None
-            and type(qconfig.weight) != nn.Identity
-        ):
-            weight_fake_quant = qconfig.weight(device=module.weight.device)
-            weight_fake_quant(module.weight)
-            module.weight.data = weight_fake_quant(module.weight.data)
+        dynamic_shapes=None):
+    # TODO: this is a temporary solution to quantize weights. Should do it
+    # the same way as activations by injecting observers in the graph.
+    for _, module in model.named_modules():
+        qconfig = qconfig_mapping.object_type_qconfigs.get(type(module))
+        if qconfig is not None:
+            obs_or_fq = qconfig.weight(device=module.weight.device)
+            obs_or_fq(module.weight)
+            module.weight.data = obs_or_fq(module.weight.data)
 
     # torch.export does not support training due to inplace operations
     # from torch.export import export
@@ -50,9 +49,6 @@ def quantize_pt2e(
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
-
-    if args.activation and args.activation.qscheme and run_fn is not None:
-        run_fn(model)
 
     return model
 

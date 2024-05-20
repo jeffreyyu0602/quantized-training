@@ -11,9 +11,11 @@ import evaluate
 import librosa
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.ao.nn.intrinsic as nni
 from datasets import DatasetDict, Dataset, load_dataset
 from scipy.fftpack import dct
-from torch import nn
+from torch.ao.quantization import FakeQuantizeBase
 from tqdm import tqdm
 from transformers import set_seed
 
@@ -285,6 +287,17 @@ def main(args):
 
         quantize(model, args, run_fn)
 
+    def _convert_to_float(model):
+        # Convert intrinsic modules back to float modules
+        for name, module in model.named_children():
+            if isinstance(module, nni._FusedModule):
+                new_mod = module.to_float()
+                for pre_hook_fn in module._forward_pre_hooks.values():
+                    new_mod.register_forward_pre_hook(pre_hook_fn)
+                if hasattr(module, "activation_pre_process"):
+                    setattr(new_mod, "activation_pre_process", module.activation_pre_process)
+                model._modules[name] = new_mod
+
     if args.model_id is not None:
         model.load_state_dict(torch.load(args.model_id, map_location=device))
 
@@ -303,31 +316,24 @@ def main(args):
             modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
 
+            example_args = (torch.tensor(raw_dataset["test"][:128]["audio"]).to(device),)
+            dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
+            model = quantize_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
+
             def calibrate(model):
                 for batch in tqdm(train_dataloader):
                     with torch.no_grad():
                         model(batch["input_values"].to(device))
 
-                for module in model.modules():
-                    if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                        module.disable_observer()
+            if args.activation and args.activation.qscheme:
+                calibrate(model)
 
-            example_args = (torch.tensor(raw_dataset["test"][:128]["audio"]).to(device),)
-            dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
-            model = quantize_pt2e(model, args, example_args,
-                                  dynamic_shapes=dynamic_shapes, run_fn=calibrate)
-
-        # Convert intrinsic modules back to float modules for evaluation
         if args.qmode == "qat":
-            import torch.ao.nn.intrinsic as nni
-            for name, module in model.named_children():
-                if isinstance(module, nni._FusedModule):
-                    new_mod = module.to_float()
-                    for pre_hook_fn in module._forward_pre_hooks.values():
-                        new_mod.register_forward_pre_hook(pre_hook_fn)
-                    if hasattr(module, "activation_pre_process"):
-                        setattr(new_mod, "activation_pre_process", module.activation_pre_process)
-                    model._modules[name] = new_mod
+            _convert_to_float(model)
+
+        for module in model.modules():
+            if isinstance(module, FakeQuantizeBase):
+                module.disable_observer()
 
         model.eval()
         result = raw_dataset["test"].map(
@@ -338,9 +344,7 @@ def main(args):
         return
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_train_epochs, eta_min=0.0001
-    )
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_train_epochs, eta_min=0.0001)
 
     best_acc = 0.0
     best_state = None

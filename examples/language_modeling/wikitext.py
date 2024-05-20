@@ -57,27 +57,6 @@ def main(args):
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
-    def calibrate(model):
-        validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-        encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
-        seq_len = encodings.input_ids.size(1)
-        steps = 0
-        for begin_loc in tqdm(range(0, seq_len - args.max_length, args.stride)):
-            end_loc = min(begin_loc + args.max_length, seq_len)
-            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
-            target_ids = input_ids.clone()
-            with torch.no_grad():
-                model(input_ids, labels=target_ids)
-
-            steps += 1
-            if steps == args.max_calibration_steps - 1:
-                break
-
-        # fix quantization parameters
-        for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
-                module.disable_observer()
-
     # do_scaling = args.activation and args.activation.qscheme
     # quantize(model, args, run_fn=calibrate if do_scaling else None)
 
@@ -97,8 +76,29 @@ def main(args):
         example_args=(input_ids,),
         example_kwargs={"labels": target_ids},
         dynamic_shapes=dynamic_shapes,
-        run_fn=calibrate,
     )
+
+    def calibrate(model):
+        validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
+        seq_len = encodings.input_ids.size(1)
+        steps = 0
+        for begin_loc in tqdm(range(0, seq_len - args.max_length, args.stride)):
+            end_loc = min(begin_loc + args.max_length, seq_len)
+            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
+            target_ids = input_ids.clone()
+            with torch.no_grad():
+                model(input_ids, labels=target_ids)
+
+            steps += 1
+            if steps == args.max_calibration_steps - 1:
+                break
+
+    if args.activation and args.activation.qscheme:
+        calibrate(model)
+        for module in model.modules():
+            if isinstance(module, FakeQuantizeBase):
+                module.disable_observer()
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
