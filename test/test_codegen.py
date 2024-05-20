@@ -118,11 +118,30 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default=None, help="Output directory for generated tensor files")
     args = parser.parse_args()
 
+    if "resnet18" == args.model:
+        from torchvision.models import resnet18, ResNet18_Weights
+        model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        model.eval()
+
+        module_names = [name for name, _ in model.named_modules()]
+        modules_to_fuse = _pair_conv_bn(module_names)
+        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
+
+        example_args = (torch.randn(1, 3, 224, 224),)
+        _, pt_out, gm_out = transform(
+            model,
+            example_args,
+            print_graph=args.print_graph,
+            generate_graph=args.generate_graph,
+            output_file="resnet18",
+            output_dir=args.output_dir,
+        )
+
     if "resnet50" == args.model:
         from torchvision.models import resnet50, ResNet50_Weights
         model = resnet50(weights=ResNet50_Weights.DEFAULT)
         model.eval()
-        
+
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
