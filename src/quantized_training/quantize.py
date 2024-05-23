@@ -74,16 +74,16 @@ def quantize(model, args, run_fn=None, inplace=True):
                           args.record_histogram, args.force_scale_power_of_two)
 
     propagate_config(model, 'qconfig', qconfig)
-    convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
+    # convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
     # ASPLOS experiments perform quantization after converting model dtype to bfloat16
-    # for name, param in model.named_parameters():
-    #     if not 'bias' in name:
-    #         param.data = qconfig.weight(device=param.device)(param.data)
+    for name, param in model.named_parameters():
+        if not 'bias' in name:
+            param.data = qconfig.weight(device=param.device)(param.data)
 
     if run_fn is not None:
         run_fn(model)

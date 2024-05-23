@@ -60,19 +60,14 @@ def main(args):
     # do_scaling = args.activation and args.activation.qscheme
     # quantize(model, args, run_fn=calibrate if do_scaling else None)
 
-    qconfig = get_qconfig(args.activation, args.weight, args.error,
-                          args.record_histogram, args.force_scale_power_of_two)
-    operations = args.quantize_forward.lower().split(",")
-    qconfig_mapping = get_qconfig_mapping(qconfig, operations)
-
+    from quantized_training.quantize_pt2e import prepare
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     target_ids = input_ids.clone()
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
-    model = quantize_pt2e(
+    model = prepare(
         model,
         args,
-        qconfig_mapping,
         example_args=(input_ids,),
         example_kwargs={"labels": target_ids},
         dynamic_shapes=dynamic_shapes,

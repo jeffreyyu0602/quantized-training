@@ -17,7 +17,7 @@ from .map_operation import (
 logger = logging.getLogger(__name__)
 
 
-def _annotate_node_with_tensor_value(nodes, values, last_node=None):
+def _annotate_nodes_with_tensor_value(nodes, values, last_node=None):
     all_input_nodes = []
     for n, v in zip(nodes, values):
         if isinstance(v, torch.Tensor):
@@ -45,7 +45,8 @@ class FusedOperations(nn.Module):
             assert node.op == 'call_function', "Only call_function is supported"
             active_args = tuple(arg if arg != 'placeholder' else result for arg in args[i])
             result = node.target(*active_args, **kwargs[i])
-            self.all_input_nodes.append(_annotate_node_with_tensor_value(self.args[i], active_args, last_node))
+            annotated_nodes = _annotate_nodes_with_tensor_value(self.args[i], active_args, last_node)
+            self.all_input_nodes.append(annotated_nodes)
             last_node = node
         return result
 
@@ -179,7 +180,7 @@ class ShapeProp:
             ):
                 param = map_operation(self.modules[node.target], node.name, output_dir)
             elif node.op == 'call_function':
-                nodes = _annotate_node_with_tensor_value(node.args, self.load_arg(node.args))
+                nodes = _annotate_nodes_with_tensor_value(node.args, self.load_arg(node.args))
                 op = FusedOperations([node], all_input_nodes=[nodes])
                 param = map_operation(op, node.name, output_dir)
             if param is not None:

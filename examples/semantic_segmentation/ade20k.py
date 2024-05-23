@@ -139,28 +139,58 @@ def main(args):
     # fuse conv with batch norm
     modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
     model.eval()
-    model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
-
-    qconfig = get_qconfig(args.activation, args.weight, args.error,
-                          args.record_histogram, args.force_scale_power_of_two)
-    operations = args.quantize_forward.lower().split(",")
-    qconfig_mapping = get_qconfig_mapping(qconfig, operations)
-
-    if args.activation is not None:
-        config = args.activation.to_dict()
-        config["quant_max"] = 255
-        activation = FusedAmaxObsFakeQuantize.with_args(
-            **config,
-            record_histogram=args.record_histogram,
-            force_scale_power_of_two=args.force_scale_power_of_two,
-        )
-        qconfig_opt = qconfig._replace(activation=activation)
-        qconfig_mapping.set_module_name_object_type_order(
-            r'^matmul_(\d*[13579])$', torch.ops.aten.matmul.default, 0, qconfig_opt
-        )
-
+    model = torch.ao.quantization.fuse_modules(model, modules_to_fuse).to(device)
     example_args = (dataset[0]["pixel_values"].to(device),)
-    model = quantize_pt2e(model, args, qconfig_mapping, example_args)
+
+    # qconfig = get_qconfig(args.activation, args.weight, args.error,
+    #                       args.record_histogram, args.force_scale_power_of_two)
+    # operations = args.quantize_forward.lower().split(",")
+    # qconfig_mapping = get_qconfig_mapping(qconfig, operations)
+
+    # if args.activation is not None:
+    #     config = args.activation.to_dict()
+    #     config["quant_max"] = 255
+    #     activation = FusedAmaxObsFakeQuantize.with_args(
+    #         **config,
+    #         record_histogram=args.record_histogram,
+    #         force_scale_power_of_two=args.force_scale_power_of_two,
+    #     )
+    #     qconfig_opt = qconfig._replace(activation=activation)
+    #     qconfig_mapping.set_module_name_object_type_order(
+    #         r'^matmul_(\d*[13579])$', torch.ops.aten.matmul.default, 0, qconfig_opt
+    #     )
+
+    # model = quantize_pt2e(model, args, qconfig_mapping, example_args)
+
+    from quantized_training.quantize_pt2e import prepare
+    model = prepare(model, args, example_args)
+
+    softmax_outputs = [
+        'activation_post_process_12',
+        'activation_post_process_32',
+        'activation_post_process_54',
+        'activation_post_process_74',
+        'activation_post_process_96',
+        'activation_post_process_116',
+        'activation_post_process_136',
+        'activation_post_process_154',
+    ]
+    softmax_outputs_without_weight_quantization = [
+        'activation_post_process_7',
+        'activation_post_process_19',
+        'activation_post_process_32',
+        'activation_post_process_44',
+        'activation_post_process_57',
+        'activation_post_process_69',
+        'activation_post_process_81',
+        'activation_post_process_92',
+    ]
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, FakeQuantizeBase)
+            and name in softmax_outputs
+        ):
+            module.quant_max = 255
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
@@ -172,12 +202,11 @@ def main(args):
                 model(pixel_values)
             if i == args.max_calibration_steps:
                 break
+    calibrate(model)
 
-    if args.activation and args.activation.qscheme:
-        calibrate(model)
-        for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
-                module.disable_observer()
+    for module in model.modules():
+        if isinstance(module, FakeQuantizeBase):
+            module.disable_observer()
 
     results = []
     gt_seg_maps = []

@@ -1,61 +1,16 @@
 import argparse
 import collections
 import json
-from dataclasses import dataclass, asdict, field
-from enum import Enum, IntEnum
+from dataclasses import dataclass, field
 from typing import Optional, List
 
 from .utils import SLURM_ARGS
+from .quantizer.quantizer import QuantizationSpec
 
 __all__ = [
     "add_training_args",
-    "QuantizationSpec",
 ]
 
-
-# Enum for rounding modes
-class RoundingMode(IntEnum):
-    nearest = 0
-    floor = 1
-    even = 2
-
-    @staticmethod
-    def string_enums():
-        return [s.name for s in list(RoundingMode)]
-
-
-class QScheme(Enum):
-    PER_TENSOR = "per_tensor"
-    PER_CHANNEL = "per_channel"
-    PER_VECTOR = "per_vector"
-
-
-DTYPE_TO_QUANT_MAX = {
-    "int8": 127,
-    "int4": 7,
-    "posit8_1": 64,
-    "fp8_e4m3": 448,
-    "fp8_e5m2": 57344,
-    "fp4_e2m1": 6,
-}
-
-ABBREV_MAP = {
-    'dt': 'dtype',
-    'qs': 'qscheme',
-    'qmax': 'quant_max',
-    'ahl': 'amax_history_len',
-    'ax': 'ch_axis',
-    'bs': 'block_size',
-}
-
-PARAMS_TYPE = {
-    'dtype': str,
-    'qscheme': QScheme,
-    'quant_max': float,
-    'amax_history_len': int,
-    'ch_axis': int,
-    'block_size': int,
-}
 
 qconfig_help_string = """
 Input arguments as a comma-separated list. The first argument must specify the dtype.
@@ -78,53 +33,9 @@ Parameter details:
   - qscheme (str): Quantization scheme
   - quant_max (float): Maximum quantization value
   - amax_history_len (int): Length of the amax history (default: 50)
-  - ch_axis (int): Channel axis (default: 1)
-  - block_size (int): Block size (default: 32)
+  - ch_axis (int): Channel axis
+  - block_size (int): Block size
 """
-
-@dataclass
-class QuantizationSpec:
-    dtype: str
-    qscheme: str
-    quant_max: float
-    amax_history_len: int
-    ch_axis: int
-    block_size: int
-
-    @staticmethod
-    def from_str(s):
-        assert(s != None), "String elem_format == None"
-        s = s.lower()
-        fields = s.split(',')
-
-        # Initialize default arguments
-        params = {
-            'dtype': fields[0],
-            'qscheme': None,
-            'quant_max': DTYPE_TO_QUANT_MAX.get(fields[0]),
-            'amax_history_len': 50,
-            'ch_axis': 1,
-            'block_size': 32,
-        }
-
-        # Parse the input string
-        for item in fields[1:]:
-            key, value = item.split('=')
-            key = ABBREV_MAP.get(key, key)
-            if key not in PARAMS_TYPE:
-                raise argparse.ArgumentTypeError(f"Unknown argument: {key}")
-            params[key] = PARAMS_TYPE[key](value)
-
-        # Check argument
-        if params['qscheme'] is not None and params['quant_max'] is None:
-            raise argparse.ArgumentTypeError(
-                f"quant_max is a required for {params['qscheme']}."
-            )
-
-        return QuantizationSpec(**params)
-
-    def to_dict(self):
-        return asdict(self)
 
 
 class QuantizationArguments(collections.UserDict):

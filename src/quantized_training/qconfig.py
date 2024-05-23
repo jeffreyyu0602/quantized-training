@@ -50,21 +50,3 @@ def get_qconfig(activation, weight, error, record_histogram=False,
         weight=_create_fake_quant(weight, **kwargs),
         error=_create_fake_quant(error, **kwargs)
     )
-
-    import torch
-    from torch.ao.quantization import (
-        MovingAverageMinMaxObserver,
-        FusedMovingAvgObsFakeQuantize,
-    )
-    act_fake_quant = FusedMovingAvgObsFakeQuantize.with_args(
-        observer=MovingAverageMinMaxObserver,
-        quant_min=-128,
-        quant_max=127,
-        dtype=torch.qint8,
-        qscheme=torch.per_tensor_symmetric,
-    )
-    return QConfig(
-        activation=act_fake_quant,
-        weight=_create_fake_quant(weight, **kwargs),
-        error=_create_fake_quant(error, **kwargs)
-    )

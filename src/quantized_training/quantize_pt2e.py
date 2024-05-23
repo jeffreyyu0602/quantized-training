@@ -2,10 +2,14 @@ import re
 from typing import Dict
 
 import torch
-from torch import nn
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix, assert_and_get_unique_device
 from torch.fx import GraphModule, Graph, Node
+from torch._export import capture_pre_autograd_graph
+
+from .fake_quantize import FusedAmaxObsFakeQuantize
+from .quantizer import QuantizationSpec
+from .quantizer.xnnpack_quantizer import QuantizationConfig, XNNPACKQuantizer
 
 from .qconfig_mapping import (
     _OBJECT_TYPE_DICT_KEY,
@@ -16,29 +20,61 @@ from .qconfig_mapping import (
 )
 
 
+def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
+    """ Create observer or fake quantize objects based on quantization spec
+
+    Args:
+       quantization_spec: used to store parameters to create the observer or fake quantizer
+       obs_or_fq_map: this is a map from edge/output to the corresponding observer/fake_quant
+       instance, it may be reused for different edge/output depending on configuration
+    """
+    if quantization_spec is None:
+        return None
+
+    assert isinstance(quantization_spec, QuantizationSpec)
+    observer_or_fake_quant_ctr = quantization_spec.observer_or_fake_quant_ctr
+    kwargs = quantization_spec.to_dict()
+    kwargs.pop("observer_or_fake_quant_ctr")
+    return FusedAmaxObsFakeQuantize.with_args(**kwargs)()
+
+
+def prepare(
+        model, args, example_args, example_kwargs=None, dynamic_shapes=None):
+    # TODO: monkey patching to replace the default implementation of _create_obs_or_fq_from_qspec
+    import torch.ao.quantization.fx.prepare
+    import sys
+    sys.modules["torch.ao.quantization.fx.prepare"]._create_obs_or_fq_from_qspec = \
+        _create_obs_or_fq_from_qspec
+    
+    from torch.ao.quantization.quantize_pt2e import prepare_pt2e
+
+    model = capture_pre_autograd_graph(
+        model,
+        args=example_args,
+        kwargs=example_kwargs,
+        dynamic_shapes=dynamic_shapes,
+    )
+
+    qconfig = QuantizationConfig(args.activation, args.error, args.weight, None)
+    quantizer = XNNPACKQuantizer().set_global(qconfig)
+
+    prepare_pt2e(model, quantizer)
+    model.recompile()
+    model.graph.print_tabular()
+    return model
+
+
+# TODO: this function will be replaced by prepare in the future
 def quantize_pt2e(
         model, args, qconfig_mapping, example_args, example_kwargs=None,
         dynamic_shapes=None):
-    # TODO: this is a temporary solution to quantize weights. Should do it
-    # the same way as activations by injecting observers in the graph.
-    for _, module in model.named_modules():
+    for name, module in model.named_modules():
         qconfig = qconfig_mapping.object_type_qconfigs.get(type(module))
         if qconfig is not None:
-            obs_or_fq = qconfig.weight(device=module.weight.device)
+            obs_or_fq = qconfig.weight(device=module.weight.device, name=name)
             obs_or_fq(module.weight)
             module.weight.data = obs_or_fq(module.weight.data)
 
-    # torch.export does not support training due to inplace operations
-    # from torch.export import export
-    # exported_program: torch.export.ExportedProgram = export(
-    #     model,
-    #     args=example_args,
-    #     kwargs=example_kwargs,
-    #     dynamic_shapes=dynamic_shapes,
-    # )
-    # model = prepare_pt2e(exported_program.module(), qconfig_mapping)
-
-    from torch._export import capture_pre_autograd_graph
     model = capture_pre_autograd_graph(
         model,
         args=example_args,
@@ -46,6 +82,7 @@ def quantize_pt2e(
         dynamic_shapes=dynamic_shapes,
     )
     model = prepare_pt2e(model, qconfig_mapping)
+    model.graph.print_tabular()
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
