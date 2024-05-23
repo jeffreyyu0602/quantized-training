@@ -158,14 +158,13 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             if amax_history.shape[0] > 1:
                 new_amax_history = torch.roll(amax_history, -1, 0)
                 amax_history.copy_(new_amax_history)
-            amax_history[0].fill_(curr_amax.float())
+            amax_history[0] = curr_amax
 
             sf = amax / quant_max
             sf = torch.where(torch.isfinite(sf), sf, scale)
             if force_scale_power_of_two:
                 sf = torch.pow(2, torch.floor(torch.log2(sf)))
-            # TODO: ideally copy_ should be used so that we can avoid reassignment.
-            # However, the computed scale might have a different shape right now.
+            # TODO: use inplace operation to update scale
             scale = sf
 
         if fake_quant_enabled[0] == 1:

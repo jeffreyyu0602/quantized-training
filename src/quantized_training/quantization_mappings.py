@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.ao.nn.intrinsic as nni
 import peft.tuners.lora as lora
 
-from transformers.activations import ACT2CLS
+from transformers.activations import GELUActivation
 from transformers.models import bert, distilbert, gpt2, llama, mobilebert, roberta, whisper
 from transformers.pytorch_utils import Conv1D
 
@@ -43,19 +43,17 @@ HF_TRANSFORMER_MODULE_MAPPINGS: Dict[Callable, Any] = {
 }
 
 
-def get_modules(module):
-    return [getattr(nn, name) for name in module.__all__]
-
-
-ACTFNS = [
-    value[0] if isinstance(value, tuple) else value
-    for value in ACT2CLS.values()
-]
-
 QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
-    'activation': get_modules(nn.modules.activation) + ACTFNS,
-    'batchnorm': get_modules(nn.modules.batchnorm),
-    'gemm': get_modules(nn.modules.conv) + [
+    'activation': [
+        nn.ReLU,
+        nn.GELU,
+        nn.Softmax,
+        GELUActivation,
+    ],
+    'gemm': [
+        nn.Conv1d,
+        nn.Conv2d,
+        nn.Conv3d,
         nn.Linear,
         Conv1D,
         quantizable.MatmulFunctional,
@@ -65,30 +63,10 @@ QCONFIG_PROPAGATE_MODULE_CLASS_LIST = {
         llama.modeling_llama.LlamaRMSNorm,
         mobilebert.modeling_mobilebert.NoNorm,
     ],
-    'pooling': get_modules(nn.modules.pooling),
-    'residual': [quantizable.AddFunctional],
-    'scaling': [quantizable.MulFunctional],
-}
-
-aten = torch.ops.aten
-QUANTIZED_OPERATORS = {
-    "activation": [
-        (aten.gelu.default, 0),
-        (aten.relu.default, 0),
-        (aten.sigmoid.default, 0),
-        (aten.softmax.int, 0),
+    'residual': [
+        quantizable.AddFunctional,
     ],
-    "batchnorm": [
-        (aten.cudnn_batch_norm.default, 0),
+    'scaling': [
+        quantizable.MulFunctional,
     ],
-    "gemm": [
-        (aten.conv2d.default, 0),
-        (aten.linear.default, 0),
-        aten.matmul.default,
-    ],
-    "layernorm": [
-        (aten.layer_norm.default, 0)
-    ],
-    "residual": [aten.add.Tensor],
-    "scaling": [aten.div.Tensor],
 }

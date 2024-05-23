@@ -20,7 +20,7 @@ from tqdm import tqdm
 from transformers import set_seed
 
 from honk_model import SpeechResModel, configs
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import add_training_args, prepare_pt2e, quantize, run_task
 
 logger = logging.getLogger(__name__)
 
@@ -316,10 +316,9 @@ def main(args):
             modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
 
-            from quantized_training.quantize_pt2e import prepare
             example_args = (torch.tensor(raw_dataset["test"][:128]["audio"]).to(device),)
             dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
-            model = prepare(model, args, example_args, dynamic_shapes=dynamic_shapes)
+            model = prepare_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
 
             def calibrate(model):
                 for batch in tqdm(train_dataloader):

@@ -9,15 +9,12 @@ from torch.ao.quantization import FakeQuantizeBase
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantized_training import (
-    FusedAmaxObsFakeQuantize,
     add_training_args,
-    get_qconfig,
-    get_qconfig_mapping,
-    quantize,
-    quantize_pt2e,
-    run_task,
     plot_layer_distribution,
-    plot_layer_range
+    plot_layer_range,
+    prepare_pt2e,
+    quantize,
+    run_task,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,12 +57,11 @@ def main(args):
     # do_scaling = args.activation and args.activation.qscheme
     # quantize(model, args, run_fn=calibrate if do_scaling else None)
 
-    from quantized_training.quantize_pt2e import prepare
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     target_ids = input_ids.clone()
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
-    model = prepare(
+    model = prepare_pt2e(
         model,
         args,
         example_args=(input_ids,),

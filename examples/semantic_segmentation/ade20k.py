@@ -17,11 +17,8 @@ from transformers import AutoModelForSemanticSegmentation
 from metrics import eval_metrics
 from quantized_training import (
     add_training_args,
-    get_qconfig,
-    get_qconfig_mapping,
-    quantize_pt2e,
+    prepare_pt2e,
     run_task,
-    FusedAmaxObsFakeQuantize,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,30 +139,9 @@ def main(args):
     model = torch.ao.quantization.fuse_modules(model, modules_to_fuse).to(device)
     example_args = (dataset[0]["pixel_values"].to(device),)
 
-    # qconfig = get_qconfig(args.activation, args.weight, args.error,
-    #                       args.record_histogram, args.force_scale_power_of_two)
-    # operations = args.quantize_forward.lower().split(",")
-    # qconfig_mapping = get_qconfig_mapping(qconfig, operations)
+    model = prepare_pt2e(model, args, example_args)
 
-    # if args.activation is not None:
-    #     config = args.activation.to_dict()
-    #     config["quant_max"] = 255
-    #     activation = FusedAmaxObsFakeQuantize.with_args(
-    #         **config,
-    #         record_histogram=args.record_histogram,
-    #         force_scale_power_of_two=args.force_scale_power_of_two,
-    #     )
-    #     qconfig_opt = qconfig._replace(activation=activation)
-    #     qconfig_mapping.set_module_name_object_type_order(
-    #         r'^matmul_(\d*[13579])$', torch.ops.aten.matmul.default, 0, qconfig_opt
-    #     )
-
-    # model = quantize_pt2e(model, args, qconfig_mapping, example_args)
-
-    from quantized_training.quantize_pt2e import prepare
-    model = prepare(model, args, example_args)
-
-    softmax_outputs = [
+    softmax_outputs_with_weight_quant = [
         'activation_post_process_12',
         'activation_post_process_32',
         'activation_post_process_54',
@@ -175,7 +151,7 @@ def main(args):
         'activation_post_process_136',
         'activation_post_process_154',
     ]
-    softmax_outputs_without_weight_quantization = [
+    softmax_outputs_without_weight_quant = [
         'activation_post_process_7',
         'activation_post_process_19',
         'activation_post_process_32',
@@ -185,6 +161,8 @@ def main(args):
         'activation_post_process_81',
         'activation_post_process_92',
     ]
+    softmax_outputs = (softmax_outputs_with_weight_quant if args.weight
+                       else softmax_outputs_without_weight_quant)
     for name, module in model.named_modules():
         if (
             isinstance(module, FakeQuantizeBase)
