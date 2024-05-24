@@ -86,6 +86,25 @@ def _get_module_type_filter(tp: Callable):
     return module_type_filter
 
 
+def _get_operator_type_filter(op: torch._ops.OpOverloadPacket):
+    """Get the operator_type_filter function for a given operator type, the filter accepts
+    a node and checks if the node comes from a call_function node that calls the operator
+
+    For example:
+        node: linear_op = call_function[...](...)  # calls the linear operator
+
+
+    >> operator_type_filter = _get_operator_type_filter(torch.ops.aten.linear.default)
+    >> print(operator_type_filter(node))
+    True  # the node calls the linear operator
+    """
+
+    def operator_type_filter(n: Node) -> bool:
+        return n.target == op
+
+    return operator_type_filter
+
+
 def _get_not_module_type_or_name_filter(
     tp_list: List[Callable], module_name_list: List[str]
 ) -> Callable[[Node], bool]:
@@ -156,7 +175,7 @@ class XNNPACKQuantizer(Quantizer):
     ) -> torch.fx.GraphModule:
         """Transforms scalar values to tensor attributes"""
         return _convert_scalars_to_attrs(model)
-    
+
     def annotate(self, model: torch.fx.GraphModule) -> torch.fx.GraphModule:
         module_name_list = list(self.module_name_config.keys())
         for module_name, config in self.module_name_config.items():
@@ -168,6 +187,11 @@ class XNNPACKQuantizer(Quantizer):
         for module_type, config in self.module_type_config.items():
             self._annotate_all_static_patterns(
                 model, config, _get_module_type_filter(module_type)
+            )
+
+        for op, config in self.operator_type_config.items():
+            self._annotate_all_static_patterns(
+                model, config, _get_operator_type_filter(op)
             )
 
         self._annotate_all_static_patterns(

@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 from typing import Optional
 
@@ -48,7 +49,7 @@ def  _get_amax(x, qscheme, ch_axis=None):
         dim = tuple(range(x.dim()))
         dim = dim[:ch_axis] + dim[ch_axis + 1:]
         amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    elif qscheme == QScheme.MICROSCALING:
+    elif qscheme == QScheme.PER_VECTOR_SYMMETRIC:
         amax = torch.amax(torch.abs(x), dim=(0, ch_axis), keepdim=True)
     else:
         raise ValueError(f"Unsupported qscheme: {qscheme}")
@@ -65,7 +66,7 @@ def _quantize(input, encodings):
     return encodings[indices].to(input.dtype)
 
 
-class MXDynamicFakeQuantFunction(torch.autograd.Function):
+class MXFakeQuantFunction(torch.autograd.Function):
     """This function is similar to FusedAmaxObsFakeQuantFunction, but it
     performs dynamic quantization by calculating the scaling factor on the
     run.
@@ -100,7 +101,9 @@ class MXDynamicFakeQuantFunction(torch.autograd.Function):
             input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
         )
 
-        scale = ((2**shared_exp) / quant_max).to(input.dtype)
+        shared_exp = shared_exp - math.floor(math.log2(quant_max))
+        scale = (2**shared_exp).to(input.dtype)
+
         input = input / scale
         input = _quantize(input, encodings)
         input = input * scale
@@ -137,7 +140,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         block_size=0,
         force_scale_power_of_two=False,
     ):
-        if qscheme == QScheme.MICROSCALING:
+        if qscheme == QScheme.PER_VECTOR_SYMMETRIC:
             # Make sure axes is a list of non-negative numbers
             axes = [ch_axis + input.ndim if ch_axis < 0 else ch_axis]
 
@@ -177,7 +180,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             input = _quantize(input, encodings)
             input = input * scale
 
-        if qscheme == QScheme.MICROSCALING:
+        if qscheme == QScheme.PER_VECTOR_SYMMETRIC:
             # Undo tile reshaping
             if block_size:
                 input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
@@ -270,8 +273,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.histogram += torch.histc(exp, 254, min=-126, max=127)
 
         # TODO: make this a separate module?
-        if self.qscheme == QScheme.MX_DYNAMIC:
-            X = MXDynamicFakeQuantFunction.apply(
+        if self.qscheme == QScheme.MICROSCALING:
+            X = MXFakeQuantFunction.apply(
                 X,
                 self.encodings,
                 self.fake_quant_enabled,

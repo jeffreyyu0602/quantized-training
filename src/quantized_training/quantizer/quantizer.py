@@ -22,8 +22,8 @@ class RoundingMode(IntEnum):
 class QScheme(Enum):
     PER_TENSOR_SYMMETRIC = "per_tensor_symmetric"
     PER_CHANNEL_SYMMETRIC = "per_channel_symmetric"
+    PER_VECTOR_SYMMETRIC = "per_vector_symmetric"
     MICROSCALING = "microscaling"
-    MX_DYNAMIC = "mx_dynamic"
 
 
 DTYPE_TO_QUANT_MAX = {
@@ -87,19 +87,21 @@ class QuantizationSpec:
             params[key] = PARAMS_TYPE[key](value)
 
         return QuantizationSpec(**params)
-    
+
     def __post_init__(self):
-        if self.quant_max is None and self.qscheme is not None and self.qscheme != QScheme.MX_DYNAMIC:
+        if self.quant_max is None and self.qscheme is not None and self.qscheme != QScheme.MICROSCALING:
             raise ValueError("quant_max is required for quantization.")
 
         if self.ch_axis is None and self.qscheme in [
             QScheme.PER_CHANNEL_SYMMETRIC,
+            QScheme.PER_VECTOR_SYMMETRIC,
             QScheme.MICROSCALING,
-            QScheme.MX_DYNAMIC
         ]:
             raise ValueError("Ch_axis is required for per-channel and microscaling qscheme.")
 
-        if self.block_size is None and self.qscheme in [QScheme.MICROSCALING, QScheme.MX_DYNAMIC]:
+        if self.block_size is None and self.qscheme in [
+            QScheme.PER_VECTOR_SYMMETRIC, QScheme.MICROSCALING
+        ]:
             raise ValueError("Block_size is required for microscaling qscheme.")
 
     def to_dict(self):

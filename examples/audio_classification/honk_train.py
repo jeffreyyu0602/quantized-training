@@ -287,7 +287,7 @@ def main(args):
 
         quantize(model, args, run_fn)
 
-    def _convert_to_float(model):
+    def _convert_to_float_module(model):
         # Convert intrinsic modules back to float modules
         for name, module in model.named_children():
             if isinstance(module, nni._FusedModule):
@@ -327,7 +327,7 @@ def main(args):
             calibrate(model)
 
         if args.qmode == "qat":
-            _convert_to_float(model)
+            _convert_to_float_module(model)
 
         for module in model.modules():
             if isinstance(module, FakeQuantizeBase):

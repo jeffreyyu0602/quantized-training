@@ -141,34 +141,15 @@ def main(args):
 
     model = prepare_pt2e(model, args, example_args)
 
-    softmax_outputs_with_weight_quant = [
-        'activation_post_process_12',
-        'activation_post_process_32',
-        'activation_post_process_54',
-        'activation_post_process_74',
-        'activation_post_process_96',
-        'activation_post_process_116',
-        'activation_post_process_136',
-        'activation_post_process_154',
-    ]
-    softmax_outputs_without_weight_quant = [
-        'activation_post_process_7',
-        'activation_post_process_19',
-        'activation_post_process_32',
-        'activation_post_process_44',
-        'activation_post_process_57',
-        'activation_post_process_69',
-        'activation_post_process_81',
-        'activation_post_process_92',
-    ]
-    softmax_outputs = (softmax_outputs_with_weight_quant if args.weight
-                       else softmax_outputs_without_weight_quant)
-    for name, module in model.named_modules():
-        if (
-            isinstance(module, FakeQuantizeBase)
-            and name in softmax_outputs
-        ):
-            module.quant_max = 255
+    if args.activation and args.activation.qscheme.value == "per_tensor_symmetric":
+        softmax_with_weight_fq = [12, 32, 54, 74, 96, 116, 136, 154]
+        softmax_with_no_weight_fq = [7, 19, 32, 44, 57, 69, 81, 92]
+        softmax_outputs = softmax_with_weight_fq if args.weight else softmax_with_no_weight_fq
+        softmax_outputs = [f'activation_post_process_{i}' for i in softmax_outputs]
+
+        for name, module in model.named_modules():
+            if isinstance(module, FakeQuantizeBase) and name in softmax_outputs:
+                module.quant_max = 255
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")

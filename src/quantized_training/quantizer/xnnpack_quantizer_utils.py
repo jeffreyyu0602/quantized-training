@@ -198,15 +198,18 @@ def _annotate_matmul(
 
         input_act_qspec = quantization_config.input_activation
         output_act_qspec = quantization_config.output_activation
+        weight_qspec = quantization_config.weight
 
         input_qspec_map = {}
         input_act0 = matmul_node.args[0]
         if isinstance(input_act0, Node):
             input_qspec_map[input_act0] = input_act_qspec
 
+        # We use weight_qspec for the second input to differentiate
+        # the two inputs to the matmul
         input_act1 = matmul_node.args[1]
         if isinstance(input_act1, Node):
-            input_qspec_map[input_act1] = input_act_qspec
+            input_qspec_map[input_act1] = weight_qspec
 
         matmul_node.meta["quantization_annotation"] = QuantizationAnnotation(
             input_qspec_map=input_qspec_map,
