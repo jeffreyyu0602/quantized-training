@@ -332,41 +332,6 @@ def main(args):
         trust_remote_code=args.trust_remote_code,
     )
 
-    if args.output_dir is not None:
-        activations = {}
-        errors = {}
-
-        class PositQuantizer(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, input, layer=None):
-                ctx.layer = layer
-                nonlocal activations
-                activations[layer] = input.detach().float().cpu()
-                return input
-
-            @staticmethod
-            def backward(ctx, grad_output):
-                layer = ctx.layer
-                nonlocal errors
-                errors[layer] = grad_output.detach().float().cpu()
-                return grad_output, None
-
-        quantized_model = MobileBertForSequenceClassification(config, PositQuantizer.apply)
-        quantized_model.load_state_dict(model.state_dict())
-        quantized_model.to(device)
-        model = quantized_model
-
-    peft_config = LoraConfig(
-        task_type=TaskType.SEQ_CLS,
-        inference_mode=False,
-        r=16,
-        lora_alpha=16,
-        lora_dropout=0.1,
-        target_modules=["query", "value"],
-    )
-    model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
-
     # Preprocessing the datasets
     if args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[args.task_name]
@@ -481,6 +446,41 @@ def main(args):
         device = torch.device("cpu")
     model.to(device)
 
+    if args.output_dir is not None:
+        activations = {}
+        errors = {}
+
+        class PositQuantizer(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, input, layer=None):
+                ctx.layer = layer
+                nonlocal activations
+                activations[layer] = input.detach().float().cpu()
+                return input
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                layer = ctx.layer
+                nonlocal errors
+                errors[layer] = grad_output.detach().float().cpu()
+                return grad_output, None
+
+        quantized_model = MobileBertForSequenceClassification(config, PositQuantizer.apply)
+        quantized_model.load_state_dict(model.state_dict())
+        quantized_model.to(device)
+        model = quantized_model
+
+    peft_config = LoraConfig(
+        task_type=TaskType.SEQ_CLS,
+        inference_mode=False,
+        r=16,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        target_modules=["query", "value"],
+    )
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+
     if args.bf16:
         model.bfloat16()
 
@@ -579,7 +579,7 @@ def main(args):
             loss = loss / args.gradient_accumulation_steps * args.grad_scale
             loss.backward()
 
-            if args.output_dir is not None:
+            if args.output_dir is not None and step % checkpointing_steps == 0:
                 output_dir = os.path.join(args.output_dir, f"step_{step}")
                 print(f"step: {step}")
                 print(f"outputs: {outputs}")
