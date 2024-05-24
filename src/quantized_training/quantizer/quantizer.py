@@ -23,6 +23,7 @@ class QScheme(Enum):
     PER_TENSOR_SYMMETRIC = "per_tensor_symmetric"
     PER_CHANNEL_SYMMETRIC = "per_channel_symmetric"
     MICROSCALING = "microscaling"
+    MX_DYNAMIC = "mx_dynamic"
 
 
 DTYPE_TO_QUANT_MAX = {
@@ -88,19 +89,18 @@ class QuantizationSpec:
         return QuantizationSpec(**params)
     
     def __post_init__(self):
-        if self.qscheme is not None and self.quant_max is None:
+        if self.quant_max is None and self.qscheme is not None and self.qscheme != QScheme.MX_DYNAMIC:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.qscheme == QScheme.PER_CHANNEL_SYMMETRIC and self.ch_axis is None:
-            raise ValueError("Ch_axis is required for per_channel_symmetric quantization.")
+        if self.ch_axis is None and self.qscheme in [
+            QScheme.PER_CHANNEL_SYMMETRIC,
+            QScheme.MICROSCALING,
+            QScheme.MX_DYNAMIC
+        ]:
+            raise ValueError("Ch_axis is required for per-channel and microscaling qscheme.")
 
-        if self.qscheme == QScheme.MICROSCALING and self.block_size is None:
-            raise ValueError("Block_size is required for microscaling quantization.")
-
-        # ch_axis must be less than the number of channels
-        # but no way to check here. Just check that it is not < 0.
-        if self.ch_axis is not None and self.ch_axis < 0:
-            raise ValueError("Ch_axis is < 0.")
+        if self.block_size is None and self.qscheme in [QScheme.MICROSCALING, QScheme.MX_DYNAMIC]:
+            raise ValueError("Block_size is required for microscaling qscheme.")
 
     def to_dict(self):
         return asdict(self)

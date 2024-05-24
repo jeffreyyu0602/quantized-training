@@ -65,7 +65,7 @@ def _quantize(input, encodings):
     return encodings[indices].to(input.dtype)
 
 
-class MXFakeQuantFunction(torch.autograd.Function):
+class MXDynamicFakeQuantFunction(torch.autograd.Function):
     """This function is similar to FusedAmaxObsFakeQuantFunction, but it
     performs dynamic quantization by calculating the scaling factor on the
     run.
@@ -84,6 +84,9 @@ class MXFakeQuantFunction(torch.autograd.Function):
     ):
         if fake_quant_enabled[0] == 0:
             return input
+
+        axes = [axes] if type(axes) == int else axes
+        axes = [x + input.ndim if x < 0 else x for x in axes]
 
         # Perform tiling to the hardware vector size
         if block_size > 0:
@@ -110,7 +113,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None, None, None, None
+        return grad_output, None, None, None, None, None, None
 
 
 class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
@@ -161,7 +164,8 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             amax_history[0] = curr_amax
 
             sf = amax / quant_max
-            sf = torch.where(torch.isfinite(sf), sf, scale)
+            sf = torch.where(amax > 0.0, sf, scale)
+            sf = torch.where(torch.isfinite(amax), sf, scale)
             if force_scale_power_of_two:
                 sf = torch.pow(2, torch.floor(torch.log2(sf)))
             # TODO: use inplace operation to update scale
@@ -264,6 +268,19 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         if self.record_histogram:
             exp = torch.floor(torch.log2(torch.abs(X.detach().float())))
             self.histogram += torch.histc(exp, 254, min=-126, max=127)
+
+        # TODO: make this a separate module?
+        if self.qscheme == QScheme.MX_DYNAMIC:
+            X = MXDynamicFakeQuantFunction.apply(
+                X,
+                self.encodings,
+                self.fake_quant_enabled,
+                self.quant_max,
+                "max",
+                self.ch_axis,
+                self.block_size,
+            )
+            return X
 
         X, self.amax_history, self.scale = FusedAmaxObsFakeQuantFunction.apply(
             X,
