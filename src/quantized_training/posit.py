@@ -67,7 +67,7 @@ def quantize_to_posit(
 
     return output
 
-def main():
+def write_posit_values():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     input_tensor = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
     posit_values = quantize_to_posit(input_tensor, 8, 1, round_to_even=True)
@@ -76,4 +76,4 @@ def main():
             file.write(f"{v1.item()}\t{v2.item()}\n")
 
 if __name__ == "__main__":
-    main()
+    write_posit_values()

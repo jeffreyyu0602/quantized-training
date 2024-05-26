@@ -134,8 +134,8 @@ def main(args):
     F.interpolate = torch.ops.custom.interpolate
 
     # fuse conv with batch norm
-    modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
     model.eval()
+    modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
     model = torch.ao.quantization.fuse_modules(model, modules_to_fuse).to(device)
     example_args = (dataset[0]["pixel_values"].to(device),)
 

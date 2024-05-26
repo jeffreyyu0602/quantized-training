@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, asdict
 from enum import Enum, IntEnum
 from typing import Optional
@@ -8,7 +9,6 @@ __all__ = [
     "QuantizationSpec",
 ]
 
-
 class RoundingMode(IntEnum):
     nearest = 0
     floor = 1
@@ -18,22 +18,11 @@ class RoundingMode(IntEnum):
     def string_enums():
         return [s.name for s in list(RoundingMode)]
 
-
 class QScheme(Enum):
     PER_TENSOR_SYMMETRIC = "per_tensor_symmetric"
     PER_CHANNEL_SYMMETRIC = "per_channel_symmetric"
     PER_VECTOR_SYMMETRIC = "per_vector_symmetric"
     MICROSCALING = "microscaling"
-
-
-DTYPE_TO_QUANT_MAX = {
-    "int8": 127,
-    "int4": 7,
-    "posit8_1": 64,
-    "fp8_e4m3": 448,
-    "fp8_e5m2": 57344,
-    "fp4_e2m1": 6,
-}
 
 ABBREV_MAP = {
     'dt': 'dtype',
@@ -53,6 +42,25 @@ PARAMS_TYPE = {
     'block_size': int,
 }
 
+def _get_default_qmax(dtype):
+    if dtype == "posit8_1":
+        return 64
+
+    if (match := re.fullmatch(r'int(\d+)', dtype)):
+        nbits = int(match.group(1))
+        return 2 ** (nbits - 1) - 1
+
+    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
+        ebits, mbits = int(match.group(2)), int(match.group(3))
+        mbits = mbits + 2
+        emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
+        if dtype != "fp8_e4m3":
+            max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
+        else:
+            max_norm = 2**emax * 1.75
+        return max_norm
+    return None
+
 @dataclass
 class QuantizationSpec:
     """Quantization spec for common operators that allows user to specify how to
@@ -69,16 +77,11 @@ class QuantizationSpec:
 
     @staticmethod
     def from_str(s):
-        assert(s != None), "String elem_format == None"
+        assert(s != None), "String quantization_spec == None"
         s = s.lower()
         fields = s.split(',')
 
-        params = {
-            'dtype': fields[0],
-            'quant_max': DTYPE_TO_QUANT_MAX.get(fields[0]),
-            'amax_history_len': 50,
-        }
-
+        params = {'dtype': fields[0]}
         for item in fields[1:]:
             key, value = item.split('=')
             key = ABBREV_MAP.get(key, key)
@@ -86,23 +89,25 @@ class QuantizationSpec:
                 raise ValueError(f"Unknown argument: {key}")
             params[key] = PARAMS_TYPE[key](value)
 
+        if params.get('qscheme') is not None:
+            if params.get('quant_max') is None:
+                params['quant_max'] = _get_default_qmax(params['dtype'])
+            if params.get('amax_history_len') is None:
+                params['amax_history_len'] = 50
+
         return QuantizationSpec(**params)
 
     def __post_init__(self):
-        if self.quant_max is None and self.qscheme is not None and self.qscheme != QScheme.MICROSCALING:
+        if self.quant_max is None and self.qscheme is not None:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.ch_axis is None and self.qscheme in [
-            QScheme.PER_CHANNEL_SYMMETRIC,
-            QScheme.PER_VECTOR_SYMMETRIC,
-            QScheme.MICROSCALING,
-        ]:
-            raise ValueError("Ch_axis is required for per-channel and microscaling qscheme.")
+        if self.ch_axis is None and self.qscheme == QScheme.PER_CHANNEL_SYMMETRIC:
+            raise ValueError("ch_axis is required for per-channel scaling.")
 
         if self.block_size is None and self.qscheme in [
             QScheme.PER_VECTOR_SYMMETRIC, QScheme.MICROSCALING
         ]:
-            raise ValueError("Block_size is required for microscaling qscheme.")
+            raise ValueError("block_size is required for microscaling.")
 
     def to_dict(self):
         return asdict(self)

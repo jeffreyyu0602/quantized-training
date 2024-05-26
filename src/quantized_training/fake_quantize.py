@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 from torch.ao.quantization import FakeQuantizeBase
 
-from .fp8 import quantize_to_fp8_e4m3, quantize_to_fp8_e5m2
+from .fp8 import quantize_to_fp8_e4m3, quantize_to_fp8_e5m2, _quantize_elemwise_core
 from .mx_utils import (
     _reshape_to_blocks,
     _undo_reshape_to_blocks,
@@ -30,11 +30,22 @@ def _get_fake_quant_fn(dtype: str):
         nbits, es = match.groups()
         return lambda x: quantize_to_posit(x, int(nbits), int(es), round_to_even=True)
 
-    if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
-        fp8_format = match.group(1).lower()
-        return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
+    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
+        nbits, ebits, mbits = map(int, match.groups())
+        assert nbits == ebits + mbits + 1
+        mbits = mbits + 2
+        emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
+        if dtype != "fp8_e4m3":
+            max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
+        else:
+            max_norm = 2**emax * 1.75
+        return lambda x: _quantize_elemwise_core(x, mbits, ebits, max_norm, "even", True)
 
-    if (match := re.fullmatch(r'int(\d+)', dtype, re.IGNORECASE)):
+    # if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
+    #     fp8_format = match.group(1).lower()
+    #     return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
+
+    if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
         quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
         return lambda x: torch.clamp(torch.round(x), quant_min, quant_max)
