@@ -160,7 +160,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
                 input, axes, orig_shape, padded_shape = _reshape_to_blocks(
                     input, axes, block_size
                 )
-            ch_axis = ch_axis + 1
+            ch_axis = axes[0] + 1
 
         if observer_enabled[0] == 1:
             curr_amax = _get_amax(input, qscheme, ch_axis)

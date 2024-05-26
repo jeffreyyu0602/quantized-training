@@ -141,7 +141,11 @@ def main(args):
 
     model = prepare_pt2e(model, args, example_args)
 
-    if args.activation and args.activation.qscheme.value == "per_tensor_symmetric":
+    if (
+        args.activation is not None
+        and args.activation.dtype == "int8"
+        and args.activation.qscheme.value == "per_tensor_symmetric"
+    ):
         softmax_with_weight_fq = [12, 32, 54, 74, 96, 116, 136, 154]
         softmax_with_no_weight_fq = [7, 19, 32, 44, 57, 69, 81, 92]
         softmax_outputs = softmax_with_weight_fq if args.weight else softmax_with_no_weight_fq

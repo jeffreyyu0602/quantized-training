@@ -43,31 +43,23 @@ def prepare_pt2e(
         dynamic_shapes=dynamic_shapes,
     )
 
-    # TODO: right now only check activation qscheme
-    if args.activation is not None and args.activation.qscheme == QScheme.MICROSCALING:
-        act_qspec = replace(args.activation, ch_axis=-1)
-        weight_qspec = replace(args.weight, ch_axis=-1)
-        linear_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
+    act_qspec = replace(args.activation, ch_axis=-1) if args.activation else None
+    weight_qspec = replace(args.weight, ch_axis=-1) if args.weight else None
+    linear_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
 
-        act_qspec = replace(args.activation, ch_axis=1)
-        weight_qspec = replace(args.weight, ch_axis=1)
-        conv2d_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
+    act_qspec = replace(args.activation, ch_axis=1) if args.activation else None
+    weight_qspec = replace(args.weight, ch_axis=1) if args.weight else None
+    conv2d_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
 
-        act_qspec = replace(args.activation, ch_axis=-1)
-        weight_qspec = replace(args.activation, ch_axis=-2)
-        matmul_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
+    # Matmul use weight qspec for the second input
+    act_qspec = replace(args.activation, ch_axis=-1) if args.activation else None
+    weight_qspec = replace(args.activation, ch_axis=-2) if args.activation else None
+    matmul_qonfig = QuantizationConfig(act_qspec, None, weight_qspec, None)
 
-        quantizer = (XNNPACKQuantizer()
-                    .set_operator_type(torch.ops.aten.linear.default, linear_qonfig)
-                    .set_operator_type(torch.ops.aten.conv2d.default, conv2d_qonfig)
-                    .set_operator_type(torch.ops.aten.matmul.default, matmul_qonfig))
-    else:
-        qconfig = QuantizationConfig(args.activation, None, args.weight, None)
-        # Matmul use weight qspec for the second input
-        matmul_qonfig = replace(qconfig, weight=args.activation)
-        quantizer = (XNNPACKQuantizer()
-                    .set_global(qconfig)
-                    .set_operator_type(torch.ops.aten.matmul.default, matmul_qonfig))
+    quantizer = (XNNPACKQuantizer()
+                 .set_module_type(torch.nn.Linear, linear_qonfig)
+                 .set_module_type(torch.nn.Conv2d, conv2d_qonfig)
+                 .set_operator_type(torch.ops.aten.matmul.default, matmul_qonfig))
 
     prepare_pt2e(model, quantizer)
     model.recompile()
