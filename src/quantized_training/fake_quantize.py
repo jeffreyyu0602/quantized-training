@@ -30,6 +30,10 @@ def _get_fake_quant_fn(dtype: str):
         nbits, es = match.groups()
         return lambda x: quantize_to_posit(x, int(nbits), int(es), round_to_even=True)
 
+    if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
+        fp8_format = match.group(1).lower()
+        return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
+
     if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
         nbits, ebits, mbits = map(int, match.groups())
         assert nbits == ebits + mbits + 1
@@ -40,10 +44,6 @@ def _get_fake_quant_fn(dtype: str):
         else:
             max_norm = 2**emax * 1.75
         return lambda x: _quantize_elemwise_core(x, mbits, ebits, max_norm, "even", True)
-
-    # if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
-    #     fp8_format = match.group(1).lower()
-    #     return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
 
     if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
@@ -57,8 +57,9 @@ def  _get_amax(x, qscheme, ch_axis=None):
     if qscheme == QScheme.PER_TENSOR_SYMMETRIC:
         amax = torch.amax(torch.abs(x))
     elif qscheme == QScheme.PER_CHANNEL_SYMMETRIC:
-        dim = tuple(range(x.dim()))
-        dim = dim[:ch_axis] + dim[ch_axis + 1:]
+        if ch_axis < 0:
+            ch_axis = ch_axis + x.ndim
+        dim = tuple(i for i in range(x.ndim) if i != ch_axis)
         amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
     elif qscheme == QScheme.PER_VECTOR_SYMMETRIC:
         amax = torch.amax(torch.abs(x), dim=(0, ch_axis), keepdim=True)
@@ -182,7 +183,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             sf = torch.where(torch.isfinite(amax), sf, scale)
             if force_scale_power_of_two:
                 sf = torch.pow(2, torch.floor(torch.log2(sf)))
-            # TODO: use inplace operation to update scale
+            # TODO: use inplace operation to update scale?
             scale = sf
 
         if fake_quant_enabled[0] == 1:

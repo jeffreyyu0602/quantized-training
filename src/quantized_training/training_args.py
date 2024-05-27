@@ -16,7 +16,6 @@ qconfig_help_string = """
 Input arguments as a comma-separated list. The first argument must specify the dtype.
 Subsequent arguments can be specified using either abbreviations or full names.
 Abbreviations and their full names:
-  - dt: dtype
   - qs: qscheme
   - qmax: quant_max
   - ahl: amax_history_len
@@ -24,17 +23,17 @@ Abbreviations and their full names:
   - bs: block_size
 
 Example usage:
-  --params dtype=int8,qscheme=qscheme1,quant_max=123.456,amax_history_len=10,ch_axis=1,block_size=64
+  --params int8,qscheme=qscheme1,quant_max=127,amax_history_len=50,ch_axis=0,block_size=32
 or
-  --params dt=int8,qs=qscheme1,qmax=123.456,ahl=10,ax=1,bs=64
+  --params int8,qs=qscheme1,qmax=127,ahl=50,ax=0,bs=32
 
 Parameter details:
-  - dtype (str): Data type (e.g., int8, int4, posit8_1, fp8_e4m3, fp8_e5m2, fp4_e2m1)
+  - dtype (str): Data type (e.g., int8, int4, fp8_e4m3, fp8_e5m2, fp4_e2m1, posit8_1)
   - qscheme (str): Quantization scheme
   - quant_max (float): Maximum quantization value
   - amax_history_len (int): Length of the amax history (default: 50)
-  - ch_axis (int): Channel axis
-  - block_size (int): Block size
+  - ch_axis (int): Channel axis (default: 0)
+  - block_size (int): Block size (default: 32)
 """
 
 

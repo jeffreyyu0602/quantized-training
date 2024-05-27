@@ -11,7 +11,7 @@ Quantized-Training is a Python package designed to facilitate the efficient quan
 ## Prerequisites
 
 - **Python Version:** Python 3.9 or newer.
-- **PyTorch:** Version 2.0 or newer.
+- **PyTorch:** Version 2.3 or newer.
 
 ## Installation
 

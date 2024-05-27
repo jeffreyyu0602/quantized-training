@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Optional
 
@@ -25,7 +25,6 @@ class QScheme(Enum):
     MICROSCALING = "microscaling"
 
 ABBREV_MAP = {
-    'dt': 'dtype',
     'qmax': 'quant_max',
     'qs': 'qscheme',
     'ahl': 'amax_history_len',
@@ -34,7 +33,6 @@ ABBREV_MAP = {
 }
 
 PARAMS_TYPE = {
-    'dtype': str,
     'quant_max': float,
     'qscheme': QScheme,
     'amax_history_len': int,
@@ -68,7 +66,7 @@ class QuantizationSpec:
     """
 
     dtype: str
-    observer_or_fake_quant_ctr: _ObserverOrFakeQuantizeConstructor = None
+    observer_or_fake_quant_ctr: Optional[_ObserverOrFakeQuantizeConstructor] = None
     quant_max: Optional[float] = None
     qscheme: Optional[QScheme] = None
     amax_history_len: Optional[int] = None
@@ -89,11 +87,9 @@ class QuantizationSpec:
                 raise ValueError(f"Unknown argument: {key}")
             params[key] = PARAMS_TYPE[key](value)
 
-        if params.get('qscheme') is not None:
-            if params.get('quant_max') is None:
-                params['quant_max'] = _get_default_qmax(params['dtype'])
-            if params.get('amax_history_len') is None:
-                params['amax_history_len'] = 50
+        if 'qscheme' in params:
+            params.setdefault('quant_max', _get_default_qmax(params['dtype']))
+            params.setdefault('amax_history_len', 50)
 
         return QuantizationSpec(**params)
 
@@ -101,13 +97,7 @@ class QuantizationSpec:
         if self.quant_max is None and self.qscheme is not None:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.ch_axis is None and self.qscheme == QScheme.PER_CHANNEL_SYMMETRIC:
-            raise ValueError("ch_axis is required for per-channel scaling.")
-
         if self.block_size is None and self.qscheme in [
             QScheme.PER_VECTOR_SYMMETRIC, QScheme.MICROSCALING
         ]:
             raise ValueError("block_size is required for microscaling.")
-
-    def to_dict(self):
-        return asdict(self)
