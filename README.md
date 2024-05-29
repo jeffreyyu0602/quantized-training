@@ -1,6 +1,10 @@
 # Quantized-Training
 
-Quantized-Training is a Python package designed to facilitate the efficient quantization of Transformer networks and other Deep Neural Networks (DNNs), with a particular focus on Huggingface's Transformers implementation. It supports quantization using integer, FP and posit data types, aiming to enhance performance and efficiency in machine learning tasks, especially those involving large Transformer models.
+This repo contains the source code of package `quantized-training` and several examples of how to integrate with PyTorch models. The package is designed to facilitate the efficient quantization of Transformer networks and other Deep Neural Networks (DNNs), with a particular focus on Huggingface's Transformers implementation. It supports quantizing GEMM and non-GEMM operations using integer, floating-points and posit data types.
+
+**8-bit Transformer Inferenace and Fine-tuning for Edge Accelerator** <br>
+*Jeffrey Yu\*, Kartik Prabhu, Yonatan Urman, Robert M. Radway, Eric Han, Priyanka Raina* <br>
+Paper: https://doi.org/10.1145/3620666.3651368 <br>
 
 ## Features
 
@@ -13,10 +17,9 @@ Quantized-Training is a Python package designed to facilitate the efficient quan
 - **Python Version:** Python 3.9 or newer.
 - **PyTorch:** Version 2.3 or newer.
 
-## Installation
+## Quickstart
 
-Ensure you meet the prerequisites above. To install Quantized-Training directly from the source using pip, follow these steps:
-
+1. Installing `quantized-training` is simply
 ```bash
 git clone https://github.com/jeffreyyu0602/quantized-training.git
 cd quantized-training
@@ -24,17 +27,12 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Usage
+2. Create an argument parser and add relevant quantization arguments by calling add_training_args.
 
-After installation, Quantized-Training can be easily used in your projects. Here's a quick start example:
-
-```python
-from quantized_training import add_training_args, quantize
-```
-
-Create an argument parser and add quantized training relevant arguments by calling add_training_args
 ```python
 import argparse
+from quantized_training import add_training_args
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_id', type=str, required=True, help='Pretrained model identifier')
 add_training_args(parser)
@@ -42,20 +40,21 @@ args= parser.parse_args()
 
 ```
 
-Initialize your Transformer model from Huggingface's implementation
+3. Initialize model and call quantizer on the model with parsed arguments.
 ```python
 from transformers import AutoModel
-model = AutoModel.from_pretrained(model_id)
-```
+from quantized_training import quantize
 
-Initialize the quantizer for your model with the desired quantization type
-```python
+model = AutoModel.from_pretrained(model_id)
+
 quantize(model, args)
 ```
 
-Your model is now quantized and ready for training or inference
+Your model is now quantized and ready for training or inference. For more use cases, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
 
-For users interested in adding support for their own models, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
+## Quantizatiion Arguments
+
+
 
 ## Results and Reproduction
 
