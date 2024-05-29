@@ -10,9 +10,13 @@ from torch.nn.utils.parametrize import type_before_parametrizations
 from accelerate import dispatch_model
 from transformers import PretrainedConfig
 
-from .modules import Softmax, modeling_bert, modeling_mobilebert
-from .qconfig import get_qconfig
-from .quantization_mappings import (
+from quantized_training.modules import (
+    Softmax,
+    modeling_bert,
+    modeling_mobilebert,
+)
+from quantized_training.qconfig import get_qconfig
+from quantized_training.quantization_mappings import (
     QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
     HF_TRANSFORMER_MODULE_MAPPINGS,

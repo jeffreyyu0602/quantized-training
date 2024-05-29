@@ -22,7 +22,7 @@ from torch.fx.passes.utils.matcher_with_name_node_map_utils import (
 )
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from .quantizer import QuantizationSpec
+from quantized_training.quantizer.quantizer import QuantizationSpec
 
 
 # In the absence of better name, just winging it with QuantizationConfig

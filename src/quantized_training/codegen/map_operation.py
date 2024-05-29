@@ -124,7 +124,7 @@ def _set_repeated_field(obj, attr_path, value, output_dir=None):
 
 
 def generate_param(node, args, output_dir):
-    from .build import param_pb2
+    from quantized_training.codegen.build import param_pb2
     aten = torch.ops.aten
     param = None
     if node.target == aten.convolution.default:
@@ -223,7 +223,7 @@ def map_operation(op, name, output_dir):
     if len(params) == 0:
         return None
 
-    from .build import param_pb2
+    from quantized_training.codegen.build import param_pb2
     param = param_pb2.Param()
     param.name = name
     if params[0].opcode in ["conv", "gemm"]:

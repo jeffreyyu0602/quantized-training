@@ -1,6 +1,9 @@
+import copy
 from collections import namedtuple
+from dataclasses import asdict
+
 from torch import nn
-from .fake_quantize import FusedAmaxObsFakeQuantize
+from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize
 
 __all__ = [
     "QConfig",
@@ -29,12 +32,14 @@ class QConfig(namedtuple('QConfig', ['activation', 'weight', 'error'])):
     def __new__(cls, activation, weight, error):
         return super().__new__(cls, activation, weight, error)
 
-def _create_fake_quant(qconfig, record_histogram, force_scale_power_of_two):
-    if qconfig is None:
+def _create_fake_quant(quantization_spec, record_histogram, force_scale_power_of_two):
+    if quantization_spec is None:
         return nn.Identity
 
+    kwargs_dict = asdict(quantization_spec)
+    kwargs = copy.deepcopy(kwargs_dict)
     return FusedAmaxObsFakeQuantize.with_args(
-        **qconfig.to_dict(),
+        **kwargs,
         record_histogram=record_histogram,
         force_scale_power_of_two=force_scale_power_of_two
     )

@@ -4,8 +4,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from .utils import SLURM_ARGS
-from .quantizer.quantizer import QuantizationSpec
+from quantized_training.quantizer.quantizer import QuantizationSpec
+from quantized_training.utils import SLURM_ARGS
 
 __all__ = [
     "add_training_args",

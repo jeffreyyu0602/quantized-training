@@ -5,9 +5,11 @@ from dataclasses import asdict, replace
 import torch
 from torch._export import capture_pre_autograd_graph
 
-from .fake_quantize import FusedAmaxObsFakeQuantize
-from .quantizer import QScheme, QuantizationSpec
-from .quantizer.xnnpack_quantizer import QuantizationConfig, XNNPACKQuantizer
+import quantized_training as qt
+from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize
+from quantized_training.quantizer.quantizer import QuantizationSpec
+from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
+from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,7 @@ def prepare_pt2e(
         qschemes.append(args.weight.qscheme)
         args.weight.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
 
-    if QScheme.PER_VECTOR_SYMMETRIC in qschemes or QScheme.MICROSCALING in qschemes:
+    if qt.per_vector_symmetric in qschemes or qt.microscaling in qschemes:
         assert len(set(qschemes)) == 1, (
             f"Quantization scheme {qschemes[0]} does not work with {qschemes[1]}"
         )
@@ -87,7 +89,7 @@ def prepare_pt2e(
     else:
         if (
             args.activation is not None
-            and args.activation.qscheme == QScheme.PER_CHANNEL_SYMMETRIC
+            and args.activation.qscheme == qt.per_channel_symmetric
             and args.activation.ch_axis is not None
         ):
             logger.warning(
@@ -95,12 +97,13 @@ def prepare_pt2e(
                 "Input ch_axis will be ignored."
             )
 
-        if args.weight is not None and args.weight.qscheme == QScheme.PER_CHANNEL_SYMMETRIC:
+        if args.weight is not None and args.weight.qscheme == qt.per_channel_symmetric:
             assert args.weight.ch_axis == 0, (
                 f"Per-channel weight quantization only supports quantizing output channel dimension (dim=0)."
             )
 
-        act_qspec = replace(args.activation, qscheme=QScheme.PER_TENSOR_SYMMETRIC) if args.activation else None
+        act_qspec = replace(args.activation, qscheme=qt.per_tensor_symmetric) \
+            if args.activation and args.activation.qscheme is not None else None
         conv2d_qonfig = QuantizationConfig(act_qspec, None, args.weight, None)
 
         act_qspec = replace(args.activation, ch_axis=-2) if args.activation else None

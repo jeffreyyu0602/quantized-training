@@ -7,7 +7,7 @@ from torch import nn
 from torch.fx import GraphModule, Node
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 
-from .map_operation import (
+from quantized_training.codegen.map_operation import (
     GEMM_OPS_MAPPING,
     VECTOR_OPS_MAPPING,
     NOP_MAPPING,
@@ -170,7 +170,7 @@ class ShapeProp:
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
 
-        from .build import param_pb2
+        from quantized_training.codegen.build import param_pb2
         params = param_pb2.ModelParams()
         for node in self.graph.nodes:
             param = None

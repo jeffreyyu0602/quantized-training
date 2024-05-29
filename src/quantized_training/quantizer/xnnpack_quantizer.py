@@ -7,7 +7,7 @@ from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
 from torch.ao.quantization.quantizer import Quantizer
 from torch.fx import Node
 
-from .xnnpack_quantizer_utils import (
+from quantized_training.quantizer.xnnpack_quantizer_utils import (
     _convert_scalars_to_attrs,
     OP_TO_ANNOTATOR,
     QuantizationConfig,

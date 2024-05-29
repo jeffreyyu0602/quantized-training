@@ -6,14 +6,18 @@ from typing import Optional
 import torch
 from torch.ao.quantization import FakeQuantizeBase
 
-from .fp8 import quantize_to_fp8_e4m3, quantize_to_fp8_e5m2, _quantize_elemwise_core
-from .mx_utils import (
-    _reshape_to_blocks,
-    _undo_reshape_to_blocks,
-    _shared_exponents
+import quantized_training as qt
+from quantized_training.fp8 import (
+    _quantize_elemwise_core,
+    quantize_to_fp8_e4m3,
+    quantize_to_fp8_e5m2,
 )
-from .posit import quantize_to_posit
-from .quantizer import QScheme
+from quantized_training.mx_utils import (
+    _reshape_to_blocks,
+    _shared_exponents,
+    _undo_reshape_to_blocks,
+)
+from quantized_training.posit import quantize_to_posit
 
 
 __all__ = [
@@ -54,14 +58,14 @@ def _get_fake_quant_fn(dtype: str):
 
 
 def  _get_amax(x, qscheme, ch_axis=None):
-    if qscheme == QScheme.PER_TENSOR_SYMMETRIC:
+    if qscheme == qt.per_tensor_symmetric:
         amax = torch.amax(torch.abs(x))
-    elif qscheme == QScheme.PER_CHANNEL_SYMMETRIC:
+    elif qscheme == qt.per_channel_symmetric:
         if ch_axis < 0:
             ch_axis = ch_axis + x.ndim
         dim = tuple(i for i in range(x.ndim) if i != ch_axis)
         amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    elif qscheme == QScheme.PER_VECTOR_SYMMETRIC:
+    elif qscheme == qt.per_vector_symmetric:
         amax = torch.amax(torch.abs(x), dim=(0, ch_axis), keepdim=True)
     else:
         raise ValueError(f"Unsupported qscheme: {qscheme}")
@@ -152,7 +156,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         block_size=0,
         force_scale_power_of_two=False,
     ):
-        if qscheme == QScheme.PER_VECTOR_SYMMETRIC:
+        if qscheme == qt.per_vector_symmetric:
             # Make sure axes is a list of non-negative numbers
             axes = [ch_axis + input.ndim if ch_axis < 0 else ch_axis]
 
@@ -192,7 +196,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             input = _quantize(input, encodings)
             input = input * scale
 
-        if qscheme == QScheme.PER_VECTOR_SYMMETRIC:
+        if qscheme == qt.per_vector_symmetric:
             # Undo tile reshaping
             if block_size:
                 input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
@@ -285,7 +289,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.histogram += torch.histc(exp, 254, min=-126, max=127)
 
         # TODO: make this a separate module?
-        if self.qscheme == QScheme.MICROSCALING:
+        if self.qscheme == qt.microscaling:
             X = MXFakeQuantFunction.apply(
                 X,
                 self.encodings,

@@ -30,3 +30,11 @@ __all__ = [
     "replace_softmax",
     "run_task",
 ]
+
+class qscheme: ...
+
+# Defined in quantized_training/quantizer.h
+per_tensor_symmetric: qscheme = QScheme.PER_TENSOR_SYMMETRIC
+per_channel_symmetric: qscheme = QScheme.PER_CHANNEL_SYMMETRIC
+per_vector_symmetric: qscheme = QScheme.PER_VECTOR_SYMMETRIC
+microscaling: qscheme = QScheme.MICROSCALING
