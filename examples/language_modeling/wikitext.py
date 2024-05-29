@@ -82,10 +82,10 @@ def main(args):
                 model(input_ids, labels=target_ids)
 
             steps += 1
-            if steps == args.max_calibration_steps - 1:
+            if steps == args.max_calibration_steps:
                 break
 
-    if args.activation and args.activation.qscheme:
+    if args.activation and args.activation.qscheme or args.weight and args.weight.qscheme:
         calibrate(model)
         for module in model.modules():
             if isinstance(module, FakeQuantizeBase):

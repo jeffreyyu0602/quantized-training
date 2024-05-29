@@ -73,6 +73,7 @@ def parse_args():
         '--model_id', required=True, help='Fine-tuned model identifier'
     )
     parser.add_argument('--max_calibration_steps', type=int, default=1000)
+    parser.add_argument('--attention_probs_qmax', type=int, default=None)
     add_training_args(parser)
     return parser.parse_args()
 
@@ -141,19 +142,14 @@ def main(args):
 
     model = prepare_pt2e(model, args, example_args)
 
-    if (
-        args.activation is not None
-        and args.activation.dtype == "int8"
-        and args.activation.qscheme.value == "per_tensor_symmetric"
-    ):
-        softmax_with_weight_fq = [12, 32, 54, 74, 96, 116, 136, 154]
-        softmax_with_no_weight_fq = [7, 19, 32, 44, 57, 69, 81, 92]
-        softmax_outputs = softmax_with_weight_fq if args.weight else softmax_with_no_weight_fq
-        softmax_outputs = [f'activation_post_process_{i}' for i in softmax_outputs]
-
-        for name, module in model.named_modules():
-            if isinstance(module, FakeQuantizeBase) and name in softmax_outputs:
-                module.quant_max = 255
+    if args.attention_probs_qmax is not None:
+        for node in model.graph.nodes:
+            if node.target != torch.ops.aten.softmax.int:
+                continue
+            dropout = next(iter(node.users))
+            attention_prob = next(iter(dropout.users))
+            assert isinstance(attention_prob, torch.fx.Node) and attention_prob.op == "call_module"
+            model._modules[attention_prob.target].quant_max = args.attention_probs_qmax
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
@@ -163,13 +159,14 @@ def main(args):
             pixel_values = data["pixel_values"].to(device)
             with torch.no_grad():
                 model(pixel_values)
-            if i == args.max_calibration_steps:
+            if i == args.max_calibration_steps - 1:
                 break
-    calibrate(model)
 
-    for module in model.modules():
-        if isinstance(module, FakeQuantizeBase):
-            module.disable_observer()
+    if args.activation and args.activation.qscheme or args.weight and args.weight.qscheme:
+        calibrate(model)
+        for module in model.modules():
+            if isinstance(module, FakeQuantizeBase):
+                module.disable_observer()
 
     results = []
     gt_seg_maps = []
