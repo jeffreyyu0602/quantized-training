@@ -20,7 +20,13 @@ from tqdm import tqdm
 from transformers import set_seed
 
 from honk_model import SpeechResModel, configs
-from quantized_training import add_training_args, prepare_pt2e, quantize, run_task
+from quantized_training import (
+    add_training_args,
+    get_quantizer,
+    prepare_pt2e,
+    quantize,
+    run_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,26 +286,14 @@ def main(args):
         modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
         model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
-        def run_fn(model):
-            batch = next(iter(train_dataloader))
-            with torch.no_grad():
-                model(batch["input_values"].to(device))
-
-        quantize(model, args, run_fn)
-
-    def _convert_to_float_module(model):
-        # Convert intrinsic modules back to float modules
-        for name, module in model.named_children():
-            if isinstance(module, nni._FusedModule):
-                new_mod = module.to_float()
-                for pre_hook_fn in module._forward_pre_hooks.values():
-                    new_mod.register_forward_pre_hook(pre_hook_fn)
-                if hasattr(module, "activation_pre_process"):
-                    setattr(new_mod, "activation_pre_process", module.activation_pre_process)
-                model._modules[name] = new_mod
+        quantize(model, args)
+        batch = next(iter(train_dataloader))
+        with torch.no_grad():
+            model(batch["input_values"].to(device))
 
     if args.model_id is not None:
-        model.load_state_dict(torch.load(args.model_id, map_location=device))
+        checkpoint = torch.load(args.model_id, map_location=device)
+        model.load_state_dict(checkpoint)
 
     def map_to_pred(batch):
         input_values = torch.tensor(batch["audio"])
@@ -312,13 +306,16 @@ def main(args):
 
     if not args.do_train:
         if args.qmode == "ptq":
-            model.eval()
             modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
-            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse)
+            model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse)
 
-            example_args = (torch.tensor(raw_dataset["test"][:128]["audio"]).to(device),)
+            quantizer = get_quantizer(
+                args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
+            )
+            batch = next(iter(train_dataloader))
+            example_args = ({k: v.to(device) for k, v in batch.items()},)
             dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
-            model = prepare_pt2e(model, args, example_args, dynamic_shapes=dynamic_shapes)
+            model = prepare_pt2e(model, quantizer, example_args, dynamic_shapes=dynamic_shapes)
 
             def calibrate(model):
                 for batch in tqdm(train_dataloader):
@@ -327,7 +324,15 @@ def main(args):
             calibrate(model)
 
         if args.qmode == "qat":
-            _convert_to_float_module(model)
+            # convert intrinsic modules back to float modules
+            for name, module in model.named_children():
+                if isinstance(module, nni._FusedModule):
+                    new_mod = module.to_float()
+                    for pre_hook_fn in module._forward_pre_hooks.values():
+                        new_mod.register_forward_pre_hook(pre_hook_fn)
+                    if hasattr(module, "activation_pre_process"):
+                        setattr(new_mod, "activation_pre_process", module.activation_pre_process)
+                    model._modules[name] = new_mod
 
         for module in model.modules():
             if isinstance(module, FakeQuantizeBase):

@@ -120,8 +120,7 @@ if __name__ == "__main__":
 
     if "resnet18" == args.model:
         from torchvision.models import resnet18, ResNet18_Weights
-        model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        model.eval()
+        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
@@ -139,8 +138,7 @@ if __name__ == "__main__":
 
     if "resnet50" == args.model:
         from torchvision.models import resnet50, ResNet50_Weights
-        model = resnet50(weights=ResNet50_Weights.DEFAULT)
-        model.eval()
+        model = resnet50(weights=ResNet50_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
@@ -158,8 +156,7 @@ if __name__ == "__main__":
 
     if "segformer" == args.model:
         replace_interpolate()
-        model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
-        model.eval()
+        model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512").eval()
 
         modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)

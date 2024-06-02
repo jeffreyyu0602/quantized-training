@@ -10,11 +10,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantized_training import (
     add_training_args,
-    plot_layer_distribution,
-    plot_layer_range,
+    get_quantizer,
     prepare_pt2e,
     quantize,
     run_task,
+    plot_layer_distribution,
+    plot_layer_range,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,6 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
-    parser.add_argument('--max_calibration_steps', type=int, default=1000, help='Maximum number of calibration steps')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -54,20 +54,18 @@ def main(args):
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
-    # do_scaling = args.activation and args.activation.qscheme
-    # quantize(model, args, run_fn=calibrate if do_scaling else None)
+    # quantize(model, args)
+
+    quantizer = get_quantizer(
+        args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
+    )
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
-    target_ids = input_ids.clone()
+    example_args = (input_ids,)
+    example_kwargs = {"labels": input_ids.clone()}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
-    model = prepare_pt2e(
-        model,
-        args,
-        example_args=(input_ids,),
-        example_kwargs={"labels": target_ids},
-        dynamic_shapes=dynamic_shapes,
-    )
+    model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
     def calibrate(model):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
@@ -82,10 +80,10 @@ def main(args):
                 model(input_ids, labels=target_ids)
 
             steps += 1
-            if steps == args.max_calibration_steps:
+            if steps == args.calibration_steps:
                 break
 
-    if args.activation and args.activation.qscheme or args.weight and args.weight.qscheme:
+    if args.calibration_steps > 0:
         calibrate(model)
         for module in model.modules():
             if isinstance(module, FakeQuantizeBase):

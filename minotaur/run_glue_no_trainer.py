@@ -484,13 +484,12 @@ def main(args):
     if args.bf16:
         model.bfloat16()
 
-    def run_fn(model):
-        batch = {k: v.to(device) for k, v in next(iter(eval_dataloader)).items()}
-        loss = model(**batch).loss
-        loss.backward()
-        model.zero_grad()
+    quantize(model, args)
 
-    quantize(model, args, run_fn)
+    batch = next(iter(eval_dataloader))
+    batch = {k: v.to(device) for k, v in batch.items()}
+    model(**batch).loss.backward()
+    model.zero_grad()
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

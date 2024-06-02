@@ -49,14 +49,13 @@ def _get_default_qmax(dtype):
         return 2 ** (nbits - 1) - 1
 
     if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
-        ebits, mbits = int(match.group(2)), int(match.group(3))
-        mbits = mbits + 2
+        ebits = int(match.group(2))
+        mbits = int(match.group(3)) + 2
         emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
-        if dtype != "fp8_e4m3":
-            max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
-        else:
-            max_norm = 2**emax * 1.75
-        return max_norm
+        if dtype == "fp8_e4m3":
+            return 2**emax * 1.75
+        return 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
+
     return None
 
 @dataclass

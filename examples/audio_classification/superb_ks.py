@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(description="Process model parameters.")
     parser.add_argument('--model_id', help='Fine-tuned model identifier')
-    parser.add_argument('--calibrate_steps', type=int, default=1000)
     add_training_args(parser)
     return parser.parse_args()
 

@@ -30,7 +30,8 @@ import datasets
 import evaluate
 import numpy as np
 import torch
-from accelerate import Accelerator, data_loader
+from accelerate import Accelerator
+from accelerate.data_loader import skip_first_batches
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
@@ -56,16 +57,15 @@ from transformers.utils import check_min_version, get_full_repo_name, send_examp
 from transformers.utils.versions import require_version
 
 import wandb
-import peft
-from peft import (
-    AutoPeftModelForQuestionAnswering,
-    LoraConfig,
-    PeftConfig,
-    TaskType,
-    get_peft_model,
-)
+from peft import LoraConfig, TaskType, get_peft_model
 
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import (
+    add_training_args,
+    get_quantizer,
+    prepare_pt2e,
+    quantize,
+    run_task,
+)
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -794,13 +794,57 @@ def main(args):
         device = torch.device("cpu")
     model.to(device)
 
-    def run_fn(model):
-        example_args = next(iter(train_dataloader))
-        batch = {k: v.to(device) for k, v in example_args.items()}
-        model(**batch).loss.backward()
-        model.zero_grad()
+    use_pt2e_quantization = False
+    if not use_pt2e_quantization:
+        print("quantize")
+        quantize(model, args)
+    else:
+        print("prepare_pt2e")
+        quantizer = get_quantizer(
+            args.activation, 
+            args.weight, 
+            args.record_histogram, 
+            args.force_scale_power_of_two
+        )
+        first_batch = next(iter(train_dataloader))
+        example_kwargs = {k: v.to(device) for k, v in first_batch.items()}
+        batch_size = torch.export.Dim("batch_size", min=1, max=48)
+        dynamic_shapes = {
+            "input_ids": {0: batch_size},
+            "token_type_ids": {0: batch_size},
+            "attention_mask": {0: batch_size},
+            "start_positions": {0: batch_size},
+            "end_positions": {0: batch_size},
+        }
+        model = prepare_pt2e(model, quantizer, (), example_kwargs, dynamic_shapes)
+        torch.ao.quantization.allow_exported_model_train_eval(model)
 
-    quantize(model, args, run_fn)
+    # calibration data loader does not shuffle input dataset for reproducibility purpose
+    calibration_data_loader = DataLoader(
+        train_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+    )
+
+    # observe model weights and register fake quant modules.
+    # this is different from calibration which does not do backward pass
+    batch = next(iter(calibration_data_loader))
+    batch = {k: v.to(device) for k, v in batch.items()}
+    model(**batch).loss.backward()
+    model.zero_grad()
+
+    def calibrate(model, data_loader):
+        model.eval()
+        with torch.no_grad():
+            for step, batch in enumerate(tqdm(data_loader)):
+                batch = {k: v.to(device) for k, v in batch.items()}
+                model(**batch)
+                if step == args.calibration_steps - 1:
+                    break
+
+    if args.calibration_steps > 0:
+        calibrate(model, calibration_data_loader)
+        for module in model.modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.disable_observer()
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -880,7 +924,11 @@ def main(args):
         for step, batch in enumerate(tqdm(eval_dataloader)):
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
-                outputs = model(**batch)
+                # HACK pt2e exported program expect the same input as training data
+                # Use random start and end positions for placeholder
+                start_positions = torch.ones(args.per_device_eval_batch_size, dtype=torch.long).to(device)
+                end_positions = start_positions.clone()
+                outputs = model(**batch, start_positions=start_positions, end_positions=end_positions)
                 start_logits = outputs.start_logits
                 end_logits = outputs.end_logits
 
@@ -1013,7 +1061,7 @@ def main(args):
     for epoch in range(starting_epoch, args.num_train_epochs):
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = data_loader.skip_first_batches(train_dataloader, resume_step)
+            active_dataloader = skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):

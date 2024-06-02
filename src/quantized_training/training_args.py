@@ -367,7 +367,13 @@ def add_training_args(parser=None):
     parser.add_argument(
         '--force_scale_power_of_two',
         action='store_true',
-        help='Whether to force the scaling factor to be a power of two.'
+        help='Whether to force the scaling factor to be a power of two.',
+    )
+    parser.add_argument(
+        '--calibration_steps',
+        type=int,
+        default=0,
+        help='Number of calibration steps for PTQ',
     )
     parser.add_argument(
         '--print_graph',

@@ -4,6 +4,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.ao.nn.intrinsic as nni
+from torch.ao.quantization.observer import _PartialWrapper
 from torch.nn import Module
 from torch.nn.utils.parametrize import type_before_parametrizations
 
@@ -43,7 +44,7 @@ def propagate_config(module, name, qconfig):
     for child in module.children():
         propagate_config(child, name, qconfig)
 
-def quantize(model, args, run_fn=None, inplace=True):
+def quantize(model, args, inplace=True):
     if not inplace:
         model = copy.deepcopy(model)
 
@@ -54,8 +55,11 @@ def quantize(model, args, run_fn=None, inplace=True):
         and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
-        convert(model, inplace=True,
-                custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS)
+        convert(
+            model,
+            inplace=True,
+            custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS,
+        )
         if hasattr(model, 'hf_device_map'):
             dispatch_model(model, device_map=model.hf_device_map)
 
@@ -68,7 +72,6 @@ def quantize(model, args, run_fn=None, inplace=True):
             dtype=torch.bfloat16 if args.bf16 else None,
         )
 
-    # TODO: better way to handle this?
     if args.activation is None:
         args.quantize_forward = None
     if args.error is None:
@@ -78,19 +81,20 @@ def quantize(model, args, run_fn=None, inplace=True):
                           args.record_histogram, args.force_scale_power_of_two)
 
     propagate_config(model, 'qconfig', qconfig)
-    # convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
+    convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
     # ASPLOS experiments perform quantization after converting model dtype to bfloat16
-    for name, param in model.named_parameters():
-        if not 'bias' in name:
-            param.data = qconfig.weight(device=param.device)(param.data)
-
-    if run_fn is not None:
-        run_fn(model)
+    # if isinstance(qconfig.weight, _PartialWrapper) and not args.do_train:
+    #     for name, param in model.named_parameters():
+    #         if not 'bias' in name:
+    #             obs_or_fq_obj = qconfig.weight(device=param.device)
+    #             if obs_or_fq_obj.qscheme:
+    #                 obs_or_fq_obj(param.data)
+    #             param.data = obs_or_fq_obj(param.data)
 
     return model
 

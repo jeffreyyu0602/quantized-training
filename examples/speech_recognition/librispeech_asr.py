@@ -36,8 +36,7 @@ def main(args):
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         args.model_id, attn_implementation="eager", low_cpu_mem_usage=True, use_safetensors=True
-    )
-    model.to(device)
+    ).to(device)
 
     processor = AutoProcessor.from_pretrained(args.model_id)
 

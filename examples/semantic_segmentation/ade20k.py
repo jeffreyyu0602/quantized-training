@@ -17,6 +17,7 @@ from transformers import AutoModelForSemanticSegmentation
 from metrics import eval_metrics
 from quantized_training import (
     add_training_args,
+    get_quantizer,
     prepare_pt2e,
     run_task,
 )
@@ -72,7 +73,6 @@ def parse_args():
     parser.add_argument(
         '--model_id', required=True, help='Fine-tuned model identifier'
     )
-    parser.add_argument('--max_calibration_steps', type=int, default=1000)
     parser.add_argument('--attention_probs_qmax', type=int, default=None)
     add_training_args(parser)
     return parser.parse_args()
@@ -135,12 +135,14 @@ def main(args):
     F.interpolate = torch.ops.custom.interpolate
 
     # fuse conv with batch norm
-    model.eval()
     modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
-    model = torch.ao.quantization.fuse_modules(model, modules_to_fuse).to(device)
-    example_args = (dataset[0]["pixel_values"].to(device),)
+    model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse).to(device)
 
-    model = prepare_pt2e(model, args, example_args)
+    quantizer = get_quantizer(
+        args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
+    )
+    example_args = (dataset[0]["pixel_values"].to(device),)
+    model = prepare_pt2e(model, quantizer, example_args)
 
     if args.attention_probs_qmax is not None:
         for node in model.graph.nodes:
@@ -159,10 +161,10 @@ def main(args):
             pixel_values = data["pixel_values"].to(device)
             with torch.no_grad():
                 model(pixel_values)
-            if i == args.max_calibration_steps - 1:
+            if i == args.calibration_steps - 1:
                 break
 
-    if args.activation and args.activation.qscheme or args.weight and args.weight.qscheme:
+    if args.calibration_steps > 0:
         calibrate(model)
         for module in model.modules():
             if isinstance(module, FakeQuantizeBase):

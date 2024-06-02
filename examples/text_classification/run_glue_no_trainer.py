@@ -24,7 +24,8 @@ from pathlib import Path
 import datasets
 import evaluate
 import torch
-from accelerate import Accelerator, data_loader
+from accelerate import Accelerator
+from accelerate.data_loader import skip_first_batches
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
@@ -47,14 +48,7 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 import wandb
-import peft
-from peft import (
-    AutoPeftModelForSequenceClassification,
-    LoraConfig,
-    PeftConfig,
-    TaskType,
-    get_peft_model,
-)
+from peft import LoraConfig, TaskType, get_peft_model
 
 from quantized_training import add_training_args, quantize, run_task
 
@@ -475,13 +469,12 @@ def main(args):
         device = torch.device("cpu")
     model.to(device)
 
-    def run_fn(model):
-        example_args = next(iter(train_dataloader))
-        batch = {k: v.to(device) for k, v in example_args.items()}
-        model(**batch).loss.backward()
-        model.zero_grad()
+    quantize(model, args)
 
-    quantize(model, args, run_fn)
+    batch = next(iter(train_dataloader))
+    batch = {k: v.to(device) for k, v in batch.items()}
+    model(**batch).loss.backward()
+    model.zero_grad()
 
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -661,7 +654,7 @@ def main(args):
     for epoch in range(starting_epoch, args.num_train_epochs):
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = data_loader.skip_first_batches(train_dataloader, resume_step)
+            active_dataloader = skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
