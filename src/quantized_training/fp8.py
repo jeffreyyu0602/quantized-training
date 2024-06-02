@@ -4,6 +4,7 @@ import torch
 __all__ = [
     "quantize_to_fp8_e4m3",
     "quantize_to_fp8_e5m2",
+    "_quantize_elemwise_core",
 ]
 
 def quantize_to_fp8_e4m3(
@@ -12,7 +13,7 @@ def quantize_to_fp8_e4m3(
     fp8_max: float = 448,
     fp8_min: float = 2 ** -6,
 ) -> torch.Tensor:
-    raw_bits = input.float().view(torch.int32)
+    raw_bits = input.clone().to(torch.float).view(torch.int32)
     exp = ((raw_bits & 0x7f800000) >> 23) - 127
     fraction = (raw_bits & 0x7fffff) | 0x800000
 
@@ -42,7 +43,7 @@ def quantize_to_fp8_e5m2(
     fp8_max: float = 57344,
     fp8_min: float = 2 ** -14,
 ) -> torch.Tensor:
-    raw_bits = input.float().view(torch.int32)
+    raw_bits = input.clone().to(torch.float).view(torch.int32)
     exp = ((raw_bits & 0x7f800000) >> 23) - 127
     fraction = (raw_bits & 0x7fffff) | 0x800000
 

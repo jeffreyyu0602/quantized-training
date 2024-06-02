@@ -1,5 +1,4 @@
 import math
-
 import torch
 
 __all__ = ["quantize_to_posit"]
@@ -11,7 +10,7 @@ def quantize_to_posit(
     round_to_even: bool = True,
     return_pbits: bool = False,
 ) -> torch.Tensor:
-    raw_bits = input.float().view(torch.int32)
+    raw_bits = input.clone().to(torch.float).view(torch.int32)
     scale = ((raw_bits & 0x7f800000) >> 23) - 127
     fraction = raw_bits & 0x7fffff
     r = scale >= 0
