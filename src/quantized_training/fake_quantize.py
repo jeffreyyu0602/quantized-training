@@ -168,26 +168,25 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             ch_axis = axes[0] + 1
 
         if observer_enabled[0] == 1:
-            curr_amax = _get_amax(input, qscheme, ch_axis)
-
-            if amax_history is None:
+            amax_cur = _get_amax(input, qscheme, ch_axis)
+            if amax_history.numel() == 0:
+                amax = amax_cur
                 amax_history = torch.zeros(
-                    (amax_history_len,) + curr_amax.shape, device=input.device
+                    (amax_history_len,) + amax_cur.shape, device=input.device
                 )
-
-            amax = torch.amax(amax_history, dim=0)
+            else:
+                amax = torch.amax(amax_history, dim=0)
 
             if amax_history.shape[0] > 1:
                 new_amax_history = torch.roll(amax_history, -1, 0)
                 amax_history.copy_(new_amax_history)
-            amax_history[0] = curr_amax
+            amax_history[0] = amax_cur
 
             sf = amax / quant_max
             sf = torch.where(amax > 0.0, sf, scale)
             sf = torch.where(torch.isfinite(amax), sf, scale)
             if force_scale_power_of_two:
                 sf = torch.pow(2, torch.floor(torch.log2(sf)))
-            # TODO: use inplace operation to update scale?
             scale = sf
 
         if fake_quant_enabled[0] == 1:
@@ -224,8 +223,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     def __init__(
         self,
         dtype: str,
-        quant_max: Optional[float] = None,
         qscheme: Optional[str] = None,
+        quant_max: Optional[float] = None,
         amax_history_len: int = 50,
         ch_axis: Optional[int] = None,
         block_size: Optional[int] = None,
@@ -235,8 +234,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     ) -> None:
         super().__init__()
         self.dtype = dtype
-        self.quant_max = quant_max
         self.qscheme = qscheme
+        self.quant_max = quant_max
         self.amax_history_len = amax_history_len
         self.ch_axis = ch_axis
         self.block_size = block_size
@@ -248,14 +247,14 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.fake_quant_fn = _get_fake_quant_fn(dtype)
         self.register_buffer("encodings", self.fake_quant_fn(input), persistent=False)
         # Create amax history and scale buffer
+        self.enable_observer(self.qscheme is not None)
         factory_kwargs = {'device': device, 'dtype': torch.float}
-        self.enable_observer(qscheme is not None)
-        self.register_buffer("amax_history", None)
+        self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
         self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
         # Create histogram buffer
+        self.record_histogram = record_histogram
         if record_histogram:
             self.register_buffer("histogram", torch.zeros(254, **factory_kwargs), persistent=False)
-        self.record_histogram = record_histogram
 
     @torch.jit.export
     def calculate_qparams(self):

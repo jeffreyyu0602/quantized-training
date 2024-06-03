@@ -81,20 +81,21 @@ def quantize(model, args, inplace=True):
                           args.record_histogram, args.force_scale_power_of_two)
 
     propagate_config(model, 'qconfig', qconfig)
-    convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
+    if args.do_train:
+        convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
 
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
     # ASPLOS experiments perform quantization after converting model dtype to bfloat16
-    # if isinstance(qconfig.weight, _PartialWrapper) and not args.do_train:
-    #     for name, param in model.named_parameters():
-    #         if not 'bias' in name:
-    #             obs_or_fq_obj = qconfig.weight(device=param.device)
-    #             if obs_or_fq_obj.qscheme:
-    #                 obs_or_fq_obj(param.data)
-    #             param.data = obs_or_fq_obj(param.data)
+    if isinstance(qconfig.weight, _PartialWrapper) and not args.do_train:
+        for name, param in model.named_parameters():
+            if not 'bias' in name:
+                obs_or_fq = qconfig.weight(device=param.device)
+                if obs_or_fq.qscheme:
+                    obs_or_fq(param.data)
+                param.data = obs_or_fq(param.data)
 
     return model
 
@@ -111,32 +112,39 @@ def _get_unique_devices_(mod):
     return {p.device for p in mod.parameters()} | \
         {p.device for p in mod.buffers()}
 
-def _register_module_hook(module, name, hook_name):
-    module.add_module(hook_name, nn.ModuleDict())
-    def _forward_pre_hook(self, inputs):
+def _register_module_hook(module, hook_name, name):
+    obs_or_fq_dict = nn.ModuleDict()
+    module.add_module(hook_name, obs_or_fq_dict)
+
+    # TODO: statically create all fake quant modules depends on the type of the
+    # input module. Only MatmulFunctional, AddFunctional, and MulFunctional have
+    # two inputs
+    def _forward_and_backward_pre_hook(self, inputs):
         new_inputs = []
-        module_dict = getattr(self, hook_name)
         for i, input in enumerate(inputs):
-            if not torch.is_tensor(input):
+            if not isinstance(input, torch.Tensor):
                 new_inputs.append(input)
                 continue
 
-            if (obs_or_fq_name := str(i)) not in module_dict:
-                obs_or_fq = getattr(self.qconfig, hook_name.split('_')[0])
-                module_dict.update({
-                    obs_or_fq_name: obs_or_fq(device=input.device, name=name)
-                })
-            new_inputs.append(module_dict[obs_or_fq_name](input))
+            obs_or_fq_name = str(i)
+            if obs_or_fq_name not in obs_or_fq_dict:
+                if hook_name == 'activation_pre_process':
+                    obs_or_fq_ctr = self.qconfig.activation
+                else:
+                    obs_or_fq_ctr = self.qconfig.error
+                obs_or_fq_dict[obs_or_fq_name] = obs_or_fq_ctr(
+                    device=input.device, name=f"{name}.{obs_or_fq_name}"
+                )
+            new_inputs.append(obs_or_fq_dict[obs_or_fq_name](input))
         return tuple(new_inputs)
 
     def _backward_hook(self, grad_inputs, grad_outputs):
-        return _forward_pre_hook(self, grad_inputs)
+        return _forward_and_backward_pre_hook(self, grad_inputs)
 
     if hook_name == 'activation_pre_process':
-        module.register_forward_pre_hook(_forward_pre_hook)
+        module.register_forward_pre_hook(_forward_and_backward_pre_hook)
     elif hook_name == 'error_pre_process':
-        # backward pre hook has the same signature as forward pre hook
-        module.register_full_backward_pre_hook(_forward_pre_hook)
+        module.register_full_backward_pre_hook(_forward_and_backward_pre_hook)
     elif hook_name == 'error_post_process':
         module.register_full_backward_hook(_backward_hook)
 
@@ -144,20 +152,21 @@ def _add_observer_(
         module, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
         bwd_residual, op_fusion, prefix):
     def _insert_obs_or_fq(m, name):
-        if (op_fusion is not None and any(layer in name for layer in op_fusion)
-            or not (hasattr(m, 'qconfig') and m.qconfig is not None)):
+        if not hasattr(m, 'qconfig') or m.qconfig is None:
+            return
+        if op_fusion is not None and any(layer in name for layer in op_fusion):
             return
         if isinstance(m, fwd_pre_hook_module_list):
-            _register_module_hook(m, name, 'activation_pre_process')
+            _register_module_hook(m, 'activation_pre_process', name)
         if isinstance(m, bwd_pre_hook_module_list):
-            _register_module_hook(m, name, 'error_pre_process')
+            _register_module_hook(m, 'error_pre_process', name)
         is_residual = (
-            isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
-            or (isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
-                and any(layer in name for layer in RESIDUAL_LAYERS))
+            isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
+            and any(layer in name for layer in RESIDUAL_LAYERS)
+            or isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
         )
         if bwd_residual and is_residual:
-            _register_module_hook(m, name, 'error_post_process')
+            _register_module_hook(m, 'error_post_process', name)
 
     named_modules = dict(module.named_children())
     for name, child in named_modules.items():

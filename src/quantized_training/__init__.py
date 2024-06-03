@@ -17,7 +17,7 @@ __all__ = [
     "convert",
     "get_qconfig",
     "get_quantized_model",
-    "get_quantizer"
+    "get_quantizer",
     "plot_layer_distribution",
     "plot_layer_range",
     "prepare",
