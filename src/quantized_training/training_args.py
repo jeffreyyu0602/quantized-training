@@ -376,11 +376,6 @@ def add_training_args(parser=None):
         help='Number of calibration steps for PTQ',
     )
     parser.add_argument(
-        '--print_graph',
-        action='store_true',
-        help='Print the extracted graph module.'
-    )
-    parser.add_argument(
         "--op_fusion",
         type=lambda x: x.split(','),
         default=None,
