@@ -4,7 +4,8 @@ package example;
 
 message Tensor {
   string node = 1;
-  repeated int32 shape = 2;
+  string dtype = 2;
+  repeated int32 shape = 3;
 }
 
 // Define message for elementwise operations
@@ -12,10 +13,7 @@ message VectorParam {
   string name = 1;
   string opcode = 2;
   Tensor input = 3;
-  oneof other_type {
-    Tensor other = 4;
-    float scalar = 5;
-  }
+  Tensor other = 4;
 }
 
 // Define message for GEMM, and layer norm

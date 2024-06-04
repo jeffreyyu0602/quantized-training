@@ -4,6 +4,7 @@ import struct
 from typing import Callable, Dict
 
 import torch
+from torch.ao.quantization import FakeQuantizeBase
 from torch.fx import Node
 
 
@@ -15,10 +16,39 @@ def _write_tensor_to_file(tensor, filename):
     print(f"Writing tensor to {filename}")
 
 
+def _get_module_name(n: Node):
+    # example: {
+    #    'L__self___sub': ("L['self'].sub", <class '....Sub'>),
+    #    'L__self___sub_linear': ("L['self'].sub.linear", <class 'torch.nn.modules.linear.Linear'>)
+    # }
+    # get_attr nodes doesn't have nn_module_stack?
+    nn_module_stack = n.meta.get("nn_module_stack", {})
+
+    def _normalize_path(n):
+        prefix = 0
+        # TODO This is non standard behavior and should be removed when we migrate off capture_pre_autograd_graph.
+        if n.startswith("L['self']."):
+            prefix = len("L['self'].")
+        return n[prefix:]
+
+    names = [_normalize_path(n) for n, _ in nn_module_stack.values()]
+    return names
+
+
 def _set_repeated_field(field, value, output_dir=None):
     if isinstance(value, Node):
+        # TODO: use module name instead of node name
         field.node = value.name
+        field.dtype = str(value.tensor_value.dtype).split(".")[1]
         field.shape.extend(list(value.tensor_value.shape))
+
+        gm = value.graph.owning_module
+        named_modules = dict(gm.named_modules(remove_duplicate=False))
+        if value.op == "call_module" and str(value.target) in named_modules:
+            obs_or_fq = named_modules[str(value.target)]
+            if isinstance(obs_or_fq, FakeQuantizeBase):
+                field.dtype = obs_or_fq.dtype
+
         if output_dir is not None:
             _write_tensor_to_file(
                 value.tensor_value, os.path.join(output_dir, f"{value.name}.bin")
@@ -98,9 +128,9 @@ def map_matmul(node, args, output_dir):
 @register_annotator("layer_norm")
 def map_layer_norm(node, args, output_dir):
     """
-    Schema: native_layer_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight, Tensor? bias, float eps) -> (Tensor, Tensor, Tensor)
+    Schema: layer_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None, Tensor? bias=None, float eps=1e-05, bool cudnn_enable=True) -> Tensor
     """
-    if node.op != "call_function" or node.target != torch.ops.aten.native_layer_norm.default:
+    if node.op != "call_function" or node.target != torch.ops.aten.layer_norm.default:
         return None
     from .param_pb2 import MatrixParam
     param = MatrixParam()
@@ -163,6 +193,7 @@ def map_elwise(node, args, output_dir):
     param.opcode = node.target.__name__.split(".")[0]
     _set_repeated_field(param.input, args[0], output_dir)
     if len(args) > 1:
+        assert isinstance(args[1], Node), "Second argument must be a Node"
         _set_repeated_field(param.other, args[1], output_dir)
     return param
 
@@ -174,6 +205,7 @@ def map_reduce(node, args, output_dir):
         torch.ops.aten.max.dim,
         torch.ops.aten.mean.dim,
         torch.ops.aten._softmax.default,
+        torch.ops.aten.softmax.int,
     ]:
         return None
     from .param_pb2 import ReduceParam
@@ -282,6 +314,8 @@ def _is_nop(op: Callable) -> bool:
     return op in [
         torch.ops.aten.cat.default,
         torch.ops.aten.clone.default,
+        # TODO: remove?
+        torch.ops.aten.dropout.default,
         torch.ops.aten.expand.default,
         torch.ops.aten.flatten.using_ints,
         torch.ops.aten.t.default,

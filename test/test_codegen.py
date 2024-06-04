@@ -11,6 +11,7 @@ from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceC
 
 from quantized_training import add_training_args, get_quantizer, prepare_pt2e
 from quantized_training.codegen.shape_prop import ShapeProp
+from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -86,6 +87,8 @@ def transform(
 
     if not isinstance(model, torch.fx.GraphModule):
         model = capture_pre_autograd_graph(model, example_args, example_kwargs)
+        model = _convert_scalars_to_attrs(model)
+        model.graph.print_tabular()
 
     shape_prop = ShapeProp(model)
     shape_prop.transform()
@@ -135,13 +138,14 @@ if __name__ == "__main__":
     if "qresnet18" == args.model:
         from torchvision.models import resnet18, ResNet18_Weights
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+        model.bfloat16()
 
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         quantizer = get_quantizer(args.activation, args.weight)
-        example_args = (torch.randn(1, 3, 224, 224),)
+        example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
         model = prepare_pt2e(model, quantizer, example_args)
         model.graph.print_tabular()
 

@@ -50,10 +50,14 @@ class FusedOperations(nn.Module):
         return f"fused ops: {' -> '.join([str(node) for node in self.nodes])}"
 
 
-def _check_arg_computed(arg, visited):
-    if isinstance(arg, List):
-        return all(_check_arg_computed(a, visited) for a in arg)
-    return arg in visited or not isinstance(arg, Node)
+def _is_node_visited(node, visited):
+    if isinstance(node, (tuple, list)):
+        return all(_is_node_visited(a, visited) for a in node)
+    if isinstance(node, Node):
+        if "_tensor_constant_" in node.name:
+            return True
+        return node in visited
+    return True
 
 
 class ShapeProp:
@@ -128,16 +132,15 @@ class ShapeProp:
             is_gemm_or_elwise_op = _is_gemm_op(node.target) or _is_elementwise_op(node.target)
             while len(cur_node.users) == 1:
                 # Perform fusion if
-                # 1) the user is a NOP operation
-                # 2) the node is a GEMM or vector op and the user is a vector operation
+                # 1) all arguments are visited
+                # 2) the user is a NOP operation
+                # 3) OR the root node is a GEMM or elwise op and the user is a elwise operation
                 user = next(iter(cur_node.users))
-                all_args_computed = all(
-                    _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
-                )
-                if (
-                    not _is_nop(user.target)
-                    and not (is_gemm_or_elwise_op and _is_elementwise_op(user.target))
-                    or not all_args_computed
+                if not all(
+                    _is_node_visited(arg, visited) for arg in user.args if arg != cur_node
+                ) or not (
+                    _is_nop(user.target)
+                    or is_gemm_or_elwise_op and _is_elementwise_op(user.target)
                 ):
                     break
                 fused_nodes.append(user)
@@ -152,7 +155,7 @@ class ShapeProp:
             node_name = get_new_node_name(self.mod)
             setattr(self.mod, node_name, fused_mod)
             self.modules[node_name] = fused_mod
-            with self.graph.inserting_before(node):
+            with self.graph.inserting_after(fused_nodes[-1]):
                 new_node = self.graph.create_node(
                     'call_module', node_name, (new_args, new_kwargs), {})
             fused_nodes[-1].replace_all_uses_with(new_node)
