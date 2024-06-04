@@ -7,12 +7,8 @@ from torch import nn
 from torch.fx import GraphModule, Node
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 
-from quantized_training.codegen.map_operation import (
-    GEMM_OPS_MAPPING,
-    VECTOR_OPS_MAPPING,
-    NOP_MAPPING,
-    map_operation
-)
+from .mapping import map_operation
+from .mapping_utils import _is_nop, _is_elementwise_op, _is_gemm_op
 
 logger = logging.getLogger(__name__)
 
@@ -129,18 +125,18 @@ class ShapeProp:
             fused_nodes = [node]
             new_args = [node.args]
             cur_node = node
-            is_gemm_or_vector_op = node.target in GEMM_OPS_MAPPING or node.target in VECTOR_OPS_MAPPING
+            is_gemm_or_elwise_op = _is_gemm_op(node.target) or _is_elementwise_op(node.target)
             while len(cur_node.users) == 1:
+                # Perform fusion if
+                # 1) the user is a NOP operation
+                # 2) the node is a GEMM or vector op and the user is a vector operation
                 user = next(iter(cur_node.users))
                 all_args_computed = all(
                     _check_arg_computed(arg, visited) for arg in user.args if arg != cur_node
                 )
-                # Perform fusion if
-                # 1) the user is a NOP operation
-                # 2) the node is a GEMM or vector op and the user is a vector operation
                 if (
-                    not user.target in NOP_MAPPING
-                    and not (is_gemm_or_vector_op and user.target in VECTOR_OPS_MAPPING)
+                    not _is_nop(user.target)
+                    and not (is_gemm_or_elwise_op and _is_elementwise_op(user.target))
                     or not all_args_computed
                 ):
                     break
@@ -170,8 +166,8 @@ class ShapeProp:
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
 
-        from quantized_training.codegen.build import param_pb2
-        params = param_pb2.ModelParams()
+        from .param_pb2 import ModelParams
+        params = ModelParams()
         for node in self.graph.nodes:
             param = None
             if (

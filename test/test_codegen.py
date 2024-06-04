@@ -1,11 +1,15 @@
 import argparse
+import json
 import logging
 import os
 
 import torch
+from google.protobuf.json_format import MessageToDict
 from torch.export import export
+from torch._export import capture_pre_autograd_graph
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification
 
+from quantized_training import add_training_args, get_quantizer, prepare_pt2e
 from quantized_training.codegen.shape_prop import ShapeProp
 
 logging.basicConfig(level=logging.DEBUG)
@@ -68,24 +72,23 @@ def flatten(mixed_list):
             flattened_list.append(element)
     return flattened_list
 
-
+    
 def transform(
-        model, example_args, example_kwargs=None, *, print_graph=False,
-        generate_graph=False, output_file="compute_graph", output_dir=None):
+    model: torch.fx.GraphModule,
+    example_args,
+    example_kwargs=None,
+    *,
+    output_file="compute_graph",
+    output_dir=None
+):
     if example_kwargs is None:
         example_kwargs = {}
 
-    exported_program: torch.export.ExportedProgram = \
-        export(model, example_args, example_kwargs)
+    if not isinstance(model, torch.fx.GraphModule):
+        model = capture_pre_autograd_graph(model, example_args, example_kwargs)
 
-    if print_graph:
-        print(exported_program)
-
-    shape_prop = ShapeProp(exported_program.module())
+    shape_prop = ShapeProp(model)
     shape_prop.transform()
-
-    if print_graph:
-        shape_prop.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
     uplifted_args = flatten(list(example_args)) + list(example_kwargs.values())
@@ -93,17 +96,13 @@ def transform(
     # gm_out = shape_prop.mod(*example_args, *list(example_kwargs.values()))
 
     params = shape_prop.gen_code(os.path.join(output_dir, "tensor_files"))
+
+    shape_prop.gen_compute_graph(os.path.join(output_dir, output_file))
+
     with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
-    import json
-    from google.protobuf.json_format import MessageToDict
-
-    data = MessageToDict(params)
-    print(json.dumps(data, indent=4))
-
-    if generate_graph:
-        shape_prop.gen_compute_graph(os.path.join(output_dir, output_file))
+    print(json.dumps(MessageToDict(params), indent=4))
 
     return (shape_prop, pt_out, gm_out)
 
@@ -113,9 +112,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
-    parser.add_argument("--print_graph", action="store_true")
-    parser.add_argument("--generate_graph", action="store_true")
-    parser.add_argument("--output_dir", default=None, help="Output directory for generated tensor files")
+    parser.add_argument("--output_dir", required=True, help="Output directory for generated tensor files")
+    add_training_args(parser)
     args = parser.parse_args()
 
     if "resnet18" == args.model:
@@ -130,9 +128,27 @@ if __name__ == "__main__":
         _, pt_out, gm_out = transform(
             model,
             example_args,
-            print_graph=args.print_graph,
-            generate_graph=args.generate_graph,
             output_file="resnet18",
+            output_dir=args.output_dir,
+        )
+
+    if "qresnet18" == args.model:
+        from torchvision.models import resnet18, ResNet18_Weights
+        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+
+        module_names = [name for name, _ in model.named_modules()]
+        modules_to_fuse = _pair_conv_bn(module_names)
+        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
+
+        quantizer = get_quantizer(args.activation, args.weight)
+        example_args = (torch.randn(1, 3, 224, 224),)
+        model = prepare_pt2e(model, quantizer, example_args)
+        model.graph.print_tabular()
+
+        _, pt_out, gm_out = transform(
+            model,
+            example_args,
+            output_file="qresnet18",
             output_dir=args.output_dir,
         )
 
@@ -148,8 +164,6 @@ if __name__ == "__main__":
         _, pt_out, gm_out = transform(
             model,
             example_args,
-            print_graph=args.print_graph,
-            generate_graph=args.generate_graph,
             output_file="resnet50",
             output_dir=args.output_dir,
         )
@@ -165,8 +179,6 @@ if __name__ == "__main__":
         _, pt_out, gm_out = transform(
             model,
             example_args,
-            print_graph=args.print_graph,
-            generate_graph=args.generate_graph,
             output_file="segformer",
             output_dir=args.output_dir,
         )
@@ -178,8 +190,6 @@ if __name__ == "__main__":
         _, pt_out, gm_out = transform(
             model,
             example_args,
-            print_graph=args.print_graph,
-            generate_graph=args.generate_graph,
             output_file="mobilebert",
             output_dir=args.output_dir,
         )
@@ -212,8 +222,6 @@ if __name__ == "__main__":
             model.mobilebert.encoder,
             example_args,
             example_kwargs,
-            print_graph=args.print_graph,
-            generate_graph=args.generate_graph,
             output_file="mobilebert",
             output_dir=args.output_dir,
         )

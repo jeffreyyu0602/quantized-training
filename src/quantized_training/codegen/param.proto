@@ -39,10 +39,11 @@ message PoolingParam {
   repeated int32 kernel_size = 4;
   repeated int32 stride = 5;
   repeated int32 padding = 6;
-  repeated int32 dilation = 7;  // only for max_pool
+  repeated int32 dilation = 7;  // for max_pool
   bool ceil_mode = 8;
-  bool count_include_pad = 9;   // only for avg_pool
-  int32 divisor_override = 10;  // only for avg_pool
+  bool count_include_pad = 9;   // for avg_pool
+  int32 divisor_override = 10;  // for avg_pool
+  repeated int32 output_size = 11;  // for adaptive_avg_pool2d
 }
 
 // Define message for reduction and softmax operations
@@ -63,7 +64,7 @@ message ShapeParam {
 }
 
 // One of GEMM, reduce, or shape change
-message Param {
+message AcceleratorParam {
   string name = 1;
   oneof param_type {
     MatrixParam matrix_param = 2;
@@ -76,5 +77,5 @@ message Param {
 }
 
 message ModelParams {
-    repeated Param params = 1;
+    repeated AcceleratorParam params = 1;
 }

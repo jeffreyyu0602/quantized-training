@@ -14,7 +14,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROTO_DIR=$SCRIPT_DIR
 
 # Directory where you want to output the compiled Python files
-OUT_DIR="$SCRIPT_DIR/build"
+OUT_DIR=$SCRIPT_DIR
 
 # Create the output directory if it does not exist
 mkdir -p "$OUT_DIR"
