@@ -83,12 +83,14 @@ def fuse_operator(model: GraphModule):
 def map_operation(nodes: List[Node], name, output_dir):
     params = []
     for node in nodes:
+        param = None
         for mapping_func in OP_TO_MAPPING_FUNC.values():
             param = mapping_func(node, output_dir)
             if param is not None:
                 params.append(param)
-                continue
-        print(f"Unsupported operation {node.name}: {node.target}")
+                break
+        if param is None:
+            print(f"Unsupported operation {node.name}: {node.target}")
 
     if len(params) == 0:
         return None
@@ -109,26 +111,22 @@ def map_operation(nodes: List[Node], name, output_dir):
         if len(params) > 1:
             param.vector_params.extend(params[1:])
             param.fused = True
-
-    if params[0].opcode == "layer_norm":
-        assert len(params) == 1, "LayerNorm operation cannot be fused with other operations"
-        param.matrix_param.CopyFrom(params[0])
+        return param
 
     if isinstance(params[0], VectorParam):
         param.vector_params.extend(params)
+        return param
 
-    if isinstance(params[0], ReduceParam):
-        assert len(params) == 1, "Reduce operation cannot be fused with other operations"
-        param.reduce_param.CopyFrom(params[0])
+    assert len(params) == 1, f"{str(node.target)} cannot be fused with other operations"
 
-    if isinstance(params[0], ShapeParam):
-        assert len(params) == 1, "Shape operation cannot be fused with other operations"
-        param.shape_param.CopyFrom(params[0])
-
+    if params[0].opcode == "layer_norm":
+        param.matrix_param.CopyFrom(params[0])
     if isinstance(params[0], PoolingParam):
-        assert len(params) == 1, "Pooling operation cannot be fused with other operations"
         param.pooling_param.CopyFrom(params[0])
-
+    if isinstance(params[0], ReduceParam):
+        param.reduce_param.CopyFrom(params[0])
+    if isinstance(params[0], ShapeParam):
+        param.shape_param.CopyFrom(params[0])
     return param
 
 
@@ -146,10 +144,11 @@ def gen_code(model, args, output_dir=None):
         param = None
         if node.op == 'call_module':
             gm = named_modules[node.target]
-            gm_args = sp.load_arg(node.args)
-            ShapeProp(gm).propagate(*gm_args)
-            nodes = [n for n in gm.graph.nodes if n.op == 'call_function']
-            param = map_operation(nodes, node.name, output_dir)
+            if isinstance(gm, torch.fx.GraphModule):
+                gm_args = sp.load_arg(node.args)
+                ShapeProp(gm).propagate(*gm_args)
+                nodes = [n for n in gm.graph.nodes if n.op == 'call_function']
+                param = map_operation(nodes, node.name, output_dir)
         elif node.op == 'call_function':
             param = map_operation([node], node.name, output_dir)
 
@@ -166,15 +165,16 @@ def gen_compute_graph(model, output_file="compute_graph"):
         if node.op in ["placeholder", "get_attr"]:
             continue
 
-        label = "{" + str(node) + "|"
+        label = ""
         if node.op == "call_module":
             gm = named_modules[node.target]
-            label += "&#92;n".join([
-                str(n.target) for n in gm.graph.nodes if n.op == "call_function"
-            ])
+            if isinstance(gm, torch.fx.GraphModule):
+                label = "&#92;n".join([
+                    str(n.target) for n in gm.graph.nodes if n.op == "call_function"
+                ])
         else:
-            label += str(node.target)
-        label += "}"
+            label = str(node.target)
+        label = f"{{{node}}}" if label == "" else f"{{{node}|{label}}}"
         label = label.replace("<", "\<").replace(">", "\>")
 
         nodes[node.name] = {
