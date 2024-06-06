@@ -59,7 +59,7 @@ class ShapeProp:
             if isinstance(result, torch.Tensor):
                 node.shape = result.shape
                 node.dtype = result.dtype
-                node.tensor_value = result.clone()
+                node.value = result.clone()
 
             self.env[node.name] = result
 

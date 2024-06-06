@@ -49,8 +49,8 @@ def fuse_operator(model: GraphModule):
         is_gemm_or_elwise_op = _is_gemm_op(node.target) or _is_elementwise_op(node.target)
         # Perform fusion if
         # 1) all arguments are visited
-        # 2) the user is a NOP operation
-        # 3) OR the root node is a GEMM or elwise op and the user is a elwise operation
+        # 2) the root node is a GEMM or elementwise op and the user is a elwise operation
+        # or the user is a nop operation
         while len(cur_node.users) == 1:
             user = next(iter(cur_node.users))
             if not all(
@@ -110,7 +110,6 @@ def map_operation(nodes: List[Node], name, output_dir):
         param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
             param.vector_params.extend(params[1:])
-            param.fused = True
         return param
 
     if isinstance(params[0], VectorParam):
@@ -137,16 +136,17 @@ def gen_code(model, args, output_dir=None):
     from .param_pb2 import ModelParams
     params = ModelParams()
 
-    sp = ShapeProp(model)
-    sp.propagate(*args)
+    ShapeProp(model).propagate(*args)
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
         param = None
         if node.op == 'call_module':
             gm = named_modules[node.target]
             if isinstance(gm, torch.fx.GraphModule):
-                gm_args = sp.load_arg(node.args)
-                ShapeProp(gm).propagate(*gm_args)
+                n_args = torch.fx.node.map_aggregate(
+                    node.args, lambda x: x.value if isinstance(x, Node) else x
+                )
+                ShapeProp(gm).propagate(*n_args)
                 nodes = [n for n in gm.graph.nodes if n.op == 'call_function']
                 param = map_operation(nodes, node.name, output_dir)
         elif node.op == 'call_function':

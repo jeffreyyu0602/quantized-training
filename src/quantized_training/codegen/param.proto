@@ -71,7 +71,6 @@ message AcceleratorParam {
     ShapeParam shape_param = 5;
   }
   repeated VectorParam vector_params = 6;
-  bool fused = 7;
 }
 
 message ModelParams {

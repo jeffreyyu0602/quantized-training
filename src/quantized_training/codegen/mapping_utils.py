@@ -61,7 +61,7 @@ def _set_tensor_field(field, node, output_dir):
 
     if output_dir is not None:
         _write_tensor_to_file(
-            node.tensor_value, os.path.join(output_dir, f"{node.name}.bin")
+            node.value, os.path.join(output_dir, f"{node.name}.bin")
         )
 
     return scale
@@ -94,7 +94,7 @@ def map_conv2d(node, output_dir):
     default_args = [None, None, None, 1, 0, 1, 1]
     default_args[:len(node.args)] = node.args
 
-    from .param_pb2 import MatrixParam
+    from .param_pb2 import MatrixParam, VectorParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -106,17 +106,24 @@ def map_conv2d(node, output_dir):
     _set_repeated_field(param.dilation, default_args[5])
     # param.groups = default_args[6]
 
-    scale_out = scale_act if scale_act is not None else torch.tensor(1.0)
-    scale_out = scale_out * (scale_wt if scale_wt is not None else torch.tensor(1.0))
-    if len(node.users) > 0:
-        gm = node.graph.owning_module
-        obs_or_fq = _get_obs_or_fq(gm, next(iter(node.users)))
-        if obs_or_fq is not None:
-            scale_out = scale_out / obs_or_fq.scale
-    # param.scale.node = node.name + "_scale_out"
-    # param.scale.dtype = scale_out.dtype
-    # param.scale.shape.extend(list(scale_out.shape))
-    print(node.name + "_scale_out", scale_out)
+    scale = scale_act if scale_act is not None else torch.tensor(1.0)
+    scale = scale * (scale_wt if scale_wt is not None else torch.tensor(1.0))
+    gm = node.graph.owning_module
+    obs_or_fq = _get_obs_or_fq(gm, next(iter(node.users)))
+    if obs_or_fq is not None:
+        scale = scale / obs_or_fq.scale
+
+    quantization_param = VectorParam()
+    quantization_param.name = node.name + "_scale"
+    quantization_param.opcode = "quantize" if obs_or_fq is not None else "dequantize"
+    _set_tensor_field(quantization_param.input, node, output_dir)
+    quantization_param.other.node = node.name + "_scale"
+    quantization_param.other.dtype = "bfloat16"
+    quantization_param.other.shape.extend(list(scale.shape))
+    # _write_tensor_to_file(scale, os.path.join(output_dir, f"{node.name}_scale.bin"))
+    # import json
+    # from google.protobuf.json_format import MessageToDict
+    # print(json.dumps(MessageToDict(quantization_param), indent=4))
     return param
 
 
