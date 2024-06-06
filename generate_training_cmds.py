@@ -1,3 +1,6 @@
+from itertools import product
+
+
 models = [
     'models/mobilebert_tiny',
     'google/mobilebert-uncased',
@@ -5,9 +8,10 @@ models = [
     'roberta-large',
 ]
 
+tasks = ["mnli", "qnli", "mrpc", "sst2", "squad"]
+
 configs = ["bf16", "posit8", "posit8-approx-shifted", "fp8"]
 
-tasks = ["mnli", "qnli", "mrpc", "sst2", "squad"]
 
 model_to_filename = {
     "models/mobilebert_tiny": "mobilebert_tiny",
@@ -20,26 +24,28 @@ model_to_filename = {
 
 def generate_commands():
     with open('asplos_training.sh', 'w') as file:
-        for model in models:
-            for task in tasks:
-                for config in configs:
-                    model_id = "roberta-large-mnli" if (
-                        model == "roberta-large" and task == "mrpc") else model
-                    cmd = [
-                        "python", "run_asplos_training.py",
-                        "--model", model_id,
-                        "--task", task,
-                        "--run_job", config,
-                        "--log_file", f"logs/{model_to_filename[model]}-{task}-{config}.log",
-                    ]
-                    if (model == "google/mobilebert-uncased" or model == "models/mobilebert_tiny") and task == "squad":
-                        cmd += ["--sgd", "--op_fusion", "qa_outputs"]
-                    if model == "google/mobilebert-uncased" and task != "squad":
-                        cmd += ["--op_fusion", "classifier"]
+        for model, task, config in product(models, tasks, configs):
+            model_id = (
+                "roberta-large-mnli"
+                if model == "roberta-large" and task == "mrpc"
+                else model
+            )
+            cmd = [
+                "python", "run_asplos_training.py",
+                "--model", model_id,
+                "--task", task,
+                "--run_job", config,
+                "--log_file", f"logs/{model_to_filename[model]}-{task}-{config}.log",
+            ]
+            if model in ["google/mobilebert-uncased", "models/mobilebert_tiny"] and task == "squad":
+                cmd += ["--sgd", "--op_fusion", "qa_outputs"]
+            if model == "google/mobilebert-uncased" and task != "squad":
+                cmd += ["--op_fusion", "classifier"]
 
-                    for seed in range(3):
-                        file.write(" ".join(cmd) + f" --seed {seed}\n")
-                file.write("\n")
+            base_cmd = " ".join(cmd)
+            for seed in range(3):
+                file.write(f"{base_cmd} --seed {seed}\n")
+        file.write("\n")
 
 
 if __name__ == "__main__":

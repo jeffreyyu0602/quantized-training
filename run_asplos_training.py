@@ -116,7 +116,15 @@ def parse_args():
         if getattr(args, k) is None:
             setattr(args, k, v)
 
-    config_keys = ["batch_size", "learning_rate", "num_train_epochs", "lora_rank", "lora_alpha", "target_modules", "quantized_ops"]
+    config_keys = [
+        "batch_size",
+        "learning_rate",
+        "num_train_epochs",
+        "lora_rank",
+        "lora_alpha",
+        "target_modules",
+        "quantized_ops",
+    ]
     missing_keys = [key for key in config_keys if getattr(args, key) is None]
     assert not missing_keys, (
         f"The following keys must be specified for {args.model}: {', '.join(missing_keys)}"
@@ -203,14 +211,26 @@ def main():
     else:
         base_cmd = get_base_cmd(args)
         quant_args = ['--quantize_forward', args.quantized_ops, '--quantize_backprop', args.quantized_ops]
-        posit_args = ['--activation', 'posit8_1', '--weight', 'posit8_1', '--error', 'posit8_1,qs=per_tensor,qmax=64,ahl=10']
-        fp8_args = ['--activation', 'fp8_e4m3', '--weight', 'fp8_e4m3', '--error', 'fp8_e5m2,qs=per_tensor,qmax=57344,ahl=10']
+        posit_args = [
+            '--activation', 'posit8_1',
+            '--weight', 'posit8_1',
+            '--error', 'posit8_1,qs=per_tensor_symmetric,qmax=64,ahl=10',
+        ]
+        fp8_args = [
+            '--activation', 'fp8_e4m3',
+            '--weight', 'fp8_e4m3',
+            '--error', 'fp8_e5m2,qs=per_tensor_symmetric,qmax=57344,ahl=10',
+        ]
 
         commands = {
             "bf16": base_cmd,
             "posit8": base_cmd + quant_args + posit_args,
-            "posit8-approx": base_cmd + quant_args + posit_args + ["--posit_reciprocal", "--posit_exp"],
-            "posit8-approx-shifted": base_cmd + quant_args + posit_args + ["--posit_reciprocal", "--posit_exp_shifted"],
+            "posit8-approx": base_cmd + quant_args + posit_args + [
+                "--posit_reciprocal", "--posit_exp"
+            ],
+            "posit8-approx-shifted": base_cmd + quant_args + posit_args + [
+                "--posit_reciprocal", "--posit_exp_shifted"
+            ],
             "fp8": base_cmd + quant_args + fp8_args,
         }
 
@@ -226,7 +246,10 @@ def main():
                 command += extra_args
 
             if args.wandb_log:
-                command += ['--project', f'{prefix}-quantized-training', '--run_name', f'{name}-{args.seed}']
+                command += [
+                    '--project', f'{prefix}-quantized-training',
+                    '--run_name', f'{name}-{args.seed}'
+                ]
 
             if args.slurm:
                 command += ['slurm', '--job-name', job_name]
