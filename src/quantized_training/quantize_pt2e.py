@@ -15,6 +15,7 @@ from torch.ao.quantization.quantizer import (
 from torch.ao.quantization import ObserverOrFakeQuantize
 
 import quantized_training as qt
+from quantized_training.export_utils import _allow_exported_model_train_eval
 from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize
 from quantized_training.quantizer.quantizer import QuantizationSpec
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
@@ -156,7 +157,9 @@ def get_quantizer(
         return _get_per_channel_act_quantizer(activation, weight)
 
     qconfig_opt = QuantizationConfig(activation, None, weight, None)
-    return XNNPACKQuantizer().set_global(qconfig_opt)
+    matmul_qonfig = QuantizationConfig(activation, None, activation, None)
+    return XNNPACKQuantizer().set_global(qconfig_opt) \
+        .set_operator_type(torch.ops.aten.matmul.default, matmul_qonfig)
 
 
 def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
@@ -176,4 +179,5 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     ).to(model_device)
 
     model = prepare_pt2e(model, quantizer)
+    _allow_exported_model_train_eval(model)
     return model

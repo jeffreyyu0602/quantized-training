@@ -800,10 +800,13 @@ def main(args):
         quantize(model, args)
     else:
         print("prepare_pt2e")
+        if args.bf16:
+            model.bfloat16()
+
         quantizer = get_quantizer(
-            args.activation, 
-            args.weight, 
-            args.record_histogram, 
+            args.activation,
+            args.weight,
+            args.record_histogram,
             args.force_scale_power_of_two
         )
         first_batch = next(iter(train_dataloader))
@@ -817,7 +820,6 @@ def main(args):
             "end_positions": {0: batch_size},
         }
         model = prepare_pt2e(model, quantizer, (), example_kwargs, dynamic_shapes)
-        torch.ao.quantization.allow_exported_model_train_eval(model)
 
     # calibration data loader does not shuffle input dataset for reproducibility purpose
     calibration_data_loader = DataLoader(

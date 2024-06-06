@@ -150,8 +150,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         amax_history,
         scale,
         quant_max,
-        qscheme=None,
-        amax_history_len=None,
+        qscheme,
         ch_axis=None,
         block_size=0,
         force_scale_power_of_two=False,
@@ -168,26 +167,19 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             ch_axis = axes[0] + 1
 
         if observer_enabled[0] == 1:
-            amax_cur = _get_amax(input, qscheme, ch_axis)
-            if amax_history.numel() == 0:
-                amax = amax_cur
-                amax_history = torch.zeros(
-                    (amax_history_len,) + amax_cur.shape, device=input.device
-                )
-            else:
-                amax = torch.amax(amax_history, dim=0)
+            amax = torch.amax(amax_history, dim=0)
 
             if amax_history.shape[0] > 1:
                 new_amax_history = torch.roll(amax_history, -1, 0)
                 amax_history.copy_(new_amax_history)
-            amax_history[0] = amax_cur
+            amax_history[0] = _get_amax(input, qscheme, ch_axis)
 
             sf = amax / quant_max
             sf = torch.where(amax > 0.0, sf, scale)
             sf = torch.where(torch.isfinite(amax), sf, scale)
             if force_scale_power_of_two:
                 sf = torch.pow(2, torch.floor(torch.log2(sf)))
-            scale = sf
+            scale.copy_(sf)
 
         if fake_quant_enabled[0] == 1:
             scale = scale.to(input.dtype)
@@ -200,11 +192,11 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             if block_size:
                 input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
 
-        return input, amax_history, scale
+        return input
 
     @staticmethod
-    def backward(ctx, grad_output, *args):
-        return grad_output, None, None, None, None, None, None, None, None, None, None, None
+    def backward(ctx, grad_output):
+        return grad_output, None, None, None, None, None, None, None, None, None, None
 
 
 class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
@@ -253,8 +245,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
         # Create histogram buffer
         self.record_histogram = record_histogram
-        if record_histogram:
-            self.register_buffer("histogram", torch.zeros(254, **factory_kwargs), persistent=False)
+        self.register_buffer("histogram", torch.zeros(254, **factory_kwargs), persistent=False)
 
     @torch.jit.export
     def calculate_qparams(self):
@@ -289,7 +280,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
 
         # TODO: make this a separate module?
         if self.qscheme == qt.microscaling:
-            X = MXFakeQuantFunction.apply(
+            return MXFakeQuantFunction.apply(
                 X,
                 self.encodings,
                 self.fake_quant_enabled,
@@ -298,9 +289,16 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.ch_axis,
                 self.block_size,
             )
-            return X
 
-        X, self.amax_history, self.scale = FusedAmaxObsFakeQuantFunction.apply(
+        if self.qscheme is not None:
+            if self.amax_history.numel() == 0:
+                amax_cur = _get_amax(X.detach(), self.qscheme, self.ch_axis)
+                self.amax_history = torch.zeros(
+                    (self.amax_history_len,) + amax_cur.shape, device=X.device
+                )
+                self.scale = torch.ones_like(amax_cur)
+
+        return FusedAmaxObsFakeQuantFunction.apply(
             X,
             self.encodings,
             self.observer_enabled,
@@ -309,9 +307,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             self.scale,
             self.quant_max,
             self.qscheme,
-            self.amax_history_len,
             self.ch_axis,
             self.block_size,
             self.force_scale_power_of_two,
         )
-        return X
