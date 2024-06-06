@@ -35,25 +35,40 @@ def _get_module_name(n: Node):
     return names
 
 
-def _set_repeated_field(field, value, output_dir=None):
-    if isinstance(value, Node):
-        # TODO: use module name instead of node name
-        field.node = value.name
-        field.dtype = str(value.tensor_value.dtype).split(".")[1]
-        field.shape.extend(list(value.tensor_value.shape))
+def _get_obs_or_fq(gm, node):
+    named_modules = dict(gm.named_modules(remove_duplicate=False))
+    if node.op == "call_module" and str(node.target) in named_modules:
+        obs_or_fq = named_modules[str(node.target)]
+        if isinstance(obs_or_fq, FakeQuantizeBase):
+            return obs_or_fq
+    return None
 
-        gm = value.graph.owning_module
-        named_modules = dict(gm.named_modules(remove_duplicate=False))
-        if value.op == "call_module" and str(value.target) in named_modules:
-            obs_or_fq = named_modules[str(value.target)]
-            if isinstance(obs_or_fq, FakeQuantizeBase):
-                field.dtype = obs_or_fq.dtype
 
-        if output_dir is not None:
-            _write_tensor_to_file(
-                value.tensor_value, os.path.join(output_dir, f"{value.name}.bin")
-            )
-    elif isinstance(value, (tuple, list)):
+def _set_tensor_field(field, node, output_dir):
+    assert isinstance(node, Node), "tensor field must be a Node"
+    field.node = node.name
+    field.dtype = str(node.dtype).split(".")[1]
+    field.shape.extend(list(node.shape))
+
+    gm = node.graph.owning_module
+    named_modules = dict(gm.named_modules(remove_duplicate=False))
+    scale = None
+    if node.op == "call_module" and str(node.target) in named_modules:
+        obs_or_fq = named_modules[str(node.target)]
+        if isinstance(obs_or_fq, FakeQuantizeBase):
+            field.dtype = obs_or_fq.dtype
+            scale = obs_or_fq.scale
+
+    if output_dir is not None:
+        _write_tensor_to_file(
+            node.tensor_value, os.path.join(output_dir, f"{node.name}.bin")
+        )
+
+    return scale
+
+
+def _set_repeated_field(field, value):
+    if isinstance(value, (tuple, list)):
         field.extend(value)
     elif value is not None:
         field.append(value)
@@ -70,30 +85,43 @@ def register_annotator(op: str):
 
 
 @register_annotator("conv2d")
-def map_conv2d(node, args, output_dir):
+def map_conv2d(node, output_dir):
     """
     Schema: conv2d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1) -> Tensor
     """
     if node.op != "call_function" or node.target != torch.ops.aten.conv2d.default:
         return None
     default_args = [None, None, None, 1, 0, 1, 1]
-    default_args[:len(args)] = args
+    default_args[:len(node.args)] = node.args
+
     from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, default_args[0], output_dir)
-    _set_repeated_field(param.weight, default_args[1], output_dir)
-    _set_repeated_field(param.bias, default_args[2], output_dir)
+    scale_act = _set_tensor_field(param.input, default_args[0], output_dir)
+    scale_wt = _set_tensor_field(param.weight, default_args[1], output_dir)
+    _set_tensor_field(param.bias, default_args[2], output_dir)
     _set_repeated_field(param.stride, default_args[3])
     _set_repeated_field(param.padding, default_args[4])
     _set_repeated_field(param.dilation, default_args[5])
     # param.groups = default_args[6]
+
+    scale_out = scale_act if scale_act is not None else torch.tensor(1.0)
+    scale_out = scale_out * (scale_wt if scale_wt is not None else torch.tensor(1.0))
+    if len(node.users) > 0:
+        gm = node.graph.owning_module
+        obs_or_fq = _get_obs_or_fq(gm, next(iter(node.users)))
+        if obs_or_fq is not None:
+            scale_out = scale_out / obs_or_fq.scale
+    # param.scale.node = node.name + "_scale_out"
+    # param.scale.dtype = scale_out.dtype
+    # param.scale.shape.extend(list(scale_out.shape))
+    print(node.name + "_scale_out", scale_out)
     return param
 
 
 @register_annotator("linear")
-def map_linear(node, args, output_dir):
+def map_linear(node, output_dir):
     """
     Schema: linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor
     """
@@ -103,14 +131,14 @@ def map_linear(node, args, output_dir):
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.weight, args[1], output_dir)
-    _set_repeated_field(param.bias, args[2], output_dir)
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_tensor_field(param.weight, node.args[1], output_dir)
+    _set_tensor_field(param.bias, node.args[2], output_dir)
     return param
 
 
 @register_annotator("matmul")
-def map_matmul(node, args, output_dir):
+def map_matmul(node, output_dir):
     """
     Schema: matmul(Tensor self, Tensor other) -> Tensor
     """
@@ -120,13 +148,13 @@ def map_matmul(node, args, output_dir):
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.weight, args[1], output_dir)
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_tensor_field(param.weight, node.args[1], output_dir)
     return param
 
 
 @register_annotator("layer_norm")
-def map_layer_norm(node, args, output_dir):
+def map_layer_norm(node, output_dir):
     """
     Schema: layer_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None, Tensor? bias=None, float eps=1e-05, bool cudnn_enable=True) -> Tensor
     """
@@ -136,9 +164,9 @@ def map_layer_norm(node, args, output_dir):
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.weight, args[2], output_dir)
-    _set_repeated_field(param.bias, args[3], output_dir)
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_tensor_field(param.weight, node.args[2], output_dir)
+    _set_tensor_field(param.bias, node.args[3], output_dir)
     return param
 
 
@@ -170,7 +198,7 @@ def _is_elementwise_op(op: Callable) -> bool:
 
 
 @register_annotator("elwise")
-def map_elwise(node, args, output_dir):
+def map_elwise(node, output_dir):
     """
     Schema:
     add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
@@ -191,15 +219,14 @@ def map_elwise(node, args, output_dir):
     param = VectorParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    if len(args) > 1:
-        assert isinstance(args[1], Node), "Second argument must be a Node"
-        _set_repeated_field(param.other, args[1], output_dir)
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    if len(node.args) > 1:
+        _set_tensor_field(param.other, node.args[1], output_dir)
     return param
 
 
 @register_annotator("reduce")
-def map_reduce(node, args, output_dir):
+def map_reduce(node, output_dir):
     if node.op != "call_function" or node.target not in [
         torch.ops.aten.sum.dim_IntList,
         torch.ops.aten.max.dim,
@@ -212,25 +239,25 @@ def map_reduce(node, args, output_dir):
     param = ReduceParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.dim, args[1])
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_repeated_field(param.dim, node.args[1])
     return param
 
 
 @register_annotator("avg_pool2d")
-def map_avg_pool2d(node, args, output_dir):
+def map_avg_pool2d(node, output_dir):
     """
     Schema: avg_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, bool ceil_mode=False, bool count_include_pad=True, int? divisor_override=None) -> Tensor
     """
     if node.op != "call_function" or node.target != torch.ops.aten.avg_pool2d.default:
         return None
     default_args = [None, None, [], 0, False, True, None]
-    default_args[:len(args)] = args
+    default_args[:len(node.args)] = node.args
     from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, default_args[0], output_dir)
+    _set_tensor_field(param.input, default_args[0], output_dir)
     _set_repeated_field(param.kernel_size, default_args[1])
     _set_repeated_field(param.stride, default_args[2])
     _set_repeated_field(param.padding, default_args[3])
@@ -241,7 +268,7 @@ def map_avg_pool2d(node, args, output_dir):
 
 
 @register_annotator("adaptive_avg_pool2d")
-def map_adaptive_avg_pool2d(node, args, output_dir):
+def map_adaptive_avg_pool2d(node, output_dir):
     """
     Schema: adaptive_avg_pool2d(Tensor self, SymInt[2] output_size) -> Tensor
     """
@@ -251,25 +278,25 @@ def map_adaptive_avg_pool2d(node, args, output_dir):
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.output_size, args[1])
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_repeated_field(param.output_size, node.args[1])
     return param
 
 
 @register_annotator("max_pool2d")
-def map_max_pool2d(node, args, output_dir):
+def map_max_pool2d(node, output_dir):
     """
     Schema: max_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, int[2] dilation=1, bool ceil_mode=False) -> Tensor
     """
     if node.op != "call_function" or node.target != torch.ops.aten.max_pool2d.default:
         return None
     default_args = [None, None, [], 0, 1, False]
-    default_args[:len(args)] = args
+    default_args[:len(node.args)] = node.args
     from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, default_args[0], output_dir)
+    _set_tensor_field(param.input, default_args[0], output_dir)
     _set_repeated_field(param.kernel_size, default_args[1])
     _set_repeated_field(param.stride, default_args[2])
     _set_repeated_field(param.padding, default_args[3])
@@ -279,7 +306,7 @@ def map_max_pool2d(node, args, output_dir):
 
 
 @register_annotator("permute")
-def map_permute(node, args, output_dir):
+def map_permute(node, output_dir):
     """
     Schema: permute(Tensor(a) self, int[] dims) -> Tensor(a)
     """
@@ -289,13 +316,13 @@ def map_permute(node, args, output_dir):
     param = ShapeParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.dims, args[1])
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_repeated_field(param.dims, node.args[1])
     return param
 
 
 @register_annotator("transpose")
-def map_transpose(node, args, output_dir):
+def map_transpose(node, output_dir):
     """
     Schema: transpose.int(Tensor(a) self, int dim0, int dim1) -> Tensor(a)
     """
@@ -305,8 +332,8 @@ def map_transpose(node, args, output_dir):
     param = ShapeParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_repeated_field(param.input, args[0], output_dir)
-    _set_repeated_field(param.dims, args[1:])
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    _set_repeated_field(param.dims, node.args[1:])
     return param
 
 

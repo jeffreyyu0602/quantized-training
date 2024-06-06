@@ -10,7 +10,7 @@ from torch._export import capture_pre_autograd_graph
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification
 
 from quantized_training import add_training_args, get_quantizer, prepare_pt2e
-from quantized_training.codegen.shape_prop import ShapeProp
+from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 logging.basicConfig(level=logging.DEBUG)
@@ -85,29 +85,34 @@ def transform(
     if example_kwargs is None:
         example_kwargs = {}
 
-    if not isinstance(model, torch.fx.GraphModule):
-        model = capture_pre_autograd_graph(model, example_args, example_kwargs)
-        model = _convert_scalars_to_attrs(model)
-        model.graph.print_tabular()
+    if isinstance(model, torch.fx.GraphModule):
+        gm = model
+    else:
+        gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
+        gm = _convert_scalars_to_attrs(gm)
+        gm.graph.eliminate_dead_code()
 
-    shape_prop = ShapeProp(model)
-    shape_prop.transform()
+    gm = fuse_operator(gm)
+    gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
+    gm_out = gm(*example_args, *list(example_kwargs.values()))
+
     uplifted_args = flatten(list(example_args)) + list(example_kwargs.values())
-    gm_out = shape_prop.propagate(*uplifted_args)[0][0]
-    # gm_out = shape_prop.mod(*example_args, *list(example_kwargs.values()))
+    params = gen_code(
+        gm,
+        uplifted_args,
+        os.path.join(output_dir, "tensor_files")
+    )
 
-    params = shape_prop.gen_code(os.path.join(output_dir, "tensor_files"))
-
-    shape_prop.gen_compute_graph(os.path.join(output_dir, output_file))
+    gen_compute_graph(gm, os.path.join(output_dir, output_file))
 
     with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
     print(json.dumps(MessageToDict(params), indent=4))
 
-    return (shape_prop, pt_out, gm_out)
+    return pt_out, gm_out
 
 
 if __name__ == "__main__":
@@ -128,7 +133,7 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 224, 224),)
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model,
             example_args,
             output_file="resnet18",
@@ -149,7 +154,7 @@ if __name__ == "__main__":
         model = prepare_pt2e(model, quantizer, example_args)
         model.graph.print_tabular()
 
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model,
             example_args,
             output_file="qresnet18",
@@ -165,7 +170,7 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 224, 224),)
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model,
             example_args,
             output_file="resnet50",
@@ -180,7 +185,7 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 512, 672),)
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model,
             example_args,
             output_file="segformer",
@@ -191,7 +196,7 @@ if __name__ == "__main__":
     if "mobilebert" == args.model:
         model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
         example_args = (torch.randint(0, 30522, (1, 128), dtype=torch.long),)
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model,
             example_args,
             output_file="mobilebert",
@@ -222,7 +227,7 @@ if __name__ == "__main__":
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
         example_kwargs = {"return_dict": False}
-        _, pt_out, gm_out = transform(
+        pt_out, gm_out = transform(
             model.mobilebert.encoder,
             example_args,
             example_kwargs,
@@ -231,8 +236,8 @@ if __name__ == "__main__":
         )
         pt_out = pt_out[0]
 
-    try:
-        assert torch.all(pt_out == gm_out), "Outputs do not match"
-    except:
+    if not torch.all(pt_out == gm_out):
+        print("Outputs do not match")
+        torch.set_printoptions(precision=10)
         print(pt_out)
         print(gm_out)
