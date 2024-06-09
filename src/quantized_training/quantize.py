@@ -180,13 +180,17 @@ def _add_observer_(
     _insert_obs_or_fq(module, prefix)
 
 def prepare(
-        model, inplace=False, ops_fwd=None, ops_bwd=None, op_fusion=None):
+        model, inplace=False, fwd_quantized_ops=None, bwd_quantized_ops=None,
+        op_fusion=None):
     if not inplace:
         model = copy.deepcopy(model)
 
+    fwd_pre_hook_module_list = _parse_ops(fwd_quantized_ops)
+    bwd_pre_hook_module_list = _parse_ops(bwd_quantized_ops)
+    is_bwd_residual = bwd_quantized_ops and "residual" in bwd_quantized_ops
     _add_observer_(
-        model, _parse_ops(ops_fwd), _parse_ops(ops_bwd),
-        ops_bwd and "residual" in ops_bwd, op_fusion, '')
+        model, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
+        is_bwd_residual, op_fusion, prefix='')
     return model
 
 def convert(module, mapping=None, inplace=False, custom_module_class_mapping=None):

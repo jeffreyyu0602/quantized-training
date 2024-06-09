@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.ao.nn.intrinsic as nni
 from datasets import DatasetDict, Dataset, load_dataset
 from scipy.fftpack import dct
-from torch.ao.quantization import FakeQuantizeBase
 from tqdm import tqdm
 from transformers import set_seed
 
@@ -335,7 +334,7 @@ def main(args):
                     model._modules[name] = new_mod
 
         for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
         model.eval()

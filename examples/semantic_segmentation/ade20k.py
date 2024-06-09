@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
-from torch.ao.quantization import FakeQuantizeBase
 from torchvision.transforms import v2
 from tqdm import tqdm
 from transformers import AutoModelForSemanticSegmentation
@@ -167,7 +166,7 @@ def main(args):
     if args.calibration_steps > 0:
         calibrate(model)
         for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
     results = []

@@ -5,7 +5,6 @@ import os
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
-from torch.ao.quantization import FakeQuantizeBase
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantized_training import (
@@ -86,7 +85,7 @@ def main(args):
     if args.calibration_steps > 0:
         calibrate(model)
         for module in model.modules():
-            if isinstance(module, FakeQuantizeBase):
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
