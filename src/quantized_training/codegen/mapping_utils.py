@@ -190,6 +190,11 @@ def map_elwise(node, output_dir):
     _set_tensor_field(param.input, node.args[0], output_dir)
     if len(node.args) > 1:
         _set_tensor_field(param.other, node.args[1], output_dir)
+    if node.target in [
+        torch.ops.quantized_ops.quantize_symmetric,
+        torch.ops.quantized_ops.dequantize_symmetric,
+    ]:
+        param.opcode += "_to_" + node.args[2]  # dtype argument
     return param
 
 
