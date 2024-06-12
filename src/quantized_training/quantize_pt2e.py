@@ -269,6 +269,10 @@ def convert_pt2e(model: GraphModule):
     modules = dict(model.named_modules(remove_duplicate=False))
     graph = model.graph
 
+    # Get the dtype of the model and later convert scale to this dtype
+    param = next(iter(model.parameters()))
+    dtype = param.dtype
+
     for node in list(model.graph.nodes):
         if node.op == "call_module":
             mod = _get_module(node, modules)
@@ -277,7 +281,7 @@ def convert_pt2e(model: GraphModule):
                 # reshape weight scale to match the shape of the output tensor.
                 # This is necessary for per-channel weight quantization.
                 # TODO: check node is a weight node and handle per-token activation quantization
-                scale = mod.scale
+                scale = mod.scale.to(dtype)
                 if scale.ndim == 4:
                     scale = scale.view(1, -1, 1, 1)
                 elif scale.ndim == 2:
@@ -286,7 +290,7 @@ def convert_pt2e(model: GraphModule):
                 # replace fake quant module with a quantize node
                 with graph.inserting_before(node):
                     qparam_node = create_getattr_from_value(
-                        model, graph, next(iter(node.users)).name + "_scale_", mod.scale)
+                        model, graph, next(iter(node.users)).name + "_scale_", mod.scale.to(dtype))
                     qvalues_node = create_getattr_from_value(
                         model, graph, "qvalues_", mod.qvalues)
                     quantize_op_inputs = [node.args[0], qparam_node, mod.dtype, qvalues_node]
