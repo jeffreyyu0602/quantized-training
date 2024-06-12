@@ -154,7 +154,6 @@ if __name__ == "__main__":
         quantizer = get_quantizer(args.activation, args.weight)
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
         model = prepare_pt2e(model, quantizer, example_args)
-        convert_pt2e(model)
 
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
@@ -165,9 +164,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 model(inputs.pixel_values.bfloat16())
 
-        for name, module in model.named_modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                print(name, module.scale)
+        convert_pt2e(model)
 
         pt_out, gm_out = transform(
             model,

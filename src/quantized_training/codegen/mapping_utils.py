@@ -38,7 +38,10 @@ def _set_tensor_field(field, node, output_dir):
     assert isinstance(node, Node), "tensor field must be a Node"
     field.node = node.name
     field.dtype = str(node.dtype).split(".")[1]
-    field.shape.extend(list(node.shape))
+    if len(node.shape) > 0:
+        field.shape.extend(list(node.shape))
+    else:
+        field.shape.append(1)
 
     if output_dir is not None:
         _write_tensor_to_file(
