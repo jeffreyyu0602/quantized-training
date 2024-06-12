@@ -4,6 +4,7 @@ from enum import Enum, IntEnum
 from typing import Optional
 
 from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
+from torch.ao.quantization.quantizer.quantizer import QuantizationSpecBase
 
 __all__ = [
     "QuantizationSpec",
@@ -59,7 +60,7 @@ def _get_default_qmax(dtype):
     return None
 
 @dataclass
-class QuantizationSpec:
+class QuantizationSpec(QuantizationSpecBase):
     """Quantization spec for common operators that allows user to specify how to
     quantize a Tensor, this includes dtype, qscheme, quant_max etc.
     """
@@ -71,6 +72,7 @@ class QuantizationSpec:
     amax_history_len: Optional[int] = None
     ch_axis: Optional[int] = None
     block_size: Optional[int] = None
+    is_dynamic: bool = False  # required by sharing nodes
 
     @staticmethod
     def from_str(s):
@@ -97,6 +99,7 @@ class QuantizationSpec:
             raise ValueError("quant_max is required for quantization.")
 
         if self.block_size is None and self.qscheme in [
-            QScheme.PER_VECTOR_SYMMETRIC, QScheme.MICROSCALING
+            QScheme.PER_VECTOR_SYMMETRIC,
+            QScheme.MICROSCALING
         ]:
             raise ValueError("block_size is required for microscaling.")

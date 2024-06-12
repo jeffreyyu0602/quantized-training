@@ -72,14 +72,14 @@ def  _get_amax(x, qscheme, ch_axis=None):
     return amax
 
 
-def _quantize(input, encodings):
+def _quantize(input, qvalues):
     if input.dtype == torch.bfloat16:
-        indices = input.view(torch.int16).int() & 0xffff
+        indices = input.view(torch.int16).to(torch.int32) & 0xffff
     else:
-        raw_bits = input.float().view(torch.int32)
+        raw_bits = input.to(torch.float32).view(torch.int32)
         indices = (raw_bits >> 16) & 0xffff
         indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
-    return encodings[indices].to(input.dtype)
+    return qvalues[indices].to(input.dtype)
 
 
 class MXFakeQuantFunction(torch.autograd.Function):
@@ -92,7 +92,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
     def forward(
         ctx,
         input,
-        encodings,
+        qvalues,
         fake_quant_enabled,
         quant_max,
         shared_exp_method="max",
@@ -121,7 +121,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
         scale = (2**shared_exp).to(input.dtype)
 
         input = input / scale
-        input = _quantize(input, encodings)
+        input = _quantize(input, qvalues)
         input = input * scale
 
         # Undo tile reshaping
@@ -144,7 +144,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
     def forward(
         ctx,
         input,
-        encodings,
+        qvalues,
         observer_enabled,
         fake_quant_enabled,
         amax_history,
@@ -184,7 +184,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         if fake_quant_enabled[0] == 1:
             scale = scale.to(input.dtype)
             input = input / scale
-            input = _quantize(input, encodings)
+            input = _quantize(input, qvalues)
             input = input * scale
 
         if qscheme == qt.per_vector_symmetric:
@@ -207,10 +207,9 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     parameters. The module records the maximums of absolute values of output
     tensors, and uses this statistic to compute the quantization parameters.
     """
-    encodings: torch.Tensor
+    qvalues: torch.Tensor
     amax_history: torch.Tensor
     scale: torch.Tensor
-    histogram: torch.Tensor
 
     def __init__(
         self,
@@ -237,7 +236,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         # Generates a mapping from bfloat16 to quantized values of the given dtype
         input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
         self.fake_quant_fn = _get_fake_quant_fn(dtype)
-        self.register_buffer("encodings", self.fake_quant_fn(input), persistent=False)
+        self.register_buffer("qvalues", self.fake_quant_fn(input), persistent=False)
         # Create amax history and scale buffer
         self.enable_observer(self.qscheme is not None)
         factory_kwargs = {'device': device, 'dtype': torch.float}
@@ -282,7 +281,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         if self.qscheme == qt.microscaling:
             return MXFakeQuantFunction.apply(
                 X,
-                self.encodings,
+                self.qvalues,
                 self.fake_quant_enabled,
                 self.quant_max,
                 "max",
@@ -300,7 +299,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
 
         return FusedAmaxObsFakeQuantFunction.apply(
             X,
-            self.encodings,
+            self.qvalues,
             self.observer_enabled,
             self.fake_quant_enabled,
             self.amax_history,

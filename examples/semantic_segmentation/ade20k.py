@@ -16,6 +16,7 @@ from transformers import AutoModelForSemanticSegmentation
 from metrics import eval_metrics
 from quantized_training import (
     add_training_args,
+    convert_pt2e,
     get_quantizer,
     prepare_pt2e,
     run_task,
@@ -116,18 +117,15 @@ def main(args):
 
     from torch.library import Library, impl
 
-    template = (
-        "interpolate(Tensor input, SymInt[] size, float[]? scale_factor = None,"
+    custom_lib = Library("custom", "DEF")
+    custom_lib.define(
+        "interpolate(Tensor input, SymInt[]? size = None, float[]? scale_factor = None, "
         "str mode = 'nearest', bool? align_corners = None, "
-        "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor"
-    )
-
-    m = Library("custom", "DEF")
-    m.define(template)
+        "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor")
 
     orig_interpolate = F.interpolate
 
-    @impl(m, "interpolate", "CompositeExplicitAutograd")
+    @impl(custom_lib, "interpolate", "CompositeExplicitAutograd")
     def interpolate(*args, **kwargs):
         return orig_interpolate(*args, **kwargs)
 
@@ -144,13 +142,15 @@ def main(args):
     model = prepare_pt2e(model, quantizer, example_args)
 
     if args.attention_probs_qmax is not None:
+        named_modules = dict(model.named_modules(remove_duplicate=False))
         for node in model.graph.nodes:
             if node.target != torch.ops.aten.softmax.int:
                 continue
-            dropout = next(iter(node.users))
-            attention_prob = next(iter(dropout.users))
-            assert isinstance(attention_prob, torch.fx.Node) and attention_prob.op == "call_module"
-            model._modules[attention_prob.target].quant_max = args.attention_probs_qmax
+            user_node = next(iter(node.users))
+            user_node = next(iter(user_node.users))
+            obs_or_fq = named_modules[user_node.target]
+            if isinstance(obs_or_fq, torch.ao.quantization.FakeQuantizeBase):
+                obs_or_fq.quant_max = args.attention_probs_qmax
 
     def calibrate(model):
         train_dataset = load_dataset("scene_parse_150", split="train")
@@ -168,6 +168,8 @@ def main(args):
         for module in model.modules():
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
+
+    model = convert_pt2e(model)
 
     results = []
     gt_seg_maps = []

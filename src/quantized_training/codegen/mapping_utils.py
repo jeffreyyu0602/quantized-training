@@ -4,7 +4,6 @@ import struct
 from typing import Callable, Dict
 
 import torch
-from torch.ao.quantization import FakeQuantizeBase
 from torch.fx import Node
 
 
@@ -35,36 +34,16 @@ def _get_module_name(n: Node):
     return names
 
 
-def _get_obs_or_fq(gm, node):
-    named_modules = dict(gm.named_modules(remove_duplicate=False))
-    if node.op == "call_module" and str(node.target) in named_modules:
-        obs_or_fq = named_modules[str(node.target)]
-        if isinstance(obs_or_fq, FakeQuantizeBase):
-            return obs_or_fq
-    return None
-
-
 def _set_tensor_field(field, node, output_dir):
     assert isinstance(node, Node), "tensor field must be a Node"
     field.node = node.name
     field.dtype = str(node.dtype).split(".")[1]
     field.shape.extend(list(node.shape))
 
-    gm = node.graph.owning_module
-    named_modules = dict(gm.named_modules(remove_duplicate=False))
-    scale = None
-    if node.op == "call_module" and str(node.target) in named_modules:
-        obs_or_fq = named_modules[str(node.target)]
-        if isinstance(obs_or_fq, FakeQuantizeBase):
-            field.dtype = obs_or_fq.dtype
-            scale = obs_or_fq.scale
-
     if output_dir is not None:
         _write_tensor_to_file(
             node.value, os.path.join(output_dir, f"{node.name}.bin")
         )
-
-    return scale
 
 
 def _set_repeated_field(field, value):
@@ -91,39 +70,19 @@ def map_conv2d(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.conv2d.default:
         return None
-    default_args = [None, None, None, 1, 0, 1, 1]
-    default_args[:len(node.args)] = node.args
-
-    from .param_pb2 import MatrixParam, VectorParam
+    args = [None, None, None, 1, 0, 1, 1]
+    args[:len(node.args)] = node.args
+    from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    scale_act = _set_tensor_field(param.input, default_args[0], output_dir)
-    scale_wt = _set_tensor_field(param.weight, default_args[1], output_dir)
-    _set_tensor_field(param.bias, default_args[2], output_dir)
-    _set_repeated_field(param.stride, default_args[3])
-    _set_repeated_field(param.padding, default_args[4])
-    _set_repeated_field(param.dilation, default_args[5])
-    # param.groups = default_args[6]
-
-    scale = scale_act if scale_act is not None else torch.tensor(1.0)
-    scale = scale * (scale_wt if scale_wt is not None else torch.tensor(1.0))
-    gm = node.graph.owning_module
-    obs_or_fq = _get_obs_or_fq(gm, next(iter(node.users)))
-    if obs_or_fq is not None:
-        scale = scale / obs_or_fq.scale
-
-    quantization_param = VectorParam()
-    quantization_param.name = node.name + "_scale"
-    quantization_param.opcode = "quantize" if obs_or_fq is not None else "dequantize"
-    _set_tensor_field(quantization_param.input, node, output_dir)
-    quantization_param.other.node = node.name + "_scale"
-    quantization_param.other.dtype = "bfloat16"
-    quantization_param.other.shape.extend(list(scale.shape))
-    # _write_tensor_to_file(scale, os.path.join(output_dir, f"{node.name}_scale.bin"))
-    # import json
-    # from google.protobuf.json_format import MessageToDict
-    # print(json.dumps(MessageToDict(quantization_param), indent=4))
+    _set_tensor_field(param.input, args[0], output_dir)
+    _set_tensor_field(param.weight, args[1], output_dir)
+    _set_tensor_field(param.bias, args[2], output_dir)
+    _set_repeated_field(param.stride, args[3])
+    _set_repeated_field(param.padding, args[4])
+    _set_repeated_field(param.dilation, args[5])
+    # param.groups = args[6]
     return param
 
 
@@ -200,7 +159,9 @@ def _is_elementwise_op(op: Callable) -> bool:
         torch.ops.aten.relu.default,
         torch.ops.aten.relu_.default,
         torch.ops.aten.gelu.default,
-        torch.ops.aten.gelu_.default
+        torch.ops.aten.gelu_.default,
+        torch.ops.quantized_ops.quantize_symmetric,
+        torch.ops.quantized_ops.dequantize_symmetric,
     ]
 
 
@@ -258,19 +219,19 @@ def map_avg_pool2d(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.avg_pool2d.default:
         return None
-    default_args = [None, None, [], 0, False, True, None]
-    default_args[:len(node.args)] = node.args
+    args = [None, None, [], 0, False, True, None]
+    args[:len(node.args)] = node.args
     from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, default_args[0], output_dir)
-    _set_repeated_field(param.kernel_size, default_args[1])
-    _set_repeated_field(param.stride, default_args[2])
-    _set_repeated_field(param.padding, default_args[3])
-    param.ceil_mode = default_args[4]
-    param.count_include_pad = default_args[5]
-    param.divisor_override = default_args[6]
+    _set_tensor_field(param.input, args[0], output_dir)
+    _set_repeated_field(param.kernel_size, args[1])
+    _set_repeated_field(param.stride, args[2])
+    _set_repeated_field(param.padding, args[3])
+    param.ceil_mode = args[4]
+    param.count_include_pad = args[5]
+    param.divisor_override = args[6]
     return param
 
 
@@ -297,18 +258,18 @@ def map_max_pool2d(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.max_pool2d.default:
         return None
-    default_args = [None, None, [], 0, 1, False]
-    default_args[:len(node.args)] = node.args
+    args = [None, None, [], 0, 1, False]
+    args[:len(node.args)] = node.args
     from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, default_args[0], output_dir)
-    _set_repeated_field(param.kernel_size, default_args[1])
-    _set_repeated_field(param.stride, default_args[2])
-    _set_repeated_field(param.padding, default_args[3])
-    _set_repeated_field(param.dilation, default_args[4])
-    param.ceil_mode = default_args[5]
+    _set_tensor_field(param.input, args[0], output_dir)
+    _set_repeated_field(param.kernel_size, args[1])
+    _set_repeated_field(param.stride, args[2])
+    _set_repeated_field(param.padding, args[3])
+    _set_repeated_field(param.dilation, args[4])
+    param.ceil_mode = args[5]
     return param
 
 

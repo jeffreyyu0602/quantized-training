@@ -4,12 +4,14 @@ import logging
 import os
 
 import torch
+from datasets import load_dataset
 from google.protobuf.json_format import MessageToDict
 from torch.export import export
 from torch._export import capture_pre_autograd_graph
-from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification
+from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification, AutoImageProcessor
+from tqdm import tqdm
 
-from quantized_training import add_training_args, get_quantizer, prepare_pt2e
+from quantized_training import add_training_args, get_quantizer, prepare_pt2e, convert_pt2e
 from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -73,7 +75,7 @@ def flatten(mixed_list):
             flattened_list.append(element)
     return flattened_list
 
-    
+
 def transform(
     model: torch.fx.GraphModule,
     example_args,
@@ -152,7 +154,20 @@ if __name__ == "__main__":
         quantizer = get_quantizer(args.activation, args.weight)
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
         model = prepare_pt2e(model, quantizer, example_args)
-        model.graph.print_tabular()
+        convert_pt2e(model)
+
+        dataset = load_dataset("zh-plus/tiny-imagenet")
+
+        image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
+
+        for i in tqdm(range(100)):
+            inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
+            with torch.no_grad():
+                model(inputs.pixel_values.bfloat16())
+
+        for name, module in model.named_modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                print(name, module.scale)
 
         pt_out, gm_out = transform(
             model,
@@ -236,8 +251,11 @@ if __name__ == "__main__":
         )
         pt_out = pt_out[0]
 
-    if not torch.all(pt_out == gm_out):
-        print("Outputs do not match")
+    try:
+        assert torch.all(pt_out == gm_out)
+        print("Results match")
+    except Exception as e:
+        print(e)
         torch.set_printoptions(precision=10)
         print(pt_out)
         print(gm_out)

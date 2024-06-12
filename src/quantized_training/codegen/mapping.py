@@ -80,7 +80,7 @@ def fuse_operator(model: GraphModule):
     return GraphModule(model, model.graph)
 
 
-def map_operation(nodes: List[Node], name, output_dir):
+def map_operation(nodes: List[Node], name: str, output_dir: str):
     params = []
     for node in nodes:
         param = None
@@ -95,13 +95,7 @@ def map_operation(nodes: List[Node], name, output_dir):
     if len(params) == 0:
         return None
 
-    from .param_pb2 import (
-        AcceleratorParam,
-        PoolingParam,
-        ReduceParam,
-        ShapeParam,
-        VectorParam,
-    )
+    from .param_pb2 import AcceleratorParam, VectorParam, PoolingParam, ReduceParam, ShapeParam
 
     param = AcceleratorParam()
     param.name = name
