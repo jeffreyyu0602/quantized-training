@@ -31,12 +31,10 @@ def quantize_symmetric(
        are not stored in the Tensor, we are storing them in function arguments instead
     """
 
-    return _quantize(input / scale, qvalues)
-    print('quantize')
-    print(scale)
-    print(input)
     output = _quantize(input / scale, qvalues)
-    print(output)
+    if not hasattr(output, 'meta'):
+        output.meta = {}
+    output.meta['dtype'] = dtype
     return output
 
 # Note: dtype/qvalues are not used in the operator, but for now it's kept in
@@ -53,9 +51,7 @@ def dequantize_symmetric(
         dtype: str,
         qvalues: torch.Tensor,
 ) -> torch.Tensor:
-    return input * scale
-    print('dequantize')
-    print(scale)
-    print(input)
-    print(input * scale)
+    if not hasattr(input, 'meta'):
+        input.meta = {}
+    input.meta['dtype'] = dtype
     return input * scale

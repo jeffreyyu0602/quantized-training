@@ -175,7 +175,7 @@ class XNNPACKQuantizer(Quantizer):
     ) -> torch.fx.GraphModule:
         # converting scalars to tensor attributes can cause different model outputs.
         # disable to match the quantization result of quantize
-        # return model
+        return model
         """Transforms scalar values to tensor attributes"""
         return _convert_scalars_to_attrs(model)
 

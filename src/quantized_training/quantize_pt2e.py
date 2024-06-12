@@ -265,13 +265,21 @@ def _fuse_dequantize_quantize(model: GraphModule):
     return model
 
 
+_DTYPE_TO_QVALUE_DTYPE = {
+    "int8": {
+        "bias": "int32",
+        "output": "int32",
+    }
+}
+
+
 def convert_pt2e(model: GraphModule):
     modules = dict(model.named_modules(remove_duplicate=False))
     graph = model.graph
 
     # Get the dtype of the model and later convert scale to this dtype
     param = next(iter(model.parameters()))
-    dtype = param.dtype
+    model_dtype = param.dtype
 
     for node in list(model.graph.nodes):
         if node.op == "call_module":
@@ -281,16 +289,23 @@ def convert_pt2e(model: GraphModule):
                 # reshape weight scale to match the shape of the output tensor.
                 # This is necessary for per-channel weight quantization.
                 # TODO: check node is a weight node and handle per-token activation quantization
-                scale = mod.scale.to(dtype)
+                scale = mod.scale.to(model_dtype)
                 if scale.ndim == 4:
                     scale = scale.view(1, -1, 1, 1)
                 elif scale.ndim == 2:
                     scale = scale.view(1, -1)
 
+                dtype = mod.dtype
+                if dtype in _DTYPE_TO_QVALUE_DTYPE:
+                    bias_dtype, output_dtype = _DTYPE_TO_QVALUE_DTYPE[dtype].values()
+                else:
+                    bias_dtype = dtype
+                    output_dtype = dtype
+
                 # replace fake quant module with a quantize node
                 with graph.inserting_before(node):
                     qparam_node = create_getattr_from_value(
-                        model, graph, next(iter(node.users)).name + "_scale_", mod.scale.to(dtype))
+                        model, graph, next(iter(node.users)).name + "_scale_", mod.scale.to(model_dtype))
                     qvalues_node = create_getattr_from_value(
                         model, graph, "qvalues_", mod.qvalues)
                     quantize_op_inputs = [node.args[0], qparam_node, mod.dtype, qvalues_node]
@@ -313,7 +328,7 @@ def convert_pt2e(model: GraphModule):
                         with graph.inserting_before(maybe_dq_node):
                             output_qparam_node = create_getattr_from_value(
                                 model, graph, user_node.name + "_dq_scale_", scale)
-                            dq_inputs = [user_node, output_qparam_node, mod.dtype, qvalues_node]
+                            dq_inputs = [user_node, output_qparam_node, output_dtype, qvalues_node]
                             dequantized_node = graph.call_function(
                                 torch.ops.quantized_ops.dequantize_symmetric,
                                 tuple(dq_inputs),
@@ -351,13 +366,13 @@ def convert_pt2e(model: GraphModule):
                         device = assert_and_get_unique_device(mod)
                         qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
                         if mod.dtype == "int8":
-                            fq_fn = _get_fake_quant_fn("int32")
+                            fq_fn = _get_fake_quant_fn(bias_dtype)
                             qvalues = fq_fn(qvalues)
                         with graph.inserting_before(user_node):
                             bias_qparam_node = create_getattr_from_value(
                                 model, graph, user_node.name + "_bias_scale_", scale.flatten())
                             qvalues_node = create_getattr_from_value(model, graph, "qvalues_", qvalues)
-                            qb_inputs = [maybe_bias_node, bias_qparam_node, mod.dtype, qvalues_node]
+                            qb_inputs = [maybe_bias_node, bias_qparam_node, bias_dtype, qvalues_node]
                             quantized_bias_node = graph.call_function(
                                 torch.ops.quantized_ops.quantize_symmetric,
                                 tuple(qb_inputs),

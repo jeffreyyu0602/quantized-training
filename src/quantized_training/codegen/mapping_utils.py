@@ -35,9 +35,17 @@ def _get_module_name(n: Node):
 
 
 def _set_tensor_field(field, node, output_dir):
-    assert isinstance(node, Node), "tensor field must be a Node"
+    assert isinstance(node, Node) and hasattr(node, 'value'), (
+        f"Expected a Node with value attribute, got {node}"
+    )
     field.node = node.name
-    field.dtype = str(node.dtype).split(".")[1]
+
+    tensor = node.value
+    if hasattr(tensor, 'meta') and 'dtype' in tensor.meta:
+        field.dtype = tensor.meta['dtype']
+    else:
+        field.dtype = str(tensor.dtype).split(".")[1]
+
     if len(node.shape) > 0:
         field.shape.extend(list(node.shape))
     else:
@@ -45,7 +53,7 @@ def _set_tensor_field(field, node, output_dir):
 
     if output_dir is not None:
         _write_tensor_to_file(
-            node.value, os.path.join(output_dir, f"{node.name}.bin")
+            tensor, os.path.join(output_dir, f"{node.name}.bin")
         )
 
 
@@ -182,7 +190,7 @@ def map_elwise(node, output_dir):
     sqrt(Tensor self) -> Tensor
     tanh(Tensor self) -> Tensor
     relu(Tensor self) -> Tensor
-    gelu(Tensor self, *, str approximate=’none’) -> Tensor
+    gelu(Tensor self, *, str approximate='none') -> Tensor
     """
     if node.op != "call_function" or not _is_elementwise_op(node.target):
         return None
@@ -193,11 +201,11 @@ def map_elwise(node, output_dir):
     _set_tensor_field(param.input, node.args[0], output_dir)
     if len(node.args) > 1:
         _set_tensor_field(param.other, node.args[1], output_dir)
-    if node.target in [
-        torch.ops.quantized_ops.quantize_symmetric,
-        torch.ops.quantized_ops.dequantize_symmetric,
-    ]:
-        param.opcode += "_to_" + node.args[2]  # dtype argument
+
+    if node.target == torch.ops.quantized_ops.quantize_symmetric:
+        param.opcode += "_to_" + node.args[2]
+    elif node.target == torch.ops.quantized_ops.dequantize_symmetric:
+        param.opcode += "_from_" + node.args[2]
     return param
 
 
