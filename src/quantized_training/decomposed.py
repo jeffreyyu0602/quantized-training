@@ -37,10 +37,6 @@ def quantize_symmetric(
     output.meta['dtype'] = dtype
     return output
 
-# Note: dtype/qvalues are not used in the operator, but for now it's kept in
-# the signature as metadata for the input Tensor, this might be useful for pattern
-# matching in the future
-# We will revisit this later if we found there are no use cases for it
 quantized_decomposed_lib.define(
     "dequantize_symmetric(Tensor input, Tensor scale, str dtype, Tensor qvalues) -> Tensor")
 
@@ -51,6 +47,8 @@ def dequantize_symmetric(
         dtype: str,
         qvalues: torch.Tensor,
 ) -> torch.Tensor:
+    input = _quantize(input, qvalues)
+    # TODO: this annotation doesn't work right now
     if not hasattr(input, 'meta'):
         input.meta = {}
     input.meta['dtype'] = dtype

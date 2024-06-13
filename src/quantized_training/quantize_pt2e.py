@@ -267,8 +267,8 @@ def _fuse_dequantize_quantize(model: GraphModule):
 
 _DTYPE_TO_QVALUE_DTYPE = {
     "int8": {
-        "bias": "int32",
-        "output": "int32",
+        "output": "int24",
+        "bias": "int24",
     }
 }
 
@@ -295,12 +295,13 @@ def convert_pt2e(model: GraphModule):
                 elif scale.ndim == 2:
                     scale = scale.view(1, -1)
 
-                dtype = mod.dtype
-                if dtype in _DTYPE_TO_QVALUE_DTYPE:
-                    bias_dtype, output_dtype = _DTYPE_TO_QVALUE_DTYPE[dtype].values()
-                else:
-                    bias_dtype = dtype
-                    output_dtype = dtype
+                input_dtype = mod.dtype
+                output_dtype = None
+                bias_dtype = None
+                if input_dtype in _DTYPE_TO_QVALUE_DTYPE:
+                    bias_dtype, output_dtype = _DTYPE_TO_QVALUE_DTYPE[input_dtype].values()
+
+                device = assert_and_get_unique_device(mod)
 
                 # replace fake quant module with a quantize node
                 with graph.inserting_before(node):
@@ -325,9 +326,14 @@ def convert_pt2e(model: GraphModule):
                         maybe_dq_node.op != "call_function"
                         or maybe_dq_node.target != torch.ops.quantized_ops.dequantize_symmetric
                     ):
+                        qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
+                        if output_dtype is not None:
+                            fq_fn = _get_fake_quant_fn(output_dtype)
+                            qvalues = fq_fn(qvalues)
                         with graph.inserting_before(maybe_dq_node):
                             output_qparam_node = create_getattr_from_value(
                                 model, graph, user_node.name + "_dq_scale_", scale)
+                            qvalues_node = create_getattr_from_value(model, graph, "qvalues_", qvalues)
                             dq_inputs = [user_node, output_qparam_node, output_dtype, qvalues_node]
                             dequantized_node = graph.call_function(
                                 torch.ops.quantized_ops.dequantize_symmetric,
@@ -363,9 +369,8 @@ def convert_pt2e(model: GraphModule):
                     ):
                         # use int16/int32 bias for int8 quantization and floating-point bias otherwise
                         # int16 bias has bad accuracy for per-channel weight quantization
-                        device = assert_and_get_unique_device(mod)
                         qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-                        if mod.dtype == "int8":
+                        if bias_dtype is not None:
                             fq_fn = _get_fake_quant_fn(bias_dtype)
                             qvalues = fq_fn(qvalues)
                         with graph.inserting_before(user_node):
@@ -387,8 +392,6 @@ def convert_pt2e(model: GraphModule):
                     else:
                         bias_qparam_node = maybe_bias_node.args[1]
                         model.register_buffer(bias_qparam_node.target, scale.flatten())
-
-    model.graph.print_tabular()
 
     _fuse_dequantize_quantize(model)
 
