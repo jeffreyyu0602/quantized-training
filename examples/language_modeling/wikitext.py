@@ -56,7 +56,10 @@ def main(args):
     # quantize(model, args)
 
     quantizer = get_quantizer(
-        args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
+        args.activation,
+        args.weight,
+        args.record_histogram,
+        args.force_scale_power_of_two
     )
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)

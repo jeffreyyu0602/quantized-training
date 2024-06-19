@@ -794,12 +794,8 @@ def main(args):
         device = torch.device("cpu")
     model.to(device)
 
-    use_pt2e_quantization = False
-    if not use_pt2e_quantization:
-        print("quantize")
-        quantize(model, args)
-    else:
-        print("prepare_pt2e")
+    if args.pt2e_quantization:
+        print("PyTorch 2 Export quantization")
         if args.bf16:
             model.bfloat16()
 
@@ -820,6 +816,9 @@ def main(args):
             "end_positions": {0: batch_size},
         }
         model = prepare_pt2e(model, quantizer, (), example_kwargs, dynamic_shapes)
+    else:
+        print("Eager mode quantization")
+        quantize(model, args)
 
     # calibration data loader does not shuffle input dataset for reproducibility purpose
     calibration_data_loader = DataLoader(

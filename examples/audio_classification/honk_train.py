@@ -251,7 +251,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--num_train_epochs', type=int, default=30)
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--qmode', default=None, help='Quantization mode.')
+    parser.add_argument('--qat', action='store_true', help='Perform quantization-aware training.')
     add_training_args(parser)
     return parser.parse_args()
 
@@ -281,7 +281,7 @@ def main(args):
     model = SpeechResModel(configs["res8-narrow"])
     model.to(device)
 
-    if args.qmode == "qat":
+    if args.qat:
         modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
         model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
@@ -294,6 +294,32 @@ def main(args):
         checkpoint = torch.load(args.model_id, map_location=device)
         model.load_state_dict(checkpoint)
 
+    if args.pt2e_quantization:
+        print("PyTorch 2 Export quantization")
+        modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
+        model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse)
+
+        quantizer = get_quantizer(
+            args.activation,
+            args.weight,
+            args.record_histogram,
+            args.force_scale_power_of_two
+        )
+        batch = next(iter(train_dataloader))
+        example_args = ({k: v.to(device) for k, v in batch.items()},)
+        dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
+        model = prepare_pt2e(model, quantizer, example_args, dynamic_shapes=dynamic_shapes)
+
+        def calibrate(model):
+            for batch in tqdm(train_dataloader):
+                with torch.no_grad():
+                    model(batch["input_values"].to(device))
+        calibrate(model)
+
+        for module in model.modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.disable_observer()
+
     def map_to_pred(batch):
         input_values = torch.tensor(batch["audio"])
         with torch.no_grad():
@@ -304,39 +330,6 @@ def main(args):
     metric = evaluate.load("accuracy")
 
     if not args.do_train:
-        if args.qmode == "ptq":
-            modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
-            model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse)
-
-            quantizer = get_quantizer(
-                args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
-            )
-            batch = next(iter(train_dataloader))
-            example_args = ({k: v.to(device) for k, v in batch.items()},)
-            dynamic_shapes = {"x": {0: torch.export.Dim("batch")}}
-            model = prepare_pt2e(model, quantizer, example_args, dynamic_shapes=dynamic_shapes)
-
-            def calibrate(model):
-                for batch in tqdm(train_dataloader):
-                    with torch.no_grad():
-                        model(batch["input_values"].to(device))
-            calibrate(model)
-
-        if args.qmode == "qat":
-            # convert intrinsic modules back to float modules
-            for name, module in model.named_children():
-                if isinstance(module, nni._FusedModule):
-                    new_mod = module.to_float()
-                    for pre_hook_fn in module._forward_pre_hooks.values():
-                        new_mod.register_forward_pre_hook(pre_hook_fn)
-                    if hasattr(module, "activation_pre_process"):
-                        setattr(new_mod, "activation_pre_process", module.activation_pre_process)
-                    model._modules[name] = new_mod
-
-        for module in model.modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                module.disable_observer()
-
         model.eval()
         result = raw_dataset["test"].map(
             map_to_pred, batched=True, batch_size=args.batch_size, desc="Test"

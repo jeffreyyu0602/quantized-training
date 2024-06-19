@@ -323,6 +323,11 @@ def add_training_args(parser=None):
     # Quantization arguments
     #----------------------------------------------------
     parser.add_argument(
+        "--pt2e_quantization",
+        action="store_true",
+        help="Whether to use torch.export mode quantizaion.",
+    )
+    parser.add_argument(
         "--activation",
         default=None,
         type=QuantizationSpec.from_str,
