@@ -925,9 +925,10 @@ def main(args):
         for step, batch in enumerate(tqdm(eval_dataloader)):
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
-                # HACK pt2e exported program expect the same input as training data
+                # PyTorch exported program expects the same input as training data.
                 # Use random start and end positions for placeholder
-                start_positions = torch.ones(args.per_device_eval_batch_size, dtype=torch.long).to(device)
+                batch_size = batch['input_ids'].size(0)
+                start_positions = torch.ones(batch_size, dtype=torch.long).to(device)
                 end_positions = start_positions.clone()
                 outputs = model(**batch, start_positions=start_positions, end_positions=end_positions)
                 start_logits = outputs.start_logits

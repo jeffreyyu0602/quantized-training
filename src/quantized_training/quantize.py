@@ -77,8 +77,13 @@ def quantize(model, args, inplace=True):
     if args.error is None:
         args.quantize_backprop = None
 
-    qconfig = get_qconfig(args.activation, args.weight, args.error,
-                          args.record_histogram, args.force_scale_power_of_two)
+    qconfig = get_qconfig(
+        args.activation,
+        args.weight,
+        args.error,
+        args.record_histogram,
+        args.force_scale_power_of_two
+    )
 
     propagate_config(model, 'qconfig', qconfig)
     if args.do_train:
@@ -88,14 +93,15 @@ def quantize(model, args, inplace=True):
     if hasattr(args, 'bf16') and args.bf16:
         model.bfloat16()
 
-    # ASPLOS experiments perform quantization after converting model dtype to bfloat16
-    if isinstance(qconfig.weight, _PartialWrapper) and not args.do_train:
+    # ASPLOS experiments quantize weights after converting model dtype to bfloat16
+    if not args.do_train:
         for name, param in model.named_parameters():
-            if not 'bias' in name:
-                obs_or_fq = qconfig.weight(device=param.device)
-                if obs_or_fq.qscheme:
-                    obs_or_fq(param.data)
-                param.data = obs_or_fq(param.data)
+            if 'bias' in name:
+                continue
+            obs_or_fq = qconfig.weight(device=param.device)
+            if hasattr(obs_or_fq, 'qscheme') and obs_or_fq.qscheme is not None:
+                obs_or_fq(param.data)
+            param.data = obs_or_fq(param.data)
 
     return model
 

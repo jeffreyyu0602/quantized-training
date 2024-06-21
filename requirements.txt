@@ -13,3 +13,4 @@ soundfile
 jiwer
 tabulate
 protobuf
+graphviz
