@@ -161,7 +161,7 @@ def _plan_memory(param: AcceleratorParam):
             vector_param.other.memory.offset = offset
             offset += 2 * _get_size(vector_param.other)
 
-    param.output.memory.partition = 2
+    param.output.memory.partition = 0
     param.output.memory.offset = offset
 
 
