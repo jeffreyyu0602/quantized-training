@@ -23,18 +23,15 @@ import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
-from quantized_training import (
-    add_training_args,
-    quantize_to_posit,
-    quantize,
-)
+from tqdm import tqdm
+from quantized_training import add_training_args, quantize
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR', nargs='?', default='imagenet',
+parser.add_argument('data', metavar='DIR', default='imagenet',
                     help='path to dataset (default: imagenet)')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
@@ -85,13 +82,13 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
-
-parser.add_argument('--fuse_conv_bn', action="store_true", help="Whether to fuse batch norm.")
-parser.add_argument('--use_maxpool2x2', action="store_true", help="Whether to use 2x2 maxpool.")
-parser.add_argument('--save_val_dataset', action="store_true", help="Whether to save validation data.")
+parser.add_argument('--num_eval_samples', default=1000, help="Number of samples for evaluation.")
+parser.add_argument('--num_train_samples_per_epoch', default=50000, help="Number of samples to train per epoch")
+parser.add_argument('--use_2x2_maxpool', action="store_true", help="Whether to use 2x2 maxpool.")
+parser.add_argument('--fuse_conv_bn', action="store_true", help="Whether to perform quantization aware training.")
+parser.add_argument('--model_id', default=None, help="Model checkpoint for evaluation.")
+parser.add_argument('--save_val_dataset', action="store_true", help="Whether to save data used for evaluation.")
 parser.add_argument('--output_dir', default=None, help="Directory to save model checkpoints.")
-parser.add_argument('--model_id', default=None, help="Model for evaluation.")
-parser.add_argument('--chunk_size', default=50000, help="Number of samples processed per epoch")
 add_training_args(parser)
 
 best_acc1 = 0
@@ -205,42 +202,56 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         device = torch.device("cpu")
 
-# =============================================================================
-# replace maxpool, fuse batch norm, and prepare qat
-# =============================================================================
-
-    def replace_module(module, mod_cls, fn, inplace=True):
-        if not inplace:
-            module = copy.deepcopy(module)
-
-        for name, mod in module.named_children():
-            if isinstance(mod, mod_cls):
-                module._modules[name] = fn(mod)
-            else:
-                replace_module(mod, mod_cls, fn)
-        return module
-
-    def _to_float(mod):
-        new_mod = mod.to_float()
-        for pre_hook_fn in mod._forward_pre_hooks.values():
-            new_mod.register_forward_pre_hook(pre_hook_fn)
-        return new_mod
-
-    def get_fused_model(model):
-        model_fused = replace_module(model, nni._FusedModule, _to_float, inplace=False)
-        for name, param in model_fused.named_parameters():
-            param.data = quantize_to_posit(param.data, 16 if 'bias' in name else 8, 1)
-        return model_fused
-
-    if args.use_maxpool2x2:
-        replace_module(model, nn.MaxPool2d, lambda _: nn.MaxPool2d(kernel_size=2, stride=2, padding=0))
+    if args.use_2x2_maxpool:
+        for module in model.modules():
+            if isinstance(module, nn.MaxPool2d):
+                module.kernel_size = 2
+                module.stride = 2
+                module.padding = 0
 
     if args.fuse_conv_bn:
-        # FIXME:
-        modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
+        from utils import _pair_conv_bn
+        module_names = [name for name, _ in model.named_modules()]
+        modules_to_fuse = _pair_conv_bn(module_names)
         model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
     quantize(model, args)
+
+    example_inputs = torch.randn(1, 3, 224, 224).to(device)
+    with torch.no_grad():
+        model(example_inputs)
+
+    calibrate_dataset = datasets.ImageFolder(
+        os.path.join(args.data, 'train'),
+        transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ]))
+    data_loader = torch.utils.data.DataLoader(
+        calibrate_dataset, batch_size=args.batch_size, num_workers=args.workers,
+        pin_memory=True)
+
+    def calibrate(model):
+        with torch.no_grad():
+            for i, (images, target) in enumerate(tqdm(data_loader)):
+                images = images.to(device)
+                model(images)
+                if i == args.calibration_steps - 1:
+                    break
+
+    if args.calibration_steps > 0:
+        calibrate(model)
+        for module in model.modules():
+            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                module.disable_observer()
+
+    if args.model_id is not None:
+        checkpoint = torch.load(args.model_id, map_location=device)
+        model.load_state_dict(checkpoint['state_dict'])
+        print(f"best acc1: {checkpoint['best_acc1']}")
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
@@ -305,31 +316,30 @@ def main_worker(gpu, ngpus_per_node, args):
                 normalize,
             ]))
 
-# =============================================================================
-# Pick 1000 samples for evaluation and save data
-# =============================================================================
+    # Randomly select a subset of samples for evaluation and optionally save data
+    args.num_eval_samples = int(args.num_eval_samples) if args.num_eval_samples is not None else None
+    if args.num_eval_samples is not None and args.num_eval_samples < len(val_dataset):
+        indices = random.sample(range(len(val_dataset)), args.num_eval_samples)
+        val_dataset = Subset(val_dataset, indices=indices)
 
-    indices = random.sample(range(len(val_dataset)), 1000)
-    val_dataset = Subset(val_dataset, indices=indices)
+        if args.save_val_dataset:
+            dest_dirs = {}
+            labels = []
+            for idx in indices:
+                sample_path, label = val_dataset.dataset.samples[idx]
+                labels.append(label)
+                dir_path = os.path.dirname(sample_path)
+                dir_name = os.path.basename(dir_path)
+                dest_dirs[idx] = os.path.join(args.output_dir, dir_name)
+                os.makedirs(dest_dirs[idx], exist_ok=True)
 
-    if args.save_val_dataset:
-        dest_dirs = {}
-        labels = []
-        for idx in indices:
-            sample_path, label = val_dataset.dataset.samples[idx]
-            labels.append(label)
-            dir_path = os.path.dirname(sample_path)
-            dir_name = os.path.basename(dir_path)
-            dest_dirs[idx] = os.path.join(args.output_dir, dir_name)
-            os.makedirs(dest_dirs[idx], exist_ok=True)
+            for idx in indices:
+                sample_path, _ = val_dataset.dataset.samples[idx]
+                shutil.copy(sample_path, dest_dirs[idx])
 
-        for idx in indices:
-            sample_path, _ = val_dataset.dataset.samples[idx]
-            shutil.copy(sample_path, dest_dirs[idx])
-
-        with open('labels.txt', 'w') as file:
-            for label in labels:
-                file.write(f"{label},\n")
+            with open('labels.txt', 'w') as file:
+                for label in labels:
+                    file.write(f"{label},\n")
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -338,22 +348,16 @@ def main_worker(gpu, ngpus_per_node, args):
         train_sampler = None
         val_sampler = None
 
-    # train_loader = torch.utils.data.DataLoader(
-    #     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-    #     num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
     if args.evaluate:
-        model_eval = get_fused_model(model) if args.fuse_conv_bn else model
-        if args.model_id:
-            checkpoint = torch.load(args.model_id, map_location=device)
-            model_eval.load_state_dict(checkpoint['state_dict'])
-            print(f"best acc1: {checkpoint['best_acc1']}")
-
-        validate(val_loader, model_eval, criterion, args)
+        validate(val_loader, model, criterion, args)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -361,7 +365,7 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # Pick a random subset of the training data
-        indices = random.sample(range(len(train_dataset)), args.chunk_size)
+        indices = random.sample(range(len(train_dataset)), args.num_train_samples_per_epoch)
         subset = Subset(train_dataset, indices=indices)
         train_loader = torch.utils.data.DataLoader(
             subset, batch_size=args.batch_size, shuffle=(train_sampler is None),
@@ -371,8 +375,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        model_eval = get_fused_model(model) if args.fuse_conv_bn else model
-        acc1 = validate(val_loader, model_eval, criterion, args)
+        acc1 = validate(val_loader, model, criterion, args)
 
         scheduler.step()
         
@@ -385,7 +388,7 @@ def main_worker(gpu, ngpus_per_node, args):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
-                'state_dict': model_eval.state_dict(),
+                'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()

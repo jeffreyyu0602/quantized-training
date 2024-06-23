@@ -49,9 +49,13 @@ def quantize(model, args, inplace=True):
         model = copy.deepcopy(model)
 
     if (
-        (args.activation or args.error or args.posit_exp
-            or args.posit_exp_shifted or args.posit_reciprocal)
-        and hasattr(model, 'config')
+        args.activation is not None
+        or args.error is not None
+        or args.posit_exp
+        or args.posit_exp_shifted
+        or args.posit_reciprocal
+    ) and (
+        hasattr(model, 'config')
         and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
