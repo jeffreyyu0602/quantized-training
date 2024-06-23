@@ -137,25 +137,31 @@ def _get_size(tensor):
 
 # HACK a temporary function that make sure inputs and weights don't overlap
 # within each operation. Should be removed once we have a proper memory planner.
+# Store bias in RRAM and output in reference memory.
 def _plan_memory(param: AcceleratorParam):
     param_type = param.WhichOneof("param_type")
     if param_type is not None:
         matrix_param = getattr(param, param_type)
+        matrix_param.input.memory.partition = 0
         matrix_param.input.memory.offset = 0
         offset = 2 * _get_size(matrix_param.input)
 
         if param_type == "matrix_param":
+            matrix_param.weight.memory.partition = 0
             matrix_param.weight.memory.offset = offset
             offset += 2 * _get_size(matrix_param.weight)
             if matrix_param.HasField('bias'):
+                matrix_param.bias.memory.partition = 1
                 matrix_param.bias.memory.offset = offset
                 offset += 2 * _get_size(matrix_param.bias)
 
     for vector_param in param.vector_params:
         if vector_param.HasField("other"):
+            vector_param.other.memory.partition = 0
             vector_param.other.memory.offset = offset
             offset += 2 * _get_size(vector_param.other)
 
+    param.output.memory.partition = 2
     param.output.memory.offset = offset
 
 
