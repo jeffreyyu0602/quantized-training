@@ -1,4 +1,5 @@
 import os
+from functools import reduce
 from typing import List, Dict
 
 import graphviz
@@ -13,7 +14,14 @@ from .mapping_utils import (
     _is_nop,
     _set_tensor_field,
 )
-from .param_pb2 import AcceleratorParam, VectorParam, PoolingParam, ReduceParam, ShapeParam
+from .param_pb2 import (
+    AcceleratorParam,
+    ModelParams,
+    VectorParam,
+    PoolingParam,
+    ReduceParam,
+    ShapeParam,
+)
 from .shape_prop import ShapeProp
 
 
@@ -123,11 +131,38 @@ def _compose_param(params: List[AcceleratorParam]):
     return param
 
 
+def _get_size(tensor):
+    return reduce(lambda x, y: x * y, tensor.shape)
+
+
+# HACK a temporary function that make sure inputs and weights don't overlap
+# within each operation. Should be removed once we have a proper memory planner.
+def _plan_memory(param: AcceleratorParam):
+    param_type = param.WhichOneof("param_type")
+    if param_type is not None:
+        matrix_param = getattr(param, param_type)
+        matrix_param.input.memory.offset = 0
+        offset = 2 * _get_size(matrix_param.input)
+
+        if param_type == "matrix_param":
+            matrix_param.weight.memory.offset = offset
+            offset += 2 * _get_size(matrix_param.weight)
+            if matrix_param.HasField('bias'):
+                matrix_param.bias.memory.offset = offset
+                offset += 2 * _get_size(matrix_param.bias)
+
+    for vector_param in param.vector_params:
+        if vector_param.HasField("other"):
+            vector_param.other.memory.offset = offset
+            offset += 2 * _get_size(vector_param.other)
+
+    param.output.memory.offset = offset
+
+
 def gen_code(model, args, output_dir=None):
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
 
-    from .param_pb2 import ModelParams
     model_params = ModelParams()
 
     ShapeProp(model).propagate(*args)
@@ -150,6 +185,9 @@ def gen_code(model, args, output_dir=None):
             param.name = node.name
             _set_tensor_field(param.output, node, output_dir)
             model_params.params.append(param)
+
+    for param in model_params.params:
+        _plan_memory(param)
     return model_params
 
 

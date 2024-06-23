@@ -173,9 +173,6 @@ class XNNPACKQuantizer(Quantizer):
     def transform_for_annotation(
         self, model: torch.fx.GraphModule
     ) -> torch.fx.GraphModule:
-        # converting scalars to tensor attributes can cause different model outputs.
-        # disable to match the quantization result of quantize
-        return model
         """Transforms scalar values to tensor attributes"""
         return _convert_scalars_to_attrs(model)
 
