@@ -93,7 +93,7 @@ def map_conv2d(node, output_dir):
     _set_repeated_field(param.stride, args[3])
     _set_repeated_field(param.padding, args[4])
     _set_repeated_field(param.dilation, args[5])
-    # param.groups = args[6]
+    param.groups = args[6]
     return param
 
 

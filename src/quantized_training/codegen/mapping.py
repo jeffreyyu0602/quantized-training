@@ -6,7 +6,14 @@ import torch
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, GraphModule
 
-from .mapping_utils import OP_TO_MAPPING_FUNC, _is_elementwise_op, _is_gemm_op, _is_nop
+from .mapping_utils import (
+    OP_TO_MAPPING_FUNC,
+    _is_elementwise_op,
+    _is_gemm_op,
+    _is_nop,
+    _set_tensor_field,
+)
+from .param_pb2 import AcceleratorParam, VectorParam, PoolingParam, ReduceParam, ShapeParam
 from .shape_prop import ShapeProp
 
 
@@ -80,46 +87,39 @@ def fuse_operator(model: GraphModule):
     return GraphModule(model, model.graph)
 
 
-def map_operation(nodes: List[Node], name: str, output_dir: str):
-    params = []
-    for node in nodes:
-        param = None
-        for mapping_func in OP_TO_MAPPING_FUNC.values():
-            param = mapping_func(node, output_dir)
-            if param is not None:
-                params.append(param)
-                break
-        if param is None:
-            print(f"Unsupported operation {node.name}: {node.target}")
+def _map_operation(node: Node, output_dir: str):
+    if node.op != "call_function":
+        return None
+    for mapping_fn in OP_TO_MAPPING_FUNC.values():
+        param = mapping_fn(node, output_dir)
+        if param is not None:
+            return param
+    print(f"WARNING: unsupported operation {node.name}: {node.target}")
+    return None
 
+
+def _compose_param(params: List[AcceleratorParam]):
+    params = [p for p in params if p is not None]
     if len(params) == 0:
         return None
 
-    from .param_pb2 import AcceleratorParam, VectorParam, PoolingParam, ReduceParam, ShapeParam
-
     param = AcceleratorParam()
-    param.name = name
-
     if params[0].opcode in ["conv2d", "linear", "matmul"]:
         param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
             param.vector_params.extend(params[1:])
-        return param
-
-    if isinstance(params[0], VectorParam):
+    elif isinstance(params[0], VectorParam):
         param.vector_params.extend(params)
-        return param
-
-    assert len(params) == 1, f"{str(node.target)} cannot be fused with other operations"
-
-    if params[0].opcode == "layer_norm":
-        param.matrix_param.CopyFrom(params[0])
-    if isinstance(params[0], PoolingParam):
-        param.pooling_param.CopyFrom(params[0])
-    if isinstance(params[0], ReduceParam):
-        param.reduce_param.CopyFrom(params[0])
-    if isinstance(params[0], ShapeParam):
-        param.shape_param.CopyFrom(params[0])
+    else:
+        assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
+        if params[0].opcode == "layer_norm":
+            param.matrix_param.CopyFrom(params[0])
+        if isinstance(params[0], PoolingParam):
+            param.pooling_param.CopyFrom(params[0])
+        if isinstance(params[0], ReduceParam):
+            param.reduce_param.CopyFrom(params[0])
+        if isinstance(params[0], ShapeParam):
+            param.shape_param.CopyFrom(params[0])
     return param
 
 
@@ -128,12 +128,12 @@ def gen_code(model, args, output_dir=None):
         os.makedirs(output_dir, exist_ok=True)
 
     from .param_pb2 import ModelParams
-    params = ModelParams()
+    model_params = ModelParams()
 
     ShapeProp(model).propagate(*args)
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        param = None
+        params = []
         if node.op == 'call_module':
             gm = named_modules[node.target]
             if isinstance(gm, torch.fx.GraphModule):
@@ -141,14 +141,16 @@ def gen_code(model, args, output_dir=None):
                     node.args, lambda x: x.value if isinstance(x, Node) else x
                 )
                 ShapeProp(gm).propagate(*n_args)
-                nodes = [n for n in gm.graph.nodes if n.op == 'call_function']
-                param = map_operation(nodes, node.name, output_dir)
+                params = [_map_operation(n, output_dir) for n in gm.graph.nodes]
         elif node.op == 'call_function':
-            param = map_operation([node], node.name, output_dir)
+            params.append(_map_operation(node, output_dir))
 
+        param = _compose_param(params)
         if param is not None:
-            params.params.append(param)
-    return params
+            param.name = node.name
+            _set_tensor_field(param.output, node, output_dir)
+            model_params.params.append(param)
+    return model_params
 
 
 def gen_compute_graph(model, output_file="compute_graph"):

@@ -22,7 +22,7 @@ message VectorParam {
   Tensor other = 4;
 }
 
-// Define message for GEMM, and layer norm
+// Define message for GEMM and layer norm
 message MatrixParam {
   string name = 1;
   string opcode = 2;
@@ -32,7 +32,7 @@ message MatrixParam {
   repeated int32 stride = 6;
   repeated int32 padding = 7;
   repeated int32 dilation = 8;
-  bool transposed = 9;
+  int32 groups = 9;
 }
 
 // Define message for pooling operations
@@ -67,7 +67,7 @@ message ShapeParam {
   repeated int32 dims = 4;
 }
 
-// One of GEMM, reduce, or shape change
+// One of GEMM, reduction, or shape permutation operations
 message AcceleratorParam {
   string name = 1;
   oneof param_type {
@@ -77,6 +77,7 @@ message AcceleratorParam {
     ShapeParam shape_param = 5;
   }
   repeated VectorParam vector_params = 6;
+  Tensor output = 7;
 }
 
 message ModelParams {
