@@ -20,7 +20,7 @@ from .param_pb2 import (
     VectorParam,
     PoolingParam,
     ReduceParam,
-    ShapeParam,
+    ReshapeParam,
 )
 from .shape_prop import ShapeProp
 
@@ -106,29 +106,29 @@ def _map_operation(node: Node, output_dir: str):
     return None
 
 
-def _compose_param(params: List[AcceleratorParam]):
+def _compose_param(params: List):
     params = [p for p in params if p is not None]
     if len(params) == 0:
         return None
 
-    param = AcceleratorParam()
+    accelerator_param = AcceleratorParam()
     if params[0].opcode in ["conv2d", "linear", "matmul"]:
-        param.matrix_param.CopyFrom(params[0])
+        accelerator_param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
-            param.vector_params.extend(params[1:])
+            accelerator_param.vector_params.extend(params[1:])
     elif isinstance(params[0], VectorParam):
-        param.vector_params.extend(params)
+        accelerator_param.vector_params.extend(params)
     else:
         assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
         if params[0].opcode == "layer_norm":
-            param.matrix_param.CopyFrom(params[0])
+            accelerator_param.matrix_param.CopyFrom(params[0])
         if isinstance(params[0], PoolingParam):
-            param.pooling_param.CopyFrom(params[0])
+            accelerator_param.pooling_param.CopyFrom(params[0])
         if isinstance(params[0], ReduceParam):
-            param.reduce_param.CopyFrom(params[0])
-        if isinstance(params[0], ShapeParam):
-            param.shape_param.CopyFrom(params[0])
-    return param
+            accelerator_param.reduce_param.CopyFrom(params[0])
+        if isinstance(params[0], ReshapeParam):
+            accelerator_param.reshape_param.CopyFrom(params[0])
+    return accelerator_param
 
 
 def _get_size(tensor):

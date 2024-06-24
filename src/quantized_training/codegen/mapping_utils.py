@@ -6,6 +6,14 @@ from typing import Callable, Dict
 import torch
 from torch.fx import Node
 
+from .param_pb2 import (
+    MatrixParam,
+    VectorParam,
+    PoolingParam,
+    ReduceParam,
+    ReshapeParam,
+)
+
 
 def _write_tensor_to_file(tensor, filename):
     tensor = tensor.float().flatten()
@@ -83,7 +91,6 @@ def map_conv2d(node, output_dir):
         return None
     args = [None, None, None, 1, 0, 1, 1]
     args[:len(node.args)] = node.args
-    from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -104,7 +111,6 @@ def map_linear(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.linear.default:
         return None
-    from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -121,7 +127,6 @@ def map_matmul(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.matmul.default:
         return None
-    from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -137,7 +142,6 @@ def map_layer_norm(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.layer_norm.default:
         return None
-    from .param_pb2 import MatrixParam
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -194,7 +198,6 @@ def map_elwise(node, output_dir):
     """
     if node.op != "call_function" or not _is_elementwise_op(node.target):
         return None
-    from .param_pb2 import VectorParam
     param = VectorParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -219,7 +222,6 @@ def map_reduce(node, output_dir):
         torch.ops.aten.softmax.int,
     ]:
         return None
-    from .param_pb2 import ReduceParam
     param = ReduceParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -237,7 +239,6 @@ def map_avg_pool2d(node, output_dir):
         return None
     args = [None, None, [], 0, False, True, None]
     args[:len(node.args)] = node.args
-    from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -258,7 +259,6 @@ def map_adaptive_avg_pool2d(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.adaptive_avg_pool2d.default:
         return None
-    from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -276,7 +276,6 @@ def map_max_pool2d(node, output_dir):
         return None
     args = [None, None, [], 0, 1, False]
     args[:len(node.args)] = node.args
-    from .param_pb2 import PoolingParam
     param = PoolingParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
@@ -296,8 +295,7 @@ def map_permute(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.permute.default:
         return None
-    from .param_pb2 import ShapeParam
-    param = ShapeParam()
+    param = ReshapeParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -312,8 +310,7 @@ def map_transpose(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.transpose.int:
         return None
-    from .param_pb2 import ShapeParam
-    param = ShapeParam()
+    param = ReshapeParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)

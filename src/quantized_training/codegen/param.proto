@@ -14,6 +14,11 @@ message Tensor {
   Memory memory = 4;
 }
 
+// message TiledTensor {
+//   Tesnor tensor = 1;
+//   Memory memory = 2;
+// }
+
 // Define message for elementwise operations
 message VectorParam {
   string name = 1;
@@ -60,7 +65,7 @@ message ReduceParam {
 }
 
 // Define message for transpose and permute operations
-message ShapeParam {
+message ReshapeParam {
   string name = 1;
   string opcode = 2;
   Tensor input = 3;
@@ -74,7 +79,7 @@ message AcceleratorParam {
     MatrixParam matrix_param = 2;
     PoolingParam pooling_param = 3;
     ReduceParam reduce_param = 4;
-    ShapeParam shape_param = 5;
+    ReshapeParam reshape_param = 5;
   }
   repeated VectorParam vector_params = 6;
   Tensor output = 7;
