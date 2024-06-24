@@ -156,6 +156,9 @@ def _plan_memory(param: AcceleratorParam):
                 offset += 2 * _get_size(matrix_param.bias)
 
     for vector_param in param.vector_params:
+        vector_param.input.memory.partition = 0
+        vector_param.input.memory.offset = offset
+        offset += 2 * _get_size(vector_param.input)
         if vector_param.HasField("other"):
             vector_param.other.memory.partition = 0
             vector_param.other.memory.offset = offset
