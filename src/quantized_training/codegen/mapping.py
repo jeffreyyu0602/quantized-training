@@ -1,9 +1,11 @@
+import itertools
 import os
 from functools import reduce
 from typing import List, Dict
 
 import graphviz
 import torch
+from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, GraphModule
 
@@ -17,12 +19,53 @@ from .mapping_utils import (
 from .param_pb2 import (
     AcceleratorParam,
     ModelParams,
+    MatrixParam,
     VectorParam,
     PoolingParam,
     ReduceParam,
     ReshapeParam,
 )
 from .shape_prop import ShapeProp
+
+
+class MatmulDecomposed(torch.nn.Module):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Loop through each element in the batch dimensions
+        batch_shape = x.shape[:-2]
+        result = []
+        for idx in itertools.product(*[range(dim) for dim in batch_shape]):
+            result.append(torch.matmul(x[idx], y[idx]))
+        result = torch.stack(result)
+        result = result.view(*batch_shape, *result.shape[-2:])
+        return result
+
+
+def _split_bmm(model: GraphModule):
+    # Split batched matrx multiply into multiple GEMM operations
+    graph = model.graph
+    nodes = list(graph.nodes)
+    for n in nodes:
+        if n.op != 'call_function' or n.target != torch.ops.aten.matmul.default:
+            continue
+        input_node1 = n.args[0]
+        input_node2 = n.args[1]
+        inputs1 = torch.randn(input_node1.meta['val'].size())
+        inputs2 = torch.randn(input_node2.meta['val'].size())
+        gm = capture_pre_autograd_graph(MatmulDecomposed(), (inputs1, inputs2))
+
+        value_remap = {}
+        for node in gm.graph.nodes:
+            if node.op == 'placeholder':
+                value_remap[node] = n.args[0] if node.name == 'arg0_1' else n.args[1]
+            elif node.op == 'output':
+                n.replace_all_uses_with(value_remap[node.args[0][0]])
+            elif node.op == 'call_function':
+                with graph.inserting_before(n):
+                    value_remap[node] = graph.node_copy(node, lambda n : value_remap[n])
+        graph.erase_node(n)
+
+    graph.lint()
+    model.recompile()
 
 
 def _is_node_visited(node, visited):
@@ -36,23 +79,30 @@ def _is_node_visited(node, visited):
 
 
 def _create_subgraph(nodes: List[Node]):
-    graph : torch.fx.Graph = torch.fx.Graph()
+    new_args = []
+    new_graph = torch.fx.Graph()
     value_remap = {}
-    gm_args = []
+
+    def process_arg(arg):
+        if isinstance(arg, Node) and arg not in value_remap:
+            value_remap[arg] = new_graph.create_node('placeholder', arg.name)
+            new_args.append(arg)
+        elif isinstance(arg, (list, tuple)):
+            for n in arg:
+                process_arg(n)
+
     for node in nodes:
-        for arg in node.args:
-            if isinstance(arg, Node) and arg not in value_remap:
-                x : torch.fx.Node = graph.create_node('placeholder', arg.name)
-                value_remap[arg] = x
-                gm_args.append(arg)
-        value_remap[node] = graph.node_copy(node, lambda n : value_remap[n])
-    graph.output(value_remap[nodes[-1]])
-    graph.lint()
-    gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-    return gm, tuple(gm_args)
+        process_arg(node.args)
+        value_remap[node] = new_graph.node_copy(node, lambda n : value_remap[n])
+
+    new_graph.output(value_remap[nodes[-1]])
+    new_graph.lint()
+    gm = torch.fx.GraphModule(torch.nn.Module(), new_graph)
+    return gm, tuple(new_args)
 
 
 def fuse_operator(model: GraphModule):
+    _split_bmm(model)
     visited : Dict[Node, None] = {}
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
@@ -112,7 +162,7 @@ def _compose_param(params: List):
         return None
 
     accelerator_param = AcceleratorParam()
-    if params[0].opcode in ["conv2d", "linear", "matmul"]:
+    if isinstance(params[0], MatrixParam):
         accelerator_param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
             accelerator_param.vector_params.extend(params[1:])
@@ -138,24 +188,25 @@ def _get_size(tensor):
 # HACK a temporary function that make sure inputs and weights don't overlap
 # within each operation. Should be removed once we have a proper memory planner.
 # Store bias in RRAM and output in reference memory.
-def _plan_memory(param: AcceleratorParam):
-    param_type = param.WhichOneof("param_type")
+def _plan_memory(accelerator_param: AcceleratorParam):
+    offset = 0
+    param_type = accelerator_param.WhichOneof("param_type")
     if param_type is not None:
-        matrix_param = getattr(param, param_type)
-        matrix_param.input.memory.partition = 0
-        matrix_param.input.memory.offset = 0
-        offset = 2 * _get_size(matrix_param.input)
+        param = getattr(accelerator_param, param_type)
+        param.input.memory.partition = 0
+        param.input.memory.offset = 0
+        offset += 2 * _get_size(param.input)
 
         if param_type == "matrix_param":
-            matrix_param.weight.memory.partition = 0
-            matrix_param.weight.memory.offset = offset
-            offset += 2 * _get_size(matrix_param.weight)
-            if matrix_param.HasField('bias'):
-                matrix_param.bias.memory.partition = 1
-                matrix_param.bias.memory.offset = offset
-                offset += 2 * _get_size(matrix_param.bias)
+            param.weight.memory.partition = 0
+            param.weight.memory.offset = offset
+            offset += 2 * _get_size(param.weight)
+            if param.HasField('bias'):
+                param.bias.memory.partition = 1
+                param.bias.memory.offset = offset
+                offset += 2 * _get_size(param.bias)
 
-    for vector_param in param.vector_params:
+    for vector_param in accelerator_param.vector_params:
         vector_param.input.memory.partition = 0
         vector_param.input.memory.offset = offset
         offset += 2 * _get_size(vector_param.input)
@@ -164,8 +215,8 @@ def _plan_memory(param: AcceleratorParam):
             vector_param.other.memory.offset = offset
             offset += 2 * _get_size(vector_param.other)
 
-    param.output.memory.partition = 0
-    param.output.memory.offset = offset
+    accelerator_param.output.memory.partition = 0
+    accelerator_param.output.memory.offset = offset
 
 
 def gen_code(model, args, output_dir=None):
