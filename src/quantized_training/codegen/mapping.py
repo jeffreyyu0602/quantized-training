@@ -1,13 +1,20 @@
 import itertools
+import operator
 import os
 from functools import reduce
-from typing import List, Dict
+from typing import List, Dict, Type
 
 import graphviz
 import torch
 from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
+from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
 from torch.fx import Node, GraphModule
+from torch.fx.passes.utils.source_matcher_utils import (
+    check_subgraphs_connected,
+    get_source_partitions,
+    SourcePartition,
+)
 
 from .mapping_utils import (
     OP_TO_MAPPING_FUNC,
@@ -28,6 +35,17 @@ from .param_pb2 import (
 from .shape_prop import ShapeProp
 
 
+OPERATOR_MAPPINGS = {
+    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
+    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
+    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
+    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
+    "exp": [torch.exp],
+    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
+    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
+    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul],
+}
+
 class MatmulDecomposed(torch.nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Loop through each element in the batch dimensions
@@ -47,10 +65,8 @@ def _split_bmm(model: GraphModule):
     for n in nodes:
         if n.op != 'call_function' or n.target != torch.ops.aten.matmul.default:
             continue
-        input_node1 = n.args[0]
-        input_node2 = n.args[1]
-        inputs1 = torch.randn(input_node1.meta['val'].size())
-        inputs2 = torch.randn(input_node2.meta['val'].size())
+        inputs1 = torch.randn(n.args[0].meta['val'].size())
+        inputs2 = torch.randn(n.args[1].meta['val'].size())
         gm = capture_pre_autograd_graph(MatmulDecomposed(), (inputs1, inputs2))
 
         value_remap = {}
@@ -66,6 +82,14 @@ def _split_bmm(model: GraphModule):
 
     graph.lint()
     model.recompile()
+
+
+def _split_multi_head_attention(gm: GraphModule):
+    fused_partitions = find_sequential_partitions(
+        gm, [torch.matmul, operator.truediv, operator.add, torch.nn.functional.softmax]
+    )
+    for partition in fused_partitions:
+        print(partition)
 
 
 def _is_node_visited(node, visited):
@@ -101,8 +125,119 @@ def _create_subgraph(nodes: List[Node]):
     return gm, tuple(new_args)
 
 
+def _create_and_insert_subgraph(
+    nodes: List[Node],
+    model: torch.nn.Module,
+    named_modules: Dict[str, torch.nn.Module]
+) -> Node:
+    submodule, new_args = _create_subgraph(nodes)
+    get_new_node_name = get_new_attr_name_with_prefix('submodule_')
+    node_name = get_new_node_name(model)
+    setattr(model, node_name, submodule)
+    named_modules[node_name] = submodule
+    with model.graph.inserting_after(nodes[-1]):
+        new_node = model.graph.create_node(
+            'call_module', node_name, new_args, {})
+    nodes[-1].replace_all_uses_with(new_node)
+    for node in reversed(nodes):
+        model.graph.erase_node(node)
+    return new_node
+
+
+def _partitions_sequential(partitions: List[SourcePartition], node_order: Dict[Node, int]):
+    prev_partition = None
+    for partition in partitions:
+        if prev_partition is None:
+            prev_partition = partition
+            continue
+        if prev_partition is not None and not check_subgraphs_connected(
+            prev_partition, partition
+        ):
+            return False
+        prev_output_node = prev_partition.output_nodes[0] if prev_partition else None
+        output_node = partition.output_nodes[0]
+        # Check if the two partitions are the same
+        if (
+            prev_output_node is not None
+            and id(prev_output_node) == id(output_node)
+        ):
+            return False
+        # Check if all the arguments of the output node are visited before the
+        # previous output node
+        for arg in output_node.args:
+            if (
+                isinstance(arg, Node)
+                and arg.op == "call_function"
+                and arg != prev_output_node
+                and node_order[arg] > node_order[prev_output_node]
+            ):
+                return False
+        prev_partition = partition
+    return True
+
+
+def fuse_operation(model: GraphModule):
+    # TODO: this should be passed in as an argument
+    vector_stages = {
+        0: ["gemm"],
+        1: ["add", "sub", "mul"],
+        2: ["exp"],
+        3: ["add", "sub", "mul", "div"],
+        4: ["relu", "gelu"],
+    }
+
+    node_order = {node: idx for idx, node in enumerate(model.graph.nodes)}
+    named_modules = dict(model.named_modules(remove_duplicate=False))
+    fused_nodes: Dict[Node, None] = {}
+
+    fused_partitions = []
+    for stage, ops in vector_stages.items():
+        wanted_sources = [item for op in ops for item in OPERATOR_MAPPINGS[op]]
+        partitions = get_source_partitions(model.graph, wanted_sources)
+        partitions = list(itertools.chain.from_iterable(partitions.values()))
+        if len(fused_partitions) == 0:
+            fused_partitions = partitions
+            continue
+        if len(partitions) == 0:
+            continue
+        fusion_candidates = []
+        for x in fused_partitions:
+            if isinstance(x, SourcePartition) and x.output_nodes[0] in fused_nodes:
+                continue
+            matched = False
+            for y in partitions:
+                if y.output_nodes[0] in fused_nodes:
+                    continue
+                candidate = [*x, y] if isinstance(x, list) else [x, y]
+                if _partitions_sequential(candidate, node_order):
+                    fusion_candidates.append(candidate)
+                    matched = True
+                    fused_nodes[y.output_nodes[0]] = None
+                    if isinstance(x, SourcePartition):
+                        fused_nodes[x.output_nodes[0]] = None
+                    break
+            if not matched:
+                fusion_candidates.append(x)
+        partitions = [p for p in partitions if p.output_nodes[0] not in fused_nodes]
+        fused_partitions = [
+            p for p in fusion_candidates
+            if not (isinstance(p, SourcePartition) and p.output_nodes[0] in fused_nodes)
+        ]
+        fused_partitions = fused_partitions + partitions
+
+    for partition in fused_partitions:
+        if not isinstance(partition, list):
+            continue
+        nodes = [p.output_nodes[0] for p in partition]
+        _create_and_insert_subgraph(nodes, model, named_modules)
+
+    return GraphModule(model, model.graph)
+
+
 def fuse_operator(model: GraphModule):
     _split_bmm(model)
+    return fuse_operation(model)
+    # _split_multi_head_attention(model)
     visited : Dict[Node, None] = {}
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
@@ -130,17 +265,7 @@ def fuse_operator(model: GraphModule):
         if len(nodes) == 1:
             visited[node] = None
             continue
-        submodule, submodule_args = _create_subgraph(nodes)
-        get_new_node_name = get_new_attr_name_with_prefix('submodule_')
-        node_name = get_new_node_name(model)
-        setattr(model, node_name, submodule)
-        named_modules[node_name] = submodule
-        with model.graph.inserting_after(nodes[-1]):
-            new_node = model.graph.create_node(
-                'call_module', node_name, submodule_args, {})
-        nodes[-1].replace_all_uses_with(new_node)
-        for node in reversed(nodes):
-            model.graph.erase_node(node)
+        new_node = _create_and_insert_subgraph(nodes, model, named_modules)
         visited[new_node] = None
     return GraphModule(model, model.graph)
 

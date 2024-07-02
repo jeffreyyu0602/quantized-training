@@ -112,6 +112,10 @@ def transform(
     with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
+    layers = [p.name for p in params.params]
+    with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
+        f.write('\n'.join(layers))
+
     print(json.dumps(MessageToDict(params), indent=4))
 
     return pt_out, gm_out
