@@ -136,7 +136,10 @@ def main(args):
     model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse).to(device)
 
     quantizer = get_quantizer(
-        args.activation, args.weight, args.record_histogram, args.force_scale_power_of_two
+        args.activation,
+        args.weight,
+        args.record_histogram,
+        args.force_scale_power_of_two
     )
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = prepare_pt2e(model, quantizer, example_args)
@@ -169,7 +172,8 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
-    model = convert_pt2e(model)
+    if args.convert_model:
+        model = convert_pt2e(model)
 
     results = []
     gt_seg_maps = []

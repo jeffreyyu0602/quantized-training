@@ -381,6 +381,11 @@ def add_training_args(parser=None):
         help='Number of calibration steps for PTQ',
     )
     parser.add_argument(
+        '--convert_model',
+        action='store_true',
+        help='Whether to convert the model to quantized model.',
+    )
+    parser.add_argument(
         "--op_fusion",
         type=lambda x: x.split(','),
         default=None,

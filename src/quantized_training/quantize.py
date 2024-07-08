@@ -142,9 +142,9 @@ def _register_module_hook(module, hook_name, name):
                     obs_or_fq_ctr = self.qconfig.activation
                 else:
                     obs_or_fq_ctr = self.qconfig.error
-                obs_or_fq_dict[obs_or_fq_name] = obs_or_fq_ctr(
-                    device=input.device, name=f"{name}.{obs_or_fq_name}"
-                )
+                obs_or_fq = obs_or_fq_ctr(device=input.device)
+                obs_or_fq.name = f"{name}.{obs_or_fq_name}"
+                obs_or_fq_dict[obs_or_fq_name] = obs_or_fq
             new_inputs.append(obs_or_fq_dict[obs_or_fq_name](input))
         return tuple(new_inputs)
 

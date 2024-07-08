@@ -10,19 +10,9 @@ __all__ = [
     "QuantizationSpec",
 ]
 
-class RoundingMode(IntEnum):
-    nearest = 0
-    floor = 1
-    even = 2
-
-    @staticmethod
-    def string_enums():
-        return [s.name for s in list(RoundingMode)]
-
 class QScheme(Enum):
     PER_TENSOR_SYMMETRIC = "per_tensor_symmetric"
     PER_CHANNEL_SYMMETRIC = "per_channel_symmetric"
-    PER_VECTOR_SYMMETRIC = "per_vector_symmetric"
     MICROSCALING = "microscaling"
 
 ABBREV_MAP = {
@@ -98,8 +88,5 @@ class QuantizationSpec(QuantizationSpecBase):
         if self.quant_max is None and self.qscheme is not None:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.block_size is None and self.qscheme in [
-            QScheme.PER_VECTOR_SYMMETRIC,
-            QScheme.MICROSCALING
-        ]:
+        if self.block_size is None and self.qscheme== QScheme.MICROSCALING:
             raise ValueError("block_size is required for microscaling.")

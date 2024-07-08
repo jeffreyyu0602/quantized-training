@@ -57,21 +57,6 @@ def _get_fake_quant_fn(dtype: str):
     raise ValueError(f"Unrecognized dtype: {dtype}")
 
 
-def  _get_amax(x, qscheme, ch_axis=None):
-    if qscheme == qt.per_tensor_symmetric:
-        amax = torch.amax(torch.abs(x))
-    elif qscheme == qt.per_channel_symmetric:
-        if ch_axis < 0:
-            ch_axis = ch_axis + x.ndim
-        dim = tuple(i for i in range(x.ndim) if i != ch_axis)
-        amax = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    elif qscheme == qt.per_vector_symmetric:
-        amax = torch.amax(torch.abs(x), dim=(0, ch_axis), keepdim=True)
-    else:
-        raise ValueError(f"Unsupported qscheme: {qscheme}")
-    return amax
-
-
 def _quantize(input, qvalues):
     if input.dtype == torch.bfloat16:
         indices = input.view(torch.int16).to(torch.int32) & 0xffff
@@ -83,17 +68,16 @@ def _quantize(input, qvalues):
 
 
 class MXFakeQuantFunction(torch.autograd.Function):
-    """This function is similar to FusedAmaxObsFakeQuantFunction, but it
-    performs dynamic quantization by calculating the scaling factor on the
-    run.
+    """This function performs MX quantization by calculating the scaling
+    factor using absolute maximum values in the tensor.
     """
 
     @staticmethod
     def forward(
         ctx,
         input,
-        qvalues,
         fake_quant_enabled,
+        qvalues,
         quant_max,
         shared_exp_method="max",
         axes=None,
@@ -113,16 +97,17 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
         shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
+        # Get shared exponents
         shared_exp = _shared_exponents(
             input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
         )
 
+        # Offset the max exponent by the largest representable exponent
+        # in the element data format
         shared_exp = shared_exp - math.floor(math.log2(quant_max))
-        scale = (2**shared_exp).to(input.dtype)
 
-        input = input / scale
-        input = _quantize(input, qvalues)
-        input = input * scale
+        scale = (2**shared_exp).to(input.dtype)
+        input = _quantize(input / scale, qvalues) * scale
 
         # Undo tile reshaping
         if block_size:
@@ -144,27 +129,28 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
     def forward(
         ctx,
         input,
-        qvalues,
         observer_enabled,
         fake_quant_enabled,
+        qvalues,
         amax_history,
         scale,
+        amax_history_len,
         quant_max,
-        qscheme,
-        ch_axis=None,
-        block_size=0,
-        force_scale_power_of_two=False,
+        ch_axis,
+        per_row_fake_quant,
+        force_scale_power_of_two,
     ):
-        if qscheme == qt.per_vector_symmetric:
-            # Make sure axes is a list of non-negative numbers
-            axes = [ch_axis + input.ndim if ch_axis < 0 else ch_axis]
+        if per_row_fake_quant:
+            ch_axis = ch_axis % input.ndim
+            dim = tuple(i for i in range(input.ndim) if i != ch_axis)
+            amax_cur = torch.amax(torch.abs(input), dim=dim, keepdim=True)
+        else:
+            amax_cur = torch.amax(torch.abs(input))
 
-            # Perform tiling to the hardware vector size
-            if block_size > 0:
-                input, axes, orig_shape, padded_shape = _reshape_to_blocks(
-                    input, axes, block_size
-                )
-            ch_axis = axes[0] + 1
+        if amax_history_len and amax_history.numel() == 0:
+            size = (amax_history_len,) + amax_cur.shape
+            amax_history.resize_(size).fill_(0.0)
+            scale.resize_(amax_cur.shape).fill_(1.0)
 
         if observer_enabled[0] == 1:
             amax = torch.amax(amax_history, dim=0)
@@ -172,7 +158,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             if amax_history.shape[0] > 1:
                 new_amax_history = torch.roll(amax_history, -1, 0)
                 amax_history.copy_(new_amax_history)
-            amax_history[0] = _get_amax(input, qscheme, ch_axis)
+            amax_history[0] = amax_cur
 
             sf = amax / quant_max
             sf = torch.where(amax > 0.0, sf, scale)
@@ -183,14 +169,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
 
         if fake_quant_enabled[0] == 1:
             scale = scale.to(input.dtype)
-            input = input / scale
-            input = _quantize(input, qvalues)
-            input = input * scale
-
-        if qscheme == qt.per_vector_symmetric:
-            # Undo tile reshaping
-            if block_size:
-                input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
+            input = _quantize(input / scale, qvalues) * scale
 
         return input
 
@@ -200,13 +179,16 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
 
 
 class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
-    r"""Observer module for computing the quantization parameters based on the
+    r"""Simulate the quantize and dequantize operations in training time.
+    
+    Observer module for computing the quantization parameters based on the
     historical amax values.
 
     This observer uses the tensor amax statistics to compute the quantization
     parameters. The module records the maximums of absolute values of output
     tensors, and uses this statistic to compute the quantization parameters.
     """
+
     qvalues: torch.Tensor
     amax_history: torch.Tensor
     scale: torch.Tensor
@@ -231,17 +213,17 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.ch_axis = ch_axis
         self.block_size = block_size
         self.force_scale_power_of_two = force_scale_power_of_two
-        self.name = kwargs.get("name", None)
         device = kwargs.get("device", None)
         # Generates a mapping from bfloat16 to quantized values of the given dtype
         input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
         self.fake_quant_fn = _get_fake_quant_fn(dtype)
         self.register_buffer("qvalues", self.fake_quant_fn(input), persistent=False)
-        # Create amax history and scale buffer
-        self.enable_observer(self.qscheme is not None)
+        # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
         self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
+        self.observer_enabled[0] = self.qscheme is not None
+        self.is_per_channel = self.qscheme == qt.per_channel_symmetric
         # Create histogram buffer
         self.record_histogram = record_histogram
         self.register_buffer("histogram", torch.zeros(254, **factory_kwargs), persistent=False)
@@ -253,20 +235,17 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     @torch.jit.export
     def extra_repr(self):
         return (
-            "fake_quant_enabled={}, observer_enabled={}, name={}, dtype={}, "
-            "quant_max={}, qscheme={}, amax_history_len={}, ch_axis={}, "
-            "block_size={}, record_histogram={}, force_scale_power_of_two={}, "
+            "fake_quant_enabled={}, observer_enabled={}, dtype={}, amax_history_len={}, "
+            "quant_max={}, qscheme={}, ch_axis={}, block_size={}, force_scale_power_of_two={}, "
             "scale={}".format(
                 self.fake_quant_enabled,
                 self.observer_enabled,
-                self.name,
                 self.dtype,
+                self.amax_history_len,
                 self.quant_max,
                 self.qscheme,
-                self.amax_history_len,
                 self.ch_axis,
                 self.block_size,
-                self.record_histogram,
                 self.force_scale_power_of_two,
                 self.scale,
             )
@@ -281,32 +260,55 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         if self.qscheme == qt.microscaling:
             return MXFakeQuantFunction.apply(
                 X,
-                self.qvalues,
                 self.fake_quant_enabled,
+                self.qvalues,
                 self.quant_max,
                 "max",
                 self.ch_axis,
                 self.block_size,
             )
 
-        if self.qscheme is not None:
-            if self.amax_history.numel() == 0:
-                amax_cur = _get_amax(X.detach(), self.qscheme, self.ch_axis)
-                self.amax_history = torch.zeros(
-                    (self.amax_history_len,) + amax_cur.shape, device=X.device
-                )
-                self.scale = torch.ones_like(amax_cur)
-
         return FusedAmaxObsFakeQuantFunction.apply(
             X,
-            self.qvalues,
             self.observer_enabled,
             self.fake_quant_enabled,
+            self.qvalues,
             self.amax_history,
             self.scale,
+            self.amax_history_len,
             self.quant_max,
-            self.qscheme,
             self.ch_axis,
-            self.block_size,
+            self.is_per_channel,
             self.force_scale_power_of_two,
         )
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Removing this function throws an error that the size of the loaded tensor does not match the original size
+        # i.e., These buffers start out with numel 0 and become numel 1 once they have their first forward pass.
+        local_state = ['scale', 'amax_history']
+        for name in local_state:
+            key = prefix + name
+            if key in state_dict:
+                val = state_dict[key]
+                # Custom handling to allow loading scale and amax_history
+                # of size N into uninitialized buffers of size 0. The
+                # buffers are resized here, and the values are copied in
+                # the default state_dict loading code of the parent.
+                if name == 'scale':
+                    self.scale.resize_(val.shape)
+                else:
+                    assert name == 'amax_history'
+                    self.amax_history.resize_(val.shape)
+                # For torchscript module we need to update the attributes here since we do not
+                # call the `_load_from_state_dict` function defined module.py
+                if torch.jit.is_scripting():
+                    if name == 'scale':
+                        self.scale.copy_(val)
+                    else:
+                        assert name == 'amax_history'
+                        self.amax_history.copy_(val)
+            elif strict:
+                missing_keys.append(key)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
