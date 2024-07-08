@@ -182,7 +182,7 @@ def fuse_operation(model: GraphModule):
         0: ["gemm"],
         1: ["add", "sub", "mul"],
         2: ["exp"],
-        3: ["add", "sub", "mul", "div"],
+        3: ["add", "mul"],
         4: ["relu", "gelu"],
     }
 
