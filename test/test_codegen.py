@@ -5,7 +5,8 @@ import os
 
 import torch
 from datasets import load_dataset
-from google.protobuf.json_format import MessageToDict
+from google.protobuf import text_format
+from google.protobuf.json_format import MessageToJson
 from torch.export import export
 from torch._export import capture_pre_autograd_graph
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification, AutoImageProcessor
@@ -112,11 +113,15 @@ def transform(
     with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
+    with open(os.path.join(output_dir, 'params.txt'), "w") as f:
+        f.write(text_format.MessageToString(params))
+
+    with open(os.path.join(output_dir, 'params.json'), "w") as f:
+        f.write(MessageToJson(params))
+
     layers = [p.name for p in params.params]
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(layers))
-
-    print(json.dumps(MessageToDict(params), indent=4))
 
     return pt_out, gm_out
 
