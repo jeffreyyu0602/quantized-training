@@ -287,7 +287,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         param.data = torch.ops.quantized_ops.quantize_symmetric(
             param.data,
             scale,
-            activation_post_process.dtype,
+            input_dtype,
             activation_post_process.qvalues
         )
         node.replace_all_uses_with(input_node)
@@ -299,6 +299,8 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         # This is necessary for per-channel weight quantization.
         if scale.ndim == 4:
             scale = scale.view(-1, 1, 1)
+        elif scale.ndim == 2:
+            scale = scale.view(-1)
     else:
         # replace fake quant module with a quantize node
         with graph.inserting_before(node):
@@ -306,7 +308,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model, graph, next(iter(node.users)).name + "_scale_", scale)
             qvalues_node = create_getattr_from_value(
                 model, graph, "qvalues_", activation_post_process.qvalues)
-            quantize_op_inputs = [node.args[0], qparam_node, activation_post_process.dtype, qvalues_node]
+            quantize_op_inputs = [node.args[0], qparam_node, input_dtype, qvalues_node]
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize_symmetric,
                 tuple(quantize_op_inputs),
