@@ -1,5 +1,4 @@
 import argparse
-import json
 import logging
 import os
 
@@ -7,14 +6,14 @@ import torch
 from datasets import load_dataset
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToJson
-from torch.export import export
 from torch._export import capture_pre_autograd_graph
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification, AutoImageProcessor
 from tqdm import tqdm
 
-from quantized_training import add_training_args, get_quantizer, prepare_pt2e, convert_pt2e
+from quantized_training import get_quantizer, prepare_pt2e, convert_pt2e
 from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
+from quantized_training.quantizer.quantizer import QuantizationSpec
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -132,7 +131,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--output_dir", required=True, help="Output directory for generated tensor files")
-    add_training_args(parser)
     args = parser.parse_args()
 
     if "resnet18" == args.model:
@@ -164,7 +162,14 @@ if __name__ == "__main__":
         modules_to_fuse = _pair_conv_bn(module_names)
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
-        quantizer = get_quantizer(args.activation, args.weight)
+        # Accelerator only supports 2x2 maxpool
+        model.maxpool.kernel_size = (2, 2)
+        model.maxpool.padding = 0
+
+        activation = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+        weight = QuantizationSpec.from_str("int8,qs=per_channel_symmetric,ax=0")
+
+        quantizer = get_quantizer(activation, weight)
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
         model = prepare_pt2e(model, quantizer, example_args)
 

@@ -16,13 +16,7 @@ from torch.fx.passes.utils.source_matcher_utils import (
     SourcePartition,
 )
 
-from .mapping_utils import (
-    OP_TO_MAPPING_FUNC,
-    _is_elementwise_op,
-    _is_gemm_op,
-    _is_nop,
-    _set_tensor_field,
-)
+from .mapping_utils import OP_TO_MAPPING_FUNC, _set_tensor_field
 from .param_pb2 import (
     AcceleratorParam,
     ModelParams,
@@ -176,7 +170,9 @@ def _partitions_sequential(partitions: List[SourcePartition], node_order: Dict[N
     return True
 
 
-def fuse_operation(model: GraphModule):
+def fuse_operator(model: GraphModule):
+    _split_bmm(model)
+
     # TODO: this should be passed in as an argument
     vector_stages = {
         0: ["gemm"],
@@ -234,42 +230,6 @@ def fuse_operation(model: GraphModule):
     return GraphModule(model, model.graph)
 
 
-def fuse_operator(model: GraphModule):
-    _split_bmm(model)
-    return fuse_operation(model)
-    # _split_multi_head_attention(model)
-    visited : Dict[Node, None] = {}
-    named_modules = dict(model.named_modules(remove_duplicate=False))
-    for node in model.graph.nodes:
-        if node.op != 'call_function':
-            visited[node] = None
-            continue
-        nodes = [node]
-        cur_node = node
-        is_gemm_or_elwise_op = _is_gemm_op(node.target) or _is_elementwise_op(node.target)
-        # Perform fusion if
-        # 1) all arguments are visited
-        # 2) the root node is a GEMM or elementwise op and the user is a elwise operation
-        # or the user is a nop operation
-        while len(cur_node.users) == 1:
-            user = next(iter(cur_node.users))
-            if not all(
-                _is_node_visited(arg, visited) for arg in user.args if arg != cur_node
-            ) or not (
-                _is_nop(user.target)
-                or is_gemm_or_elwise_op and _is_elementwise_op(user.target)
-            ):
-                break
-            nodes.append(user)
-            cur_node = user
-        if len(nodes) == 1:
-            visited[node] = None
-            continue
-        new_node = _create_and_insert_subgraph(nodes, model, named_modules)
-        visited[new_node] = None
-    return GraphModule(model, model.graph)
-
-
 def _map_operation(node: Node, output_dir: str):
     if node.op != "call_function":
         return None
@@ -281,7 +241,7 @@ def _map_operation(node: Node, output_dir: str):
     return None
 
 
-def _compose_param(params: List):
+def _compose_accelerator_param(params: List):
     params = [p for p in params if p is not None]
     if len(params) == 0:
         return None
@@ -306,15 +266,15 @@ def _compose_param(params: List):
     return accelerator_param
 
 
-def _get_size(tensor):
-    return reduce(lambda x, y: x * y, tensor.shape)
-
-
 # HACK a temporary function that make sure inputs and weights don't overlap
 # within each operation. Should be removed once we have a proper memory planner.
 # Store bias in RRAM and output in reference memory.
-def _plan_memory(accelerator_param: AcceleratorParam):
+def _write_memory_offsets(accelerator_param: AcceleratorParam):
     offset = 0
+
+    def _get_size(tensor):
+        return reduce(lambda x, y: x * y, tensor.shape)
+
     param_type = accelerator_param.WhichOneof("param_type")
     if param_type is not None:
         param = getattr(accelerator_param, param_type)
@@ -365,14 +325,14 @@ def gen_code(model, args, output_dir=None):
         elif node.op == 'call_function':
             params.append(_map_operation(node, output_dir))
 
-        param = _compose_param(params)
+        param = _compose_accelerator_param(params)
         if param is not None:
             param.name = node.name
             _set_tensor_field(param.output, node, output_dir)
             model_params.params.append(param)
 
     for param in model_params.params:
-        _plan_memory(param)
+        _write_memory_offsets(param)
     return model_params
 
 
@@ -381,7 +341,7 @@ def gen_compute_graph(model, output_file="compute_graph"):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        if node.op in ["placeholder", "get_attr"]:
+        if node.op == "get_attr" and "qvalues" in node.name:
             continue
 
         label = ""
