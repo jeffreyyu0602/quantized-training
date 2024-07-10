@@ -46,11 +46,11 @@ def _set_tensor_field(field, node, output_dir):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
         f"Expected a Node with value attribute, got {node}"
     )
-    field.node = node.name
-
     tensor = node.value
-    if hasattr(tensor, 'meta') and 'dtype' in tensor.meta:
-        field.dtype = tensor.meta['dtype']
+
+    field.node = node.name
+    if hasattr(node, 'meta') and 'dtype' in node.meta:
+        field.dtype = node.meta['dtype']
     else:
         field.dtype = str(tensor.dtype).split(".")[1]
 
@@ -60,9 +60,7 @@ def _set_tensor_field(field, node, output_dir):
         field.shape.append(1)
 
     if output_dir is not None:
-        _write_tensor_to_file(
-            tensor, os.path.join(output_dir, f"{node.name}.bin")
-        )
+        _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
 
 
 def _set_repeated_field(field, value):

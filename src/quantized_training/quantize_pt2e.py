@@ -292,6 +292,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         )
         node.replace_all_uses_with(input_node)
 
+        # annotate weight node dtype
+        input_node.meta["dtype"] = input_dtype
+
         # reshape weight scale to match the shape of the output tensor.
         # This is necessary for per-channel weight quantization.
         if scale.ndim == 4:
@@ -310,10 +313,13 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 {}
             )
         node.replace_all_uses_with(quantized_node)
+        # annotate input node dtype
+        quantized_node.meta["dtype"] = input_dtype
     graph.erase_node(node)
 
     # insert a dequantize node after each user
     for user_node in orig_fq_users:
+        user_node.meta["dtype"] = output_dtype
         maybe_dq_node = next(iter(user_node.users))
         if (
             maybe_dq_node.op != "call_function"
@@ -356,6 +362,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         # It shares the same qparam and qvalues node with the dequantize node.
         bias_node = user_node.args[2]
         if bias_node is not None:
+            bias_node.meta["dtype"] = bias_dtype
             param = param_dict[bias_node.target]
             if not hasattr(param, 'orig_data'):
                 param.orig_data = param.data.clone()
