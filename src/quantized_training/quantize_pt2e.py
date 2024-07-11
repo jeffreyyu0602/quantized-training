@@ -273,7 +273,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     output_dtype = None
     bias_dtype = None
     if input_dtype in _DTYPE_TO_QVALUE_DTYPE:
-        bias_dtype, output_dtype = _DTYPE_TO_QVALUE_DTYPE[input_dtype].values()
+        output_dtype, bias_dtype = _DTYPE_TO_QVALUE_DTYPE[input_dtype].values()
 
     device = assert_and_get_unique_device(activation_post_process)
     # Get the dtype of the model and later convert scale to this dtype
@@ -409,38 +409,88 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     assert isinstance(node.target, str)
     activation_post_process = modules[node.target]
 
-    # replace fake quant module with a quantize node
-    with graph.inserting_before(node):
-        qvalues_node = create_getattr_from_value(
-            model, graph, "qvalues_", activation_post_process.qvalues)
-        quantize_op_inputs = [
-            node.args[0],
-            qvalues_node,
-            activation_post_process.dtype,
+    orig_fq_users = list(node.users.keys())
+
+    param_dict = dict(model.named_parameters())
+
+    input_dtype = activation_post_process.dtype
+
+    qparam_node_inp = None
+    qparam_node_wt = None
+    input_node = node.args[0]
+    if input_node.op == 'get_attr':
+        # quantize model parameter and remove fq module
+        param = param_dict[input_node.target]
+        scale = torch.ops.quantized_ops.calculate_mx_qparam(
+            param.data,
             activation_post_process.quant_max,
             activation_post_process.ch_axis,
             activation_post_process.block_size,
-        ]
-        quantized_node = graph.call_function(
-            torch.ops.quantized_ops.quantize_mx_dynamic,
-            tuple(quantize_op_inputs),
-            {}
         )
-    node.replace_all_uses_with(quantized_node)
+        with graph.inserting_before(node):
+            qparam_node_wt = create_getattr_from_value(
+                model, graph, next(iter(node.users)).name + "_scale_", scale)
+
+        param.data = torch.ops.quantized_ops.quantize_symmetric(
+            param.data,
+            scale,
+            input_dtype,
+            activation_post_process.qvalues
+        )
+        node.replace_all_uses_with(input_node)
+
+        # annotate weight node dtype
+        input_node.meta["dtype"] = input_dtype
+    else:
+        # replace fake quant module with a quantize node
+        with graph.inserting_before(node):
+            mx_op_inputs = [
+                node.args[0],
+                activation_post_process.quant_max,
+                activation_post_process.ch_axis,
+                activation_post_process.block_size,
+            ]
+            qparam_node_inp = graph.call_function(
+                torch.ops.quantized_ops.calculate_mx_qparam,
+                tuple(mx_op_inputs),
+                {}
+            )
+            qvalues_node = create_getattr_from_value(
+                model, graph, "qvalues_", activation_post_process.qvalues)
+            quantize_op_inputs = [node.args[0], qparam_node_inp, input_dtype, qvalues_node]
+            quantized_node = graph.call_function(
+                torch.ops.quantized_ops.quantize_symmetric,
+                tuple(quantize_op_inputs),
+                {}
+            )
+        # annotate input node dtype
+        quantized_node.meta["dtype"] = input_dtype
+        node.replace_all_uses_with(quantized_node)
     graph.erase_node(node)
 
-    user_node = next(iter(quantized_node.users))
-    if user_node.op != "call_function" or user_node.target not in QUANT_OP_MAPPINGS:
-        return
-    
-    with graph.inserting_before(user_node):
-        new_node = graph.call_function(
-            QUANT_OP_MAPPINGS[user_node.target],
-            user_node.args,
-            user_node.kwargs,
-        )
-    user_node.replace_all_uses_with(new_node)
-    graph.erase_node(user_node)
+    for user_node in orig_fq_users:
+        new_kwargs = dict(user_node.kwargs)
+        if qparam_node_inp is not None:
+            # handle the second argument of torch.matmul
+            if id(quantized_node) == id(user_node.args[1]):
+                new_kwargs.setdefault("scale_wt", qparam_node_inp)
+            else:
+                new_kwargs.setdefault("scale_inp", qparam_node_inp)
+        if qparam_node_wt is not None:
+            new_kwargs.setdefault("scale_wt", qparam_node_wt)
+        # if user_node is a not a MX op, replace user_node with a MX node.
+        # otherwise, replace one of its input with the quantized node
+        if user_node.target in QUANT_OP_MAPPINGS:
+            with graph.inserting_before(user_node):
+                new_node = graph.call_function(
+                    QUANT_OP_MAPPINGS[user_node.target],
+                    user_node.args,
+                    new_kwargs,
+                )
+            user_node.replace_all_uses_with(new_node)
+            graph.erase_node(user_node)
+        elif user_node.target in QUANT_OP_MAPPINGS.values():
+            user_node.kwargs = new_kwargs
 
 
 def convert_pt2e(model: GraphModule):

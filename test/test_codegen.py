@@ -10,7 +10,7 @@ from torch._export import capture_pre_autograd_graph
 from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification, AutoImageProcessor
 from tqdm import tqdm
 
-from quantized_training import get_quantizer, prepare_pt2e, convert_pt2e
+from quantized_training import add_training_args, get_quantizer, prepare_pt2e, convert_pt2e
 from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 from quantized_training.quantizer.quantizer import QuantizationSpec
@@ -131,6 +131,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--output_dir", required=True, help="Output directory for generated tensor files")
+    add_training_args(parser)
     args = parser.parse_args()
 
     if "resnet18" == args.model:
@@ -166,10 +167,7 @@ if __name__ == "__main__":
         model.maxpool.kernel_size = (2, 2)
         model.maxpool.padding = 0
 
-        activation = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-        weight = QuantizationSpec.from_str("int8,qs=per_channel_symmetric,ax=0")
-
-        quantizer = get_quantizer(activation, weight)
+        quantizer = get_quantizer(args.activation, args.weight)
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
         model = prepare_pt2e(model, quantizer, example_args)
 
@@ -177,7 +175,7 @@ if __name__ == "__main__":
 
         image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
 
-        for i in tqdm(range(100)):
+        for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
             with torch.no_grad():
                 model(inputs.pixel_values.bfloat16())

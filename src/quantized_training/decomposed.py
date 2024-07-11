@@ -1,5 +1,5 @@
 import math
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import torch
 import torch.nn.functional as F
@@ -73,13 +73,11 @@ def dequantize_symmetric(
     return input * scale
 
 quantized_decomposed_lib.define(
-    "quantize_mx_dynamic(Tensor input, Tensor qvalues, str dtype, float quant_max, SymInt axes, SymInt block_size) -> Tensor")
+    "calculate_mx_qparam(Tensor input, float quant_max, SymInt axes, SymInt block_size) -> Tensor")
 
-@impl(quantized_decomposed_lib, "quantize_mx_dynamic", "CompositeExplicitAutograd")
-def quantize_mx_dynamic(
+@impl(quantized_decomposed_lib, "calculate_mx_qparam", "CompositeExplicitAutograd")
+def calculate_mx_qparam(
     input: torch.Tensor,
-    qvalues: torch.Tensor,
-    dtype: str,
     quant_max: float,
     axes: Union[int, Tuple[int]],
     block_size: int = 32,
@@ -115,15 +113,10 @@ def quantize_mx_dynamic(
         f"input shape {input.shape} != scale shape {scale.shape}"
     )
 
-    input_q = _quantize(input / scale, qvalues)
-    if not hasattr(input_q, 'meta'):
-        input_q.meta = {}
-    input_q.meta['dtype'] = dtype
-    input_q.meta['scale'] = scale
-    return input_q
+    return scale
 
 quantized_decomposed_lib.define(
-    "conv2d_mx(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1) -> Tensor")
+    "conv2d_mx(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1, Tensor? scale_inp=None, Tensor? scale_wt=None) -> Tensor")
 
 @impl(quantized_decomposed_lib, "conv2d_mx", "CompositeExplicitAutograd")
 def conv2d_mx(
@@ -134,38 +127,44 @@ def conv2d_mx(
     padding: Union[int, Tuple[int]] = 0,
     dilation: Union[int, Tuple[int]] = 1,
     groups: int = 1,
+    scale_inp: Optional[torch.Tensor] = None,
+    scale_wt: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if hasattr(input, 'meta') and 'scale' in input.meta:
-        input = input * input.meta['scale']
-    if hasattr(weight, 'meta') and 'scale' in weight.meta:
-        weight = weight * weight.meta['scale']
+    if scale_inp is not None:
+        input = input * scale_inp
+    if scale_wt is not None:
+        weight = weight * scale_wt
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 quantized_decomposed_lib.define(
-    "linear_mx(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor")
+    "linear_mx(Tensor input, Tensor weight, Tensor? bias=None, Tensor? scale_inp=None, Tensor? scale_wt=None) -> Tensor")
 
 @impl(quantized_decomposed_lib, "linear_mx", "CompositeExplicitAutograd")
 def linear_mx(
     input: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor = None,
+    scale_inp: Optional[torch.Tensor] = None,
+    scale_wt: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if hasattr(input, 'meta') and 'scale' in input.meta:
-        input = input * input.meta['scale']
-    if hasattr(weight, 'meta') and 'scale' in weight.meta:
-        weight = weight * weight.meta['scale']
+    if scale_inp is not None:
+        input = input * scale_inp
+    if scale_wt is not None:
+        weight = weight * scale_wt
     return F.linear(input, weight, bias)
 
 quantized_decomposed_lib.define(
-    "matmul_mx(Tensor self, Tensor other) -> Tensor")
+    "matmul_mx(Tensor self, Tensor other, Tensor? scale_inp=None, Tensor? scale_wt=None) -> Tensor")
 
 @impl(quantized_decomposed_lib, "matmul_mx", "CompositeExplicitAutograd")
 def matmul_mx(
     input: torch.Tensor,
     weight: torch.Tensor,
+    scale_inp: Optional[torch.Tensor] = None,
+    scale_wt: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if hasattr(input, 'meta') and 'scale' in input.meta:
-        input = input * input.meta['scale']
-    if hasattr(weight, 'meta') and 'scale' in weight.meta:
-        weight = weight * weight.meta['scale']
+    if scale_inp is not None:
+        input = input * scale_inp
+    if scale_wt is not None:
+        weight = weight * scale_wt
     return torch.matmul(input, weight)
