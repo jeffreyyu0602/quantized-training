@@ -12,8 +12,14 @@ The current release supports:
 - Examples on Google MobileBERT and RoBERTa fine-tuning on GLUE and SQuAD question answering task.
 
 ## News
+- [2024/02] 🔥 Our paper has been accepted to **ASPLOS 2024**!
 
 ## Content
+
+- [8-bit Transformer Inference and Fine-Tuning for Edge Accelerators](#8-bit-transformer-inference-and-fine-tuning-for-edge-accelerators)
+  - [News](#news)
+  - [Contents](#contents)
+  - [Install](#install)
 
 ## Prerequisites
 
@@ -61,7 +67,7 @@ quantize(model, args)
 
 Your model is now quantized and ready for training or inference. For more use cases, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
 
-## Quantizatiion Arguments
+## Quantization Arguments
 
 
 
@@ -71,30 +77,36 @@ To reproduce the Table 1 results in the paper, run
 ```python
 python examples/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
 ```
-The outputs are stored in squad_f1.csv which has the same format as Table 1.
+The outputs are stored in squad_f1.csv and should have the following format:
 
-#### GLUE and SQuAD Fine-Tuning
+| Model                      | No Fusion     || GEMM + Attention Scaling || + Activation Fusion || + LayerNorm Fusion || + Residual Fusion ||
+|----------------------------|:------:|:-----:|:------:|:----------------:|:------:|:-----------:|:------:|:----------:|:------:|:---------:|
+|                            | Posit8 | E4M3  | Posit8 | E4M3             | Posit8 | E4M3        | Posit8 | E4M3       | Posit8 | E4M3      |
+| MobileBERT<sub>tiny</sub>  | 86.3   | 87.0  | 87.4   | 87.1             | 87.7   | 87.5        | 87.9   | 87.8       | 88.4   | 88.1      |
+| MobileBERT                 | 65.1   | 82.7  | 85.0   | 84.9             | 88.3   | 86.7        | 89.0   | 87.9       | 89.4   | 88.6      |
+| DistillBERT<sub>base</sub> | 86.2   | 86.1  | 86.4   | 86.1             | 86.7   | 86.4        | 86.7   | 86.5       | 86.7   | 86.5      |
+| BERT<sub>base</sub>        | 87.1   | 87.7  | 88.1   | 88.0             | 88.1   | 88.0        | 88.1   | 88.0       | 88.1   | 88.0      |
+| BERT<sub>large</sub>       | 92.3   | 93.0  | 92.8   | 93.1             | 93.0   | 93.1        | 93.0   | 93.2       | 93.1   | 93.1      |
 
-Fine-tuning the Transformer models for sequence classification on the GLUE benchmark and question answering on the SQuAD v1.1. GLUE is made up of a total of 9 different tasks. In our paper, we conduct evaluations on three benchmarks: SST-2, MRPC, and QNLI. All commands required to reproduce the results presented in Table 4 are provided in the script named `asplos_training.sh`. The experiments are organized into groups, each addressing four tasks of different data types and configurations: BF16, Posit8, Posit8 with approximation, and FP8. Each task is repeated with three different random seeds to mitigate outlier results. Specifically, the first set of experiments involves running the MobileBERT-tiny model on the QNLI task across these four configurations. This setup corresponds to the results shown in the first major row (MobileBERT-tiny) and the first column (QNLI) of Table 4. The structure for subsequent groups of experiments follows the same pattern. Outputs from the experiments are recorded in their respective log files, as indicated by the log_file argument. We recommend starting with the MRPC task, as it is the shortest and typically completes in around an hour on an RTX 4090 GPU.
+## Results on LLaMA 2
 
-#### Whisper Evaluation
-
-Whisper is a pre-trained model for automatic speech recognition (ASR) and speech translation. To evaluate Whisper models on LibriSpeech test-clean:
-```python
-python examples/speech_recognition/librispeech_asr.py --model_id openai/whisper-tiny [--quantize_weight] [--quantize_fwd <OPERATIONS>]
-```
-where model_id could be any Whisper model in the [Whisper Release](https://huggingface.co/collections/openai/whisper-release-6501bba2cf999715fd953013).
-
-The user can perform quantized inference by passing quantize_weight and quantize_fwd arguments. OPERATIONS could be any combination of "gemm", "act", "norm", "attn_scaling", and "residual", separated by comma.
-
-#### LLM Evaluation
-
-To run language models evaluation on WikiText-103:
+To run LLaMA 2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA 2 on WikiText-103:
 ```python
 python examples/language_modeling/wikitext.py --model_id gpt2-xl [--max_length <LENGTH>] [--stride <STRIDE>]
 ```
 
-To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
+| Model         | Data Type    | No Fusion     | GEMM + Attention Scaling | + Activation Fusion | + LayerNorm Fusion | + Residual Fusion |
+|---------------|--------------|:-------------:|:------------------------:|:-------------------:|:------------------:|:-----------------:|
+| LLaMA 2 (7B)  | Posit (8, 1) | 5.56 | 5.53 | 5.53 | 5.52 | 5.30 |
+| LLaMA 2 (7B)  | Posit (8, 2) | 5.44 | 5.40 | 5.38 | 5.37 | 5.29 |
+| LLaMA 2 (7B)  | E4M3         | 5.80 | 5.80 | 5.77 | 5.75 | 5.36 |
+| LLaMA 2 (13B) | Posit (8, 1) | 4.85 | 4.78 | 4.78 | 4.77 | 4.72 |
+| LLaMA 2 (13B) | Posit (8, 2) | 4.86 | 4.82 | 4.81 | 4.80 | 4.72 |
+| LLaMA 2 (13B) | E4M3         | 5.10 | 5.09 | 5.07 | 5.06 | 4.73 |
+
+## Fine-Tuning Experiments Reproduction
+
+In our paper, we conducted fine-tuning experiments on four GLUE tasks (MNLI, SST-2, MRPC, and QNLI) and SQuAD v1.1 question answering task. All commands required to reproduce the results in Table 4 are provided in the script `asplos_training.sh`. The experiments are organized into groups, each addressing give tasks of different data types and configurations. Outputs from the experiments are recorded in their respective log files. We recommend starting with the MRPC task, as it is the shortest and typically completes in around an hour on an RTX 4090 GPU.
 
 ## Reference
 

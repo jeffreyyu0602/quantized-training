@@ -2,7 +2,6 @@
 *.egg-info
 *.log
 *.out
-*.png
 *.pt
 __pycache__
 bash_scripts
