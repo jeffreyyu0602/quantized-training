@@ -1,16 +1,19 @@
-# Quantized-Training
+# 8-bit Transformer Inference and Fine-Tuning for Edge Accelerators
+[[Paper](https://dl.acm.org/doi/10.1145/3620666.3651368)][[Slides](https://drive.google.com/file/d/16v3UhnWab2K_1wiDTYgXy1ZUNN-hCi7M/view?usp=sharing)][[Video](https://www.youtube.com/watch?v=lqW-8MQ2uFw)]
 
-This repo contains the source code of package `quantized-training` and several examples of how to integrate with PyTorch models. The package is designed to facilitate the efficient quantization of Transformer networks and other Deep Neural Networks (DNNs), with a particular focus on Huggingface's Transformers implementation. It supports quantizing GEMM and non-GEMM operations using integer, floating-points and posit data types.
+**Efficient and accurate** quantization for Transformers and CNNs, supporting **activation, weight, and gradient** quantization to **integer, floating-points, and posit** data types.
 
-**8-bit Transformer Inferenace and Fine-tuning for Edge Accelerator** <br>
-*Jeffrey Yu\*, Kartik Prabhu, Yonatan Urman, Robert M. Radway, Eric Han, Priyanka Raina* <br>
-Paper: https://doi.org/10.1145/3620666.3651368 <br>
+![overview](figures/overview.png)
 
-## Features
+The current release supports:
 
-- **Support for Custom Models:** Provides flexibility by allowing users to add their own model implementations for quantization.
-- **Quantization Data Types:** Supports integer with arbitrary bit width, FP8 (E4M3 and E5M2), and posit with customizable nbits and es
-- **Ease of Use:** Comes in a packaged format for simple installation and includes example usage to help users get started quickly.
+- **Quantization for Custom Models:** Provides flexibility by allowing users to add their own model implementations for quantization.
+- **Quantization Data Types:** Supports integer with arbitrary bit width, FP8 (E4M3 and E5M2), FP6 (E3M2 and E2M3), FP4 (E2M1), and posit with customizable nbits and es.
+- Examples on Google MobileBERT and RoBERTa fine-tuning on GLUE and SQuAD question answering task.
+
+## News
+
+## Content
 
 ## Prerequisites
 
@@ -19,15 +22,21 @@ Paper: https://doi.org/10.1145/3620666.3651368 <br>
 
 ## Quickstart
 
-1. Installing `quantized-training` is simply
+1. Clone this repository and navigate to quantized-training folder
 ```bash
 git clone https://github.com/jeffreyyu0602/quantized-training.git
 cd quantized-training
+```
+
+2. Install Package
+```bash
+conda create -n qt python=3.9
+conda activate qt
 pip install -r requirements.txt
 pip install -e .
 ```
 
-2. Create an argument parser and add relevant quantization arguments by calling add_training_args.
+3. Create an argument parser and add relevant quantization arguments by calling add_training_args.
 
 ```python
 import argparse
@@ -40,7 +49,7 @@ args= parser.parse_args()
 
 ```
 
-3. Initialize model and call quantizer on the model with parsed arguments.
+4. Initialize model and call quantizer on the model with parsed arguments.
 ```python
 from transformers import AutoModel
 from quantized_training import quantize
@@ -56,9 +65,7 @@ Your model is now quantized and ready for training or inference. For more use ca
 
 
 
-## Results and Reproduction
-
-#### SQuAD Inference
+## Results on SQuAD Question Answering
 
 To reproduce the Table 1 results in the paper, run
 ```python
@@ -89,14 +96,17 @@ python examples/language_modeling/wikitext.py --model_id gpt2-xl [--max_length <
 
 To run LLaMA2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA2 with the script.
 
-## Contributing
+## Reference
 
-We welcome contributions to quantized-Training! If you have suggestions for improvements or new features, please feel free to contribute. Check out the CONTRIBUTING.md file for guidelines on how to submit contributions.
+If you find AWQ useful or relevant to your research, please kindly cite our paper:
 
-## License
-
-Quantized-Training is released under the MIT License. See the LICENSE file for more details.
-
-## Contact
-
-If you have any questions or feedback regarding Quantized-Training, please contact [Jeffrey Yu](jeffreyy@stanford.edu)
+```
+@inproceedings{yu20248bit,
+title = {8-bit Transformer Inference and Fine-tuning for Edge Accelerators},
+author = {Yu, Jeffrey and Prabhu, Kartik and Urman, Yonatan and Radway, Robert M. and Han, Eric and Raina, Priyanka},
+year = {2024},
+url = {https://doi.org/10.1145/3620666.3651368},
+doi = {10.1145/3620666.3651368},
+booktitle = {Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3},
+}
+```
