@@ -58,8 +58,6 @@ class ShapeProp:
             if isinstance(result, torch.Tensor):
                 node.shape = result.shape
                 node.value = result.clone()
-                if hasattr(result, 'meta'):
-                    node.value.meta = copy.deepcopy(result.meta)
 
             env[node.name] = result
 

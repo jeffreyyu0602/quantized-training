@@ -106,7 +106,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
         # in the element data format
         shared_exp = shared_exp - math.floor(math.log2(quant_max))
 
-        scale = (2**shared_exp).to(input.dtype)
+        scale = (2 ** shared_exp).to(input.dtype)
         input = _quantize(input / scale, qvalues) * scale
 
         # Undo tile reshaping

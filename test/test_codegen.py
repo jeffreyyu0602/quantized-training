@@ -1,4 +1,5 @@
 import argparse
+import copy
 import logging
 import os
 
@@ -88,11 +89,10 @@ def transform(
         example_kwargs = {}
 
     if isinstance(model, torch.fx.GraphModule):
-        gm = model
+        gm = copy.deepcopy(model.graph)
     else:
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
-        gm = _convert_scalars_to_attrs(gm)
-        gm.graph.eliminate_dead_code()
+        _convert_scalars_to_attrs(gm)
 
     gm = fuse_operator(gm)
     gm.graph.print_tabular()
@@ -107,8 +107,6 @@ def transform(
         os.path.join(output_dir, "tensor_files")
     )
 
-    gen_compute_graph(gm, os.path.join(output_dir, output_file))
-
     with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
         f.write(params.SerializeToString())
 
@@ -121,6 +119,8 @@ def transform(
     layers = [p.name for p in params.params]
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(layers))
+
+    gen_compute_graph(gm, os.path.join(output_dir, output_file))
 
     return pt_out, gm_out
 
@@ -240,7 +240,6 @@ if __name__ == "__main__":
         input_shape = input_ids.size()
 
         attention_mask = torch.ones(input_shape)
-        # head_mask = torch.ones(model.config.num_attention_heads)
         head_mask = None
         token_type_ids = torch.zeros(input_shape, dtype=torch.long)
 

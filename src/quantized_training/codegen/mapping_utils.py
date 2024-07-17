@@ -49,8 +49,8 @@ def _set_tensor_field(field, node, output_dir):
     tensor = node.value
 
     field.node = node.name
-    if hasattr(node, 'meta') and 'dtype' in node.meta:
-        field.dtype = node.meta['dtype']
+    if (dtype := node.meta.get("dtype", None)) is not None:
+        field.dtype = dtype
     else:
         field.dtype = str(tensor.dtype).split(".")[1]
 
@@ -58,6 +58,18 @@ def _set_tensor_field(field, node, output_dir):
         field.shape.extend(list(node.shape))
     else:
         field.shape.append(1)
+
+    if (permute := node.meta.get("permute", None)) is not None:
+        input_node = permute.args[0]
+        dims = permute.args[1] if len(permute.args) == 2 else permute.args[1:]
+
+        field.permutation.node = input_node.name
+        field.permutation.opcode = permute.target.__name__.split(".")[0]
+        field.permutation.shape.extend(input_node.shape)
+        field.permutation.dims.extend(dims)
+        if output_dir is not None:
+             _write_tensor_to_file(tensor,
+                os.path.join(output_dir, f"{input_node.name}.bin"))
 
     if output_dir is not None:
         _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
@@ -85,15 +97,24 @@ def map_conv2d(node, output_dir):
     """
     Schema: conv2d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1) -> Tensor
     """
-    if node.op != "call_function" or node.target != torch.ops.aten.conv2d.default:
+    if node.op != "call_function" or node.target not in [
+        torch.ops.aten.conv2d.default,
+        torch.ops.quantized_ops.conv2d_mx,
+    ]:
         return None
     args = [None, None, None, 1, 0, 1, 1]
     args[:len(node.args)] = node.args
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, args[0], output_dir)
-    _set_tensor_field(param.weight, args[1], output_dir)
+    if node.target == torch.ops.aten.conv2d.default:
+        _set_tensor_field(param.input, args[0], output_dir)
+        _set_tensor_field(param.weight, args[1], output_dir)
+    else:
+        _set_tensor_field(param.mx_input.input, args[0], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_weight.input, args[1], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
     _set_tensor_field(param.bias, args[2], output_dir)
     _set_repeated_field(param.stride, args[3])
     _set_repeated_field(param.padding, args[4])
@@ -107,13 +128,22 @@ def map_linear(node, output_dir):
     """
     Schema: linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor
     """
-    if node.op != "call_function" or node.target != torch.ops.aten.linear.default:
+    if node.op != "call_function" or node.target not in [
+        torch.ops.aten.linear.default,
+        torch.ops.quantized_ops.linear_mx,
+    ]:
         return None
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, node.args[0], output_dir)
-    _set_tensor_field(param.weight, node.args[1], output_dir)
+    if node.target == torch.ops.aten.linear.default:
+        _set_tensor_field(param.input, node.args[0], output_dir)
+        _set_tensor_field(param.weight, node.args[1], output_dir)
+    else:
+        _set_tensor_field(param.mx_input.input, node.args[0], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_weight.input, node.args[1], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
     _set_tensor_field(param.bias, node.args[2], output_dir)
     return param
 
@@ -123,13 +153,22 @@ def map_matmul(node, output_dir):
     """
     Schema: matmul(Tensor self, Tensor other) -> Tensor
     """
-    if node.op != "call_function" or node.target != torch.ops.aten.matmul.default:
+    if node.op != "call_function" or node.target not in [
+        torch.ops.aten.matmul.default,
+        torch.ops.quantized_ops.matmul_mx,
+    ]:
         return None
     param = MatrixParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, node.args[0], output_dir)
-    _set_tensor_field(param.weight, node.args[1], output_dir)
+    if node.target == torch.ops.aten.matmul.default:
+        _set_tensor_field(param.input, node.args[0], output_dir)
+        _set_tensor_field(param.weight, node.args[1], output_dir)
+    else:
+        _set_tensor_field(param.mx_input.input, node.args[0], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_weight.input, node.args[1], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
     return param
 
 
@@ -162,12 +201,18 @@ def _is_elementwise_op(op: Callable) -> bool:
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add_.Tensor,
         torch.ops.aten.sub.Tensor,
+        torch.ops.aten.sub_.Tensor,
         torch.ops.aten.mul.Tensor,
+        torch.ops.aten.mul_.Tensor,
         torch.ops.aten.div.Tensor,
+        torch.ops.aten.div_.Tensor,
         torch.ops.aten.exp.default,
+        torch.ops.aten.pow.Scalar,
         torch.ops.aten.log.default,
+        torch.ops.aten.log2.default,
         torch.ops.aten.reciprocal.default,
         torch.ops.aten.sqrt.default,
+        torch.ops.aten.floor.default,
         torch.ops.aten.tanh.default,
         torch.ops.aten.relu.default,
         torch.ops.aten.relu_.default,
@@ -178,8 +223,8 @@ def _is_elementwise_op(op: Callable) -> bool:
     ]
 
 
-@register_annotator("elwise")
-def map_elwise(node, output_dir):
+@register_annotator("elementwise")
+def map_elementwise(node, output_dir):
     """
     Schema:
     add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
@@ -318,13 +363,12 @@ def map_transpose(node, output_dir):
 
 def _is_nop(op: Callable) -> bool:
     return op in [
-        torch.ops.aten.cat.default,
         torch.ops.aten.clone.default,
+        torch.ops.aten.contiguous.default,
         # TODO: remove?
         torch.ops.aten.dropout.default,
         torch.ops.aten.expand.default,
         torch.ops.aten.flatten.using_ints,
-        torch.ops.aten.t.default,
         torch.ops.aten.unsqueeze.default,
         torch.ops.aten.view.default,
         operator.getitem,

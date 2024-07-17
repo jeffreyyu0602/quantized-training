@@ -7,13 +7,27 @@ message Memory {
   int32 offset = 2;
 }
 
+message Permutation {
+  string node = 1;
+  string opcode = 2;
+  repeated int32 shape = 3;
+  repeated int32 dims = 4;
+}
+
 message Tensor {
   string node = 1;
   string dtype = 2;
   repeated int32 shape = 3;
   Memory memory = 4;
+  Permutation permutation = 5;
 }
 
+message MXTensor {
+  Tensor input = 1;
+  Tensor scale = 2;
+}
+
+// Tensor with hardware specific information
 // message TiledTensor {
 //   Tesnor tensor = 1;
 //   Memory memory = 2;
@@ -31,8 +45,14 @@ message VectorParam {
 message MatrixParam {
   string name = 1;
   string opcode = 2;
-  Tensor input = 3;
-  Tensor weight = 4;
+  oneof input_type {
+    Tensor input = 3;
+    MXTensor mx_input = 10;
+  }
+  oneof weight_type {
+    Tensor weight = 4;
+    MXTensor mx_weight = 11;
+  }
   Tensor bias = 5;
   repeated int32 stride = 6;
   repeated int32 padding = 7;

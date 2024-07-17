@@ -1,4 +1,5 @@
 import copy
+import math
 from dataclasses import asdict, replace
 from typing import Optional, Any, Callable
 
@@ -38,6 +39,7 @@ from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .decomposed import quantized_decomposed_lib
+from .mx_utils import _reshape_to_blocks, _shared_exponents, _undo_reshape_to_blocks
 
 
 def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
@@ -399,6 +401,161 @@ QUANT_OP_MAPPINGS = {
 }
 
 
+def _calculate_mx_qparam(
+    input: torch.Tensor,
+    quant_max: float,
+    axes: Union[int, Tuple[int]],
+    block_size: int = 32,
+) -> torch.Tensor:
+    axes = [axes] if type(axes) == int else axes
+    axes = [x + input.ndim if x < 0 else x for x in axes]
+
+    # Perform tiling to the hardware vector size
+    if block_size > 0:
+        reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(
+            input, axes, block_size
+        )
+
+    shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+
+    # Get shared exponents
+    shared_exp = _shared_exponents(
+        reshaped, method="max", axes=shared_exp_axes, ebits=0,
+    )
+
+    # Offset the max exponent by the largest representable exponent
+    # in the element data format
+    shared_exp = shared_exp - math.floor(math.log2(quant_max))
+
+    for axis in reversed(axes):
+        # Remove extra dimension
+        shared_exp = torch.squeeze(shared_exp, dim=axis + 1)
+
+    return (2 ** shared_exp).to(input.dtype)
+
+
+def _calculate_mx_padding(A, axes, block_size):
+    if axes is None:
+        raise Exception(
+            "axes required in order to determine which "
+            "dimension toapply block size to"
+        )
+    if block_size == 0:
+        raise Exception("block_size == 0 in _reshape_to_blocks")
+
+    # Fix axes to be positive and sort them
+    axes = [(x + len(A.shape) if x < 0 else x) for x in axes]
+    assert all(x >= 0 for x in axes)
+    axes = sorted(axes)
+
+    # Add extra dimension for tiles
+    for i in range(len(axes)):
+        axes[i] += i  # Shift axes due to added dimensions
+        A = torch.unsqueeze(A, dim=axes[i] + 1)
+
+    # Pad to block_size
+    orig_shape = A.size()
+    pad = []
+    for i in range(len(orig_shape)):
+        pad += [0, 0]
+
+    do_padding = False
+    for axis in axes:
+        pre_pad_size = orig_shape[axis]
+        if isinstance(pre_pad_size, torch.Tensor):
+            pre_pad_size = int(pre_pad_size.value)
+        # Don't pad if the axis is short enough to fit inside one tile
+        if pre_pad_size % block_size == 0:
+            pad[2 * axis] = 0
+        else:
+            pad[2 * axis] = block_size - pre_pad_size % block_size
+            do_padding = True
+
+    if do_padding:
+        pad = list(reversed(pad))
+        A = torch.nn.functional.pad(A, pad, mode="constant")
+
+    def _reshape(shape, reshape_block_size):
+        for axis in axes:
+            # Reshape to tiles if axis length > reshape_block_size
+            if shape[axis] >= reshape_block_size:
+                assert shape[axis] % reshape_block_size == 0
+                shape[axis + 1] = reshape_block_size
+                shape[axis] = shape[axis] // reshape_block_size
+            # Otherwise preserve length and insert a 1 into the shape
+            else:
+                shape[axis + 1] = shape[axis]
+                shape[axis] = 1
+        return shape
+
+    # Reshape to tiles
+    padded_shape = A.size()
+    reshape = _reshape(list(padded_shape), block_size)
+
+    return pad, orig_shape, reshape
+
+
+def _replace_mx_observer_node(
+    model: torch.nn.Module,
+    node: Node,
+    input: torch.Tensor,
+    activation_post_process: torch.nn.Module,
+) -> torch.Tensor:
+    dtype = activation_post_process.dtype
+    quant_max = activation_post_process.quant_max
+    axes = activation_post_process.ch_axis
+    block_size = activation_post_process.block_size
+
+    axes = [axes] if type(axes) == int else axes
+    axes = [x + input.ndim if x < 0 else x for x in axes]
+
+    pad, orig_shape, padded_shape = _calculate_mx_padding(
+        input, axes, block_size
+    )
+
+    shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+
+    @torch._dynamo.assume_constant_result
+    def _get_qvalues():
+        return activation_post_process.qvalues
+
+    class QuantizeMX(torch.nn.Module):
+        def forward(self, input: torch.Tensor) -> torch.Tensor: 
+            reshaped = input.view(orig_shape)
+            reshaped = torch.nn.functional.pad(reshaped, pad, mode="constant")
+            reshaped = reshaped.view(padded_shape)
+
+            amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
+            # shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype)))
+            shared_exp = torch.floor(torch.log2(amax))
+            shared_exp = shared_exp - math.floor(math.log2(quant_max))
+            scale = 2 ** shared_exp
+
+            qvalues = _get_qvalues()
+            input = torch.ops.quantized_ops.quantize_symmetric(input, scale, dtype, qvalues, block_size)
+            return (input, scale)
+
+    gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
+    graph = model.graph
+
+    value_remap = {}
+    for n in gm.graph.nodes:
+        if n.op == 'placeholder':
+            value_remap[n] = node.args[0]
+        elif n.op == 'output':
+            node.replace_all_uses_with(value_remap[n.args[0][0]])
+        else:
+            with graph.inserting_before(node):
+                value_remap[n] = graph.node_copy(n, lambda n : value_remap[n])
+            if n.op == "get_attr":
+                model.register_buffer(value_remap[n].target, gm.get_buffer(n.target))
+            source_fn_st = value_remap[node].meta.setdefault('source_fn_stack', [])
+            source_fn = source_fn_st[-1]
+            source_fn_st[-1] = (value_remap[node].name, source_fn[1])
+    output_node = list(gm.graph.nodes)[-1]
+    return map(lambda n: value_remap[n], output_node.args[0])
+
+
 def _replace_observer_with_quantize_mx_node_decomposed(
         model: torch.fx.GraphModule,
         node: Node,
@@ -421,7 +578,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     if input_node.op == 'get_attr':
         # quantize model parameter and remove fq module
         param = param_dict[input_node.target]
-        scale = torch.ops.quantized_ops.calculate_mx_qparam(
+        scale = _calculate_mx_qparam(
             param.data,
             activation_post_process.quant_max,
             activation_post_process.ch_axis,
@@ -435,41 +592,27 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             param.data,
             scale,
             input_dtype,
-            activation_post_process.qvalues
+            activation_post_process.qvalues,
+            activation_post_process.block_size,
         )
         node.replace_all_uses_with(input_node)
 
         # annotate weight node dtype
         input_node.meta["dtype"] = input_dtype
     else:
-        # replace fake quant module with a quantize node
-        with graph.inserting_before(node):
-            mx_op_inputs = [
-                node.args[0],
-                activation_post_process.quant_max,
-                activation_post_process.ch_axis,
-                activation_post_process.block_size,
-            ]
-            qparam_node_inp = graph.call_function(
-                torch.ops.quantized_ops.calculate_mx_qparam,
-                tuple(mx_op_inputs),
-                {}
-            )
-            qvalues_node = create_getattr_from_value(
-                model, graph, "qvalues_", activation_post_process.qvalues)
-            quantize_op_inputs = [node.args[0], qparam_node_inp, input_dtype, qvalues_node]
-            quantized_node = graph.call_function(
-                torch.ops.quantized_ops.quantize_symmetric,
-                tuple(quantize_op_inputs),
-                {}
-            )
-        # annotate input node dtype
-        quantized_node.meta["dtype"] = input_dtype
-        node.replace_all_uses_with(quantized_node)
+        device = assert_and_get_unique_device(activation_post_process)
+        example_input = torch.randn(input_node.meta['val'].shape).to(device)
+        quantized_node, qparam_node_inp = _replace_mx_observer_node(
+            model,
+            node,
+            example_input,
+            activation_post_process,
+        )
     graph.erase_node(node)
 
     for user_node in orig_fq_users:
         new_kwargs = dict(user_node.kwargs)
+        new_kwargs.setdefault("block_size", activation_post_process.block_size)
         if qparam_node_inp is not None:
             # handle the second argument of torch.matmul
             if id(quantized_node) == id(user_node.args[1]):
@@ -507,6 +650,10 @@ def convert_pt2e(model: GraphModule):
                     _replace_observer_with_quantize_dequantize_node_decomposed(model, node, modules)
 
     _fuse_dequantize_quantize(model)
+
+    model.graph.print_tabular()
+    for name, param in model.named_parameters():
+        print(name, param)
 
     model.graph.lint()
     model.recompile()
