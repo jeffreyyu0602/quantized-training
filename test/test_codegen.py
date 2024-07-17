@@ -89,7 +89,7 @@ def transform(
         example_kwargs = {}
 
     if isinstance(model, torch.fx.GraphModule):
-        gm = copy.deepcopy(model.graph)
+        gm = copy.deepcopy(model)
     else:
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
         _convert_scalars_to_attrs(gm)

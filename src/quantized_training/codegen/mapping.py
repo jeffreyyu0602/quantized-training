@@ -1,3 +1,4 @@
+import copy
 import itertools
 import operator
 import os
@@ -62,6 +63,8 @@ def _decompose_node(graph: Graph, gm: GraphModule, args: List[Node], output_node
             source_fn_st = value_remap[node].meta.setdefault('source_fn_stack', [])
             source_fn = source_fn_st[-1]
             source_fn_st[-1] = (value_remap[node].name, source_fn[1])
+    output_node = list(gm.graph.nodes)[-1]
+    return list(map(lambda n: value_remap[n], output_node.args[0]))
 
 
 class BMM(torch.nn.Module):
@@ -76,72 +79,95 @@ class BMM(torch.nn.Module):
         return result
 
 
-def _split_bmm(model: GraphModule):
-    """ Split batched matrx multiply into multiple GEMM operations
-    """
-    graph = model.graph
-    nodes = list(graph.nodes)
-    for n in nodes:
-        if n.op != 'call_function' or n.target != torch.ops.aten.matmul.default:
-            continue
-        input1 = torch.randn(n.args[0].meta['val'].size())
-        input2 = torch.randn(n.args[1].meta['val'].size())
+def _decompose_bmm(graph: Graph, node: Node):
+    assert node.op == 'call_function' and node.target == torch.ops.aten.matmul.default
+    input1 = torch.randn(node.args[0].meta['val'].size())
+    input2 = torch.randn(node.args[1].meta['val'].size())
 
-        input1_dims = sum(1 for d in input1.shape if d > 1)
-        input2_dims = sum(1 for d in input2.shape if d > 1)
-        if input1_dims < 3 and input2_dims < 3:
-            continue
+    input1_dims = sum(1 for d in input1.shape if d > 1)
+    input2_dims = sum(1 for d in input2.shape if d > 1)
+    if input1_dims < 3 and input2_dims < 3:
+        return None
 
-        gm = capture_pre_autograd_graph(BMM(), (input1, input2))
-        _decompose_node(graph, gm, n.args, n)
-        graph.erase_node(n)
-
-    graph.lint()
-    model.recompile()
+    gm = capture_pre_autograd_graph(BMM(), (input1, input2))
+    output_nodes = _decompose_node(graph, gm, node.args, node)
+    graph.erase_node(node)
+    return output_nodes[0]
 
 
-class MultiHeadAttention(torch.nn.Module):
-    def forward(self, query, key, scale_factor, attention_mask, value) -> torch.Tensor:
-        batch_shape = query.shape[:-2]
-        outputs = []
-        for idx in itertools.product(*[range(dim) for dim in batch_shape]):
-            attention_scores = torch.matmul(query[idx], key[idx])
-            attention_scores = attention_scores / scale_factor
-            if attention_mask is not None:
-                attention_scores = attention_scores + attention_mask
-            attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
-            # if head_mask is not None:
-            #     attention_probs = attention_probs * head_mask
-            context_layer = torch.matmul(attention_probs, value[idx])
-            outputs.append(context_layer)
-        outputs = torch.stack(outputs)
-        outputs = outputs.view(*batch_shape, *outputs.shape[-2:])
-        return outputs
+def split_nodes_on_path(graph: Graph, nodes: List[Node]):
+    node_groups = [[] for _ in range(len(nodes[-1].users))]
+    for node in reversed(nodes):
+        orig_users = list(node.users)
+        for i, user in enumerate(orig_users):
+            with graph.inserting_before(user):
+                new_node = graph.node_copy(node, lambda n: n)
+            # node_copy does a shallow copy of the meta dictionary. This will
+            # cause all the copied nodes to have the same source_fn_stack and
+            # be grouped into a single SourcePartition. Performing a deepcopy
+            # on node meta cause unknown segfaults. So we manually update the
+            # source_fn_stack here.
+            source_fn_st = copy.deepcopy(node.meta['source_fn_stack'])
+            source_fn = source_fn_st[-1]
+            source_fn_st[-1] = (new_node.name, source_fn[1])
+            new_node.meta['source_fn_stack'] = source_fn_st
+            # replace all uses of the original node with the new node
+            user.replace_input_with(node, new_node)
+            node_groups[i].insert(0, new_node)
+        graph.erase_node(node)
+    return node_groups
 
 
 def _split_multi_head_attention(model: GraphModule):
     graph = model.graph
     partitions = get_source_partitions(graph, [torch.matmul])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
+    count = 0
     for partition in partitions:
-        output_node = partition.output_nodes[0]
-        # if a node is already fused, it will have no users
-        if len(output_node.users) == 0:
+        count += 1
+        if count % 2 == 0:
             continue
-        # TODO: check if all operations match exactly
+
+        # Fine the path between two matmul operations
+        output_node = partition.output_nodes[0]
         user_node = next(iter(output_node.users))
         fused_nodes = [output_node, user_node]
         while user_node.target != torch.ops.aten.matmul.default:
             user_node = next(iter(user_node.users))
             fused_nodes.append(user_node)
-        args = tuple(a for n in fused_nodes for a in n.args if isinstance(a, Node) and a not in fused_nodes)
-        args_value = torch.fx.node.map_aggregate(
-            args, lambda n: torch.randn(n.meta['val'].size())
-        )
-        gm = capture_pre_autograd_graph(MultiHeadAttention(), args_value)
-        _decompose_node(graph, gm, args, fused_nodes[-1])
-        for n in reversed(fused_nodes):
-            graph.erase_node(n)
+
+        output_1 = _decompose_bmm(graph, fused_nodes[0])
+        output_2 = _decompose_bmm(graph, fused_nodes[-1])
+        if output_1 is None and output_2 is None:
+            continue
+
+        node_groups = split_nodes_on_path(graph, fused_nodes[1:-1])
+
+        # match the select index of input to first matmul and second matmul
+        matmul_1 = output_1.args[0].args[0]
+        for node in matmul_1:
+            select = node.args[0]
+            for group in node_groups:
+                last_node = group[-1]
+                select_2 = next(iter(last_node.users))
+                select_2 = next(iter(select_2.users))
+                if select_2.args[1:] != select.args[1:]:
+                    continue
+                group[0].replace_input_with(group[0].args[0], node)
+                select_2.replace_all_uses_with(group[-1])
+
+        from torch.fx.experimental import proxy_tensor
+
+        # HACK: manually update the fake tensor value of each node
+        for group in node_groups:
+            for node in group:
+                args = torch.fx.node.map_aggregate(
+                    node.args, lambda n: torch.randn(n.meta['val'].size()) if isinstance(n, Node) else n
+                )
+                out = node.target(*args)
+                node.meta['val'] = proxy_tensor.extract_val(out)
+
+    graph.eliminate_dead_code()
     graph.lint()
 
 
@@ -243,7 +269,6 @@ def make_partition(nodes: List[Node], module_type: Type) -> SourcePartition:
 
 def fuse_operator(model: GraphModule):
     _split_multi_head_attention(model)
-    _split_bmm(model)
 
     # TODO: this should be passed in as an argument
     vector_stages = {
@@ -307,16 +332,6 @@ def fuse_operator(model: GraphModule):
                 return g
         return None
 
-    def _create_copy_of_path(graph: Graph, nodes: List[Node]):
-        for node in reversed(nodes):
-            orig_users = list(node.users)
-            for user in orig_users:
-                with graph.inserting_before(user):
-                    new_node = graph.node_copy(node, lambda n: n)
-                user.replace_input_with(node, new_node)
-            graph.erase_node(node)
-        graph.lint()
-
     def get_input_nodes(args):
         input_nodes = []
         for arg in args:
@@ -370,9 +385,13 @@ def fuse_operator(model: GraphModule):
             if prev_node in fused_nodes:
                 group = _search_partition_group(prev_node)
                 group.extend(reshape_nodes)
+                for n in reshape_nodes:
+                    fused_nodes[n] = None
                 print("Fuse reshape with last node:", group, end="\n\n")
             else:
                 fused_partitions.append([prev_node] + reshape_nodes)
+                for n in fused_partitions[-1]:
+                    fused_nodes[n] = None
                 print("Create new group:", fused_partitions[-1], end="\n\n")
             continue
 
@@ -398,7 +417,7 @@ def fuse_operator(model: GraphModule):
             if len(user.users) > 1:
                 has_reshape_or_multiple_users = True
                 input_node = output_node.args[0]
-                _create_copy_of_path(graph, reshape_nodes)
+                split_nodes_on_path(graph, reshape_nodes)
                 for new_user in input_node.users:
                     if (source_fn_st := new_user.meta.get("source_fn_stack", None)):
                         module_type = source_fn_st[-1][1]
@@ -413,14 +432,18 @@ def fuse_operator(model: GraphModule):
         if has_reshape_or_multiple_users:
             continue
 
+        print("Fusing user with reshape:", user, reshape_nodes)
         if user in fused_nodes:
             group = _search_partition_group(user)
             for n in reversed(reshape_nodes):
                 group.insert(0, n)
+                fused_nodes[n] = None
             print("Fuse reshape with next op:", group, end="\n\n")
         else:
             group = reshape_nodes + [user]
             fused_partitions.append(group)
+            for n in group:
+                fused_nodes[n] = None
             print("Create new group:", reshape_nodes + [user], end="\n\n")
 
         # switch order of transpose and select ops

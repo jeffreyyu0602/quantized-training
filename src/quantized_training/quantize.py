@@ -59,11 +59,7 @@ def quantize(model, args, inplace=True):
         and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
-        convert(
-            model,
-            inplace=True,
-            custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS,
-        )
+        convert(model, inplace=True, custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS)
         if hasattr(model, 'hf_device_map'):
             dispatch_model(model, device_map=model.hf_device_map)
 

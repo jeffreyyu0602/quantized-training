@@ -67,10 +67,6 @@ quantize(model, args)
 
 Your model is now quantized and ready for training or inference. For more use cases, please refer to the `example` folder for guidelines and examples on how to extend the functionality of Quantized-Training.
 
-## Quantization Arguments
-
-
-
 ## Results on SQuAD Question Answering
 
 To reproduce the Table 1 results in the paper, run
@@ -90,21 +86,21 @@ The outputs are stored in squad_f1.csv and should have the following format:
 
 ## Results on LLaMA 2
 
-To run LLaMA 2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA 2 on WikiText-103:
+To run LLaMA 2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login to your huggigface account in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA 2 on WikiText-103:
 ```python
 python examples/language_modeling/wikitext.py --model_id gpt2-xl [--max_length <LENGTH>] [--stride <STRIDE>]
 ```
 
-| Model         | Data Type    | No Fusion     | GEMM + Attention Scaling | + Activation Fusion | + LayerNorm Fusion | + Residual Fusion |
-|---------------|--------------|:-------------:|:------------------------:|:-------------------:|:------------------:|:-----------------:|
-| LLaMA 2 (7B)  | Posit (8, 1) | 5.56 | 5.53 | 5.53 | 5.52 | 5.30 |
-| LLaMA 2 (7B)  | Posit (8, 2) | 5.44 | 5.40 | 5.38 | 5.37 | 5.29 |
-| LLaMA 2 (7B)  | E4M3         | 5.80 | 5.80 | 5.77 | 5.75 | 5.36 |
-| LLaMA 2 (13B) | Posit (8, 1) | 4.85 | 4.78 | 4.78 | 4.77 | 4.72 |
-| LLaMA 2 (13B) | Posit (8, 2) | 4.86 | 4.82 | 4.81 | 4.80 | 4.72 |
-| LLaMA 2 (13B) | E4M3         | 5.10 | 5.09 | 5.07 | 5.06 | 4.73 |
+| Model         | Data Type   | No Fusion     | GEMM + Attention Scaling | + Activation Fusion | + LayerNorm Fusion | + Residual Fusion |
+|---------------|-------------|:-------------:|:------------------------:|:-------------------:|:------------------:|:-----------------:|
+| LLaMA 2 (7B)  | Posit(8, 1) | 5.56 | 5.53 | 5.53 | 5.52 | 5.30 |
+| LLaMA 2 (7B)  | Posit(8, 2) | 5.44 | 5.40 | 5.38 | 5.37 | 5.29 |
+| LLaMA 2 (7B)  | E4M3        | 5.80 | 5.80 | 5.77 | 5.75 | 5.36 |
+| LLaMA 2 (13B) | Posit(8, 1) | 4.85 | 4.78 | 4.78 | 4.77 | 4.72 |
+| LLaMA 2 (13B) | Posit(8, 2) | 4.86 | 4.82 | 4.81 | 4.80 | 4.72 |
+| LLaMA 2 (13B) | E4M3        | 5.10 | 5.09 | 5.07 | 5.06 | 4.73 |
 
-## Fine-Tuning Experiments Reproduction
+## Fine-Tuning Experiments
 
 In our paper, we conducted fine-tuning experiments on four GLUE tasks (MNLI, SST-2, MRPC, and QNLI) and SQuAD v1.1 question answering task. All commands required to reproduce the results in Table 4 are provided in the script `asplos_training.sh`. The experiments are organized into groups, each addressing give tasks of different data types and configurations. Outputs from the experiments are recorded in their respective log files. We recommend starting with the MRPC task, as it is the shortest and typically completes in around an hour on an RTX 4090 GPU.
 
