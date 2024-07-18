@@ -9,7 +9,6 @@ import graphviz
 import torch
 from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
-from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.passes.utils.source_matcher_utils import (
     check_subgraphs_connected,
@@ -118,12 +117,14 @@ def split_nodes_on_path(graph: Graph, nodes: List[Node]):
     return node_groups
 
 
-def _split_multi_head_attention(model: GraphModule):
+def split_multi_head_attention(model: GraphModule):
     graph = model.graph
     partitions = get_source_partitions(graph, [torch.matmul])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     count = 0
     for partition in partitions:
+        # we group matmul into pairs. This logic assumes that torch.matmul
+        # is only used in multi-head attention. This logic should be improved.
         count += 1
         if count % 2 == 0:
             continue
@@ -143,7 +144,7 @@ def _split_multi_head_attention(model: GraphModule):
 
         node_groups = split_nodes_on_path(graph, fused_nodes[1:-1])
 
-        # match the select index of input to first matmul and second matmul
+        # match the select index of inputs to first matmul and second matmul
         matmul_1 = output_1.args[0].args[0]
         for node in matmul_1:
             select = node.args[0]
@@ -158,7 +159,7 @@ def _split_multi_head_attention(model: GraphModule):
 
         from torch.fx.experimental import proxy_tensor
 
-        # HACK: manually update the fake tensor value of each node
+        # manually update the fake tensor metavalue of each node
         for group in node_groups:
             for node in group:
                 args = torch.fx.node.map_aggregate(
@@ -268,7 +269,7 @@ def make_partition(nodes: List[Node], module_type: Type) -> SourcePartition:
 
 
 def fuse_operator(model: GraphModule):
-    _split_multi_head_attention(model)
+    split_multi_head_attention(model)
 
     # TODO: this should be passed in as an argument
     vector_stages = {
@@ -341,15 +342,19 @@ def fuse_operator(model: GraphModule):
                 input_nodes.extend(get_input_nodes(arg))
         return input_nodes
 
-    graph.print_tabular()
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
         partition = partitions.pop(0)
         output_node = partition.output_nodes[0]
 
-        print("processing node:", output_node)
-
+        # The logic for fusing reshape operations is that we first trace up the graph
+        # until we reach a GEMM or elementwise operation. If we encounter a reshape operation
+        # or a node that has either multiple inputs or users along the way, we stop and
+        # try to fuse the node with its immediate user. For fusing a node with its user,
+        # we trace down the graph until we reach a GEMM or elementwise operation. If we
+        # encounter a node with multiple users, we duplicate all the elements on the path
+        # and perform fusion on each branch.
         reshape_nodes = []
         prev_node = output_node
         has_reshape_or_multiple_inputs = False
@@ -362,13 +367,11 @@ def fuse_operator(model: GraphModule):
                 torch.ops.aten.permute.default,
                 torch.ops.aten.transpose.int,
             ]:
-                print(f"{output_node} encountered a reshape operation: {prev_node}")
                 has_reshape_or_multiple_inputs = True
                 break
 
             # if a previous node has multiple users, we cannot fuse it with the reshape
             if id(prev_node) != id(output_node) and len(prev_node.users) > 1:
-                print(f"{output_node} has multiple users: {prev_node.users}")
                 has_reshape_or_multiple_inputs = True
                 break
 
@@ -376,7 +379,6 @@ def fuse_operator(model: GraphModule):
             # be fused with any single input branch.
             input_nodes = get_input_nodes(prev_node.args)
             if len(input_nodes) > 1:
-                print(f"{output_node} has multiple inputs: {input_nodes}")
                 has_reshape_or_multiple_inputs = True
                 break
             prev_node = input_nodes[0]
@@ -387,12 +389,11 @@ def fuse_operator(model: GraphModule):
                 group.extend(reshape_nodes)
                 for n in reshape_nodes:
                     fused_nodes[n] = None
-                print("Fuse reshape with last node:", group, end="\n\n")
             else:
-                fused_partitions.append([prev_node] + reshape_nodes)
-                for n in fused_partitions[-1]:
+                group = [prev_node] + reshape_nodes
+                fused_partitions.append(group)
+                for n in group:
                     fused_nodes[n] = None
-                print("Create new group:", fused_partitions[-1], end="\n\n")
             continue
 
         if len(output_node.users) == 0:
@@ -432,19 +433,16 @@ def fuse_operator(model: GraphModule):
         if has_reshape_or_multiple_users:
             continue
 
-        print("Fusing user with reshape:", user, reshape_nodes)
         if user in fused_nodes:
             group = _search_partition_group(user)
             for n in reversed(reshape_nodes):
                 group.insert(0, n)
                 fused_nodes[n] = None
-            print("Fuse reshape with next op:", group, end="\n\n")
         else:
             group = reshape_nodes + [user]
             fused_partitions.append(group)
             for n in group:
                 fused_nodes[n] = None
-            print("Create new group:", reshape_nodes + [user], end="\n\n")
 
         # switch order of transpose and select ops
         if group[0].target == torch.ops.aten.transpose.int:
@@ -470,8 +468,6 @@ def fuse_operator(model: GraphModule):
                 num_nodes += 1
             del group[:num_nodes]
             group.insert(0, transpose_node)
-
-    graph.print_tabular()
 
     for partition in fused_partitions:
         _create_and_insert_subgraph(partition, model, named_modules)
@@ -579,7 +575,6 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        has_permute = False
         params = []
         if node.op == 'call_module':
             gm = named_modules[node.target]
@@ -589,8 +584,8 @@ def gen_code(model, args, output_dir=None):
                 )
                 ShapeProp(gm).propagate(*n_args)
 
-                # If a permute operation is at the output, put permute information in the output
-                # node. Otherwise, put it at the input node of GEMM or vector operations.
+                # If a permute operation is at the output, annotate the output node.
+                # Otherwise, annotate the immediate user of the permute operation.
                 for n in gm.graph.nodes:
                     if n.op != 'call_function' or n.target not in [
                         torch.ops.aten.permute.default,
@@ -598,7 +593,6 @@ def gen_code(model, args, output_dir=None):
                     ]:
                         continue
 
-                    has_permute = True
                     user = next(iter(n.users))
                     if user.op == 'output':
                         node.meta['permute'] = n
@@ -608,9 +602,6 @@ def gen_code(model, args, output_dir=None):
                             input_node = user
                             user = next(iter(user.users))
                         input_node.meta['permute'] = n
-
-                if has_permute:
-                    gm.graph.print_tabular()
 
                 for n in gm.graph.nodes:
                     param = _map_operation(n, output_dir)
@@ -624,9 +615,6 @@ def gen_code(model, args, output_dir=None):
             param.name = node.name
             _set_tensor_field(param.output, node, output_dir)
             model_params.params.append(param)
-        
-        if has_permute:
-            print(param)
 
     for param in model_params.params:
         _write_memory_offsets(param)

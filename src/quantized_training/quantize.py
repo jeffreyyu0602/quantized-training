@@ -4,7 +4,6 @@ import logging
 import torch
 import torch.nn as nn
 import torch.ao.nn.intrinsic as nni
-from torch.ao.quantization.observer import _PartialWrapper
 from torch.nn import Module
 from torch.nn.utils.parametrize import type_before_parametrizations
 
@@ -55,13 +54,13 @@ def quantize(model, args, inplace=True):
         or args.posit_exp_shifted
         or args.posit_reciprocal
     ) and (
-        hasattr(model, 'config')
-        and isinstance(model.config, PretrainedConfig)
+        hasattr(model, 'config') and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
         convert(model, inplace=True, custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS)
-        if hasattr(model, 'hf_device_map'):
-            dispatch_model(model, device_map=model.hf_device_map)
+
+    if hasattr(model, 'hf_device_map'):
+        dispatch_model(model, device_map=model.hf_device_map)
 
     if args.posit_exp or args.posit_exp_shifted or args.posit_reciprocal:
         replace_softmax(
@@ -72,10 +71,8 @@ def quantize(model, args, inplace=True):
             dtype=torch.bfloat16 if args.bf16 else None,
         )
 
-    if args.activation is None:
-        args.quantize_forward = None
-    if args.error is None:
-        args.quantize_backprop = None
+    if getattr(args, 'bf16', False):
+        model.bfloat16()
 
     qconfig = get_qconfig(
         args.activation,
@@ -88,20 +85,21 @@ def quantize(model, args, inplace=True):
     propagate_config(model, 'qconfig', qconfig)
     if args.do_train:
         convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
-    prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
-
-    if hasattr(args, 'bf16') and args.bf16:
-        model.bfloat16()
-
-    # ASPLOS experiments quantize weights after converting model dtype to bfloat16
-    if not args.do_train:
+    else:
+        # statically quantize all the weights for faster inference
         for name, param in model.named_parameters():
             if 'bias' in name:
                 continue
             obs_or_fq = qconfig.weight(device=param.device)
-            if hasattr(obs_or_fq, 'qscheme') and obs_or_fq.qscheme is not None:
+            if getattr(obs_or_fq, 'qscheme', None) is not None:
                 obs_or_fq(param.data)
             param.data = obs_or_fq(param.data)
+
+    if args.activation is None:
+        args.quantize_forward = None
+    if args.error is None:
+        args.quantize_backprop = None
+    prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
 
     return model
 
