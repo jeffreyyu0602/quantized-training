@@ -73,7 +73,7 @@ def write_bash_script(args, cmd):
 
 def run_task(run_fn, args):
     # Set up logging
-    if args.log_file == "":
+    if args.log_file == "datetime":
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         args.log_file = f'logs/{timestamp}.log'
 
@@ -105,9 +105,9 @@ def run_task(run_fn, args):
         index = command.index(args.action)
         if args.action == "slurm":
             write_slurm_script(args, command[:index])
-            return
         elif args.action == "bash":
             write_bash_script(args, command[:index])
+        return
 
     def sweep_function():
         run = wandb.init()

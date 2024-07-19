@@ -264,8 +264,6 @@ def add_training_args(parser=None):
     )
     parser.add_argument(
         "--log_file",
-        nargs='?',
-        const="",
         default=None,
         help="Set the logging file. If not specified, the log will be printed to stdout."
     )

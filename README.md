@@ -19,7 +19,12 @@ The current release supports:
 - [8-bit Transformer Inference and Fine-Tuning for Edge Accelerators](#8-bit-transformer-inference-and-fine-tuning-for-edge-accelerators)
   - [News](#news)
   - [Contents](#contents)
-  - [Install](#install)
+  - [Prerequisites](#prerequisites)
+  - [Quickstart](#quickstart)
+  - [Results on SQuAD Question Answering](#results-on-squad-question-answering)
+  - [Results on Large Language Models (GPT-2 and LLaMA 2)](#results-on-large-language-models-gpt-2-and-llama-2)
+  - [Fine-Tuning Experiments](#fine-tuning-experiments)
+  - [Reference](#reference)
 
 ## Prerequisites
 
@@ -71,7 +76,7 @@ Your model is now quantized and ready for training or inference. For more use ca
 
 To reproduce the Table 1 results in the paper, run
 ```python
-python examples/question_answering/run_squad.py [--log_file <LOG_FILE>] [--out_file <OUTPUT>]
+python examples/question_answering/run_squad.py --log_file logs/squad.log --out_file squad
 ```
 The outputs are stored in squad_f1.csv and should have the following format:
 
@@ -84,11 +89,11 @@ The outputs are stored in squad_f1.csv and should have the following format:
 | BERT<sub>base</sub>        | 87.1   | 87.7  | 88.1   | 88.0             | 88.1   | 88.0        | 88.1   | 88.0       | 88.1   | 88.0      |
 | BERT<sub>large</sub>       | 92.3   | 93.0  | 92.8   | 93.1             | 93.0   | 93.1        | 93.0   | 93.2       | 93.1   | 93.1      |
 
-## Results on LLaMA 2
+## Results on Large Language Models (GPT-2 and LLaMA 2)
 
 To run LLaMA 2, you need to first request access to models checkpoint on the [huggingface](https://huggingface.co/meta-llama/Llama-2-7b-hf) website. Then login to your huggigface account in the terminal using [huggingface cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli). After the request has been granted, you will be able to run LLaMA 2 on WikiText-103:
 ```python
-python examples/language_modeling/wikitext.py --model_id gpt2-xl [--max_length <LENGTH>] [--stride <STRIDE>]
+python examples/language_modeling/wikitext.py --model_id meta-llama/Llama-2-13b-hf --max_length 1024 --stride 512
 ```
 
 | Model         | Data Type   | No Fusion     | GEMM + Attention Scaling | + Activation Fusion | + LayerNorm Fusion | + Residual Fusion |
