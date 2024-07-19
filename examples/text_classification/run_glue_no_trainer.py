@@ -465,7 +465,7 @@ def main(args):
     if torch.cuda.is_available():
         device = torch.device("cuda" if args.gpu is None else f"cuda:{args.gpu}")
     else:
-        logger.warn("CUDA acceleration not available. Running on CPU could be slow.")
+        logger.warning("CUDA acceleration not available. Running on CPU could be slow.")
         device = torch.device("cpu")
     model.to(device)
 

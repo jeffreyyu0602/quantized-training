@@ -439,10 +439,11 @@ def main(args):
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
-    if torch.cuda.is_available():
+    # Turn off cuda when dumping data for verification
+    if torch.cuda.is_available() and args.output_dir is None:
         device = torch.device("cuda" if args.gpu is None else f"cuda:{args.gpu}")
     else:
-        logger.warn("CUDA acceleration not available. Running on CPU could be slow.")
+        logger.warning("CUDA acceleration not available. Running on CPU could be slow.")
         device = torch.device("cpu")
     model.to(device)
 
@@ -481,10 +482,12 @@ def main(args):
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    if args.bf16:
-        model.bfloat16()
-
     quantize(model, args)
+
+    if args.disable_dropout:
+        for module in model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = 0.0
 
     batch = next(iter(eval_dataloader))
     batch = {k: v.to(device) for k, v in batch.items()}
@@ -565,10 +568,7 @@ def main(args):
     starting_epoch = 0
     best_metric = None
     for epoch in range(starting_epoch, args.num_train_epochs):
-        if args.disable_dropout:
-            model.eval()
-        else:
-            model.train()
+        model.train()
         total_loss = 0
         for step, batch in enumerate(train_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}

@@ -110,7 +110,7 @@ def main(args):
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     else:
-        logger.warn("CUDA is not available.")
+        logger.warning("CUDA is not available.")
         device = torch.device("cpu")
 
     model = AutoModelForSemanticSegmentation.from_pretrained(args.model_id).to(device)

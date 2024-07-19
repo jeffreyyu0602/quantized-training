@@ -66,7 +66,7 @@ def write_slurm_script(args, cmd):
         f.write('wait\n')
 
 def write_bash_script(args, cmd):
-    filename = "run.sh" if args.run_name is None else args.run_name + ".sh"
+    filename = "train.sh" if args.run_name is None else args.run_name + ".sh"
     with open(filename, "w") as f:
         f.write('#!/bin/bash\n')
         f.write('python ' + ' '.join(cmd) + '\n')
