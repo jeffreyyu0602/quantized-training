@@ -68,8 +68,8 @@ def _set_tensor_field(field, node, output_dir):
         field.permutation.shape.extend(input_node.shape)
         field.permutation.dims.extend(dims)
         if output_dir is not None:
-             _write_tensor_to_file(tensor,
-                os.path.join(output_dir, f"{input_node.name}.bin"))
+            _write_tensor_to_file(
+                input_node.value, os.path.join(output_dir, f"{input_node.name}.bin"))
 
     if output_dir is not None:
         _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))

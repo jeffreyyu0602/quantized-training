@@ -335,10 +335,6 @@ def main(args):
 
     # Override the default number of hidden layer in the config
     if args.num_hidden_layers is not None:
-        assert args.num_hidden_layers < config.num_hidden_layers, (
-            "Number of hideen layers must be smaller than the original number of layers, but got"
-            f"{args.num_hidden_layers} >= {args.num_hidden_layers}."
-        )
         config.num_hidden_layers = args.num_hidden_layers
 
     tokenizer = AutoTokenizer.from_pretrained(
