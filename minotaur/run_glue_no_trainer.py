@@ -346,20 +346,6 @@ def main(args):
             else:
                 sentence1_key, sentence2_key = non_label_column_names[0], None
 
-    # Preprocessing the datasets
-    if args.task_name is not None:
-        sentence1_key, sentence2_key = task_to_keys[args.task_name]
-    else:
-        # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
-        non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
-        if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
-            sentence1_key, sentence2_key = "sentence1", "sentence2"
-        else:
-            if len(non_label_column_names) >= 2:
-                sentence1_key, sentence2_key = non_label_column_names[:2]
-            else:
-                sentence1_key, sentence2_key = non_label_column_names[0], None
-
     # Some models have set the order of the labels to use, so let's make sure we do use it.
     label_to_id = None
     if (

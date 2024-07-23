@@ -825,7 +825,9 @@ def main(args):
     # this is different from calibration which does not do backward pass
     batch = next(iter(calibration_data_loader))
     batch = {k: v.to(device) for k, v in batch.items()}
-    model(**batch).loss.backward()
+    outputs = model(**batch)
+    if args.do_train:
+        outputs.loss.backward()
     model.zero_grad()
 
     def calibrate(model, data_loader):

@@ -23,6 +23,7 @@ from .mapping_utils import (
     _is_gemm_op,
     _is_elementwise_op,
 )
+from .memory import MemoryManager
 from .param_pb2 import (
     AcceleratorParam,
     ModelParams,
@@ -513,67 +514,48 @@ def _compose_accelerator_param(params: List):
     return accelerator_param
 
 
-# HACK a temporary function that make sure inputs and weights don't overlap
-# within each operation. Should be removed once we have a proper memory planner.
-# Store bias in RRAM and output in reference memory.
-def _write_memory_offsets(accelerator_param: AcceleratorParam):
-    def get_tensor_size(tensor):
-        return reduce(operator.mul, tensor.shape)
+def gen_memory_offsets(model: GraphModule):
+    manager = MemoryManager(20 * 1024 ** 3)
 
-    offset = 0
-    param_type = accelerator_param.WhichOneof("param_type")
-    if param_type is not None:
-        param = getattr(accelerator_param, param_type)
-        if param.HasField("input"):
-            param.input.memory.partition = 0
-            param.input.memory.offset = 0
-            offset += 2 * get_tensor_size(param.input)
+    # Allocate memory for input tensors and parameters
+    for node in model.graph.nodes:
+        if node.op in ["placeholder", "get_attr"]:
+            node.meta["memory"] = manager.allocate_memory(node)
 
-        if param_type == "matrix_param":
-            if param.HasField("mx_input"):
-                param.mx_input.input.memory.partition = 0
-                param.mx_input.input.memory.offset = 0
-                offset += 2 * get_tensor_size(param.mx_input.input)
-                param.mx_input.scale.memory.partition = 0
-                param.mx_input.scale.memory.offset = 0
-                offset += 2 * get_tensor_size(param.mx_input.scale)
-            if param.HasField("mx_weight"):
-                param.mx_weight.input.memory.partition = 0
-                param.mx_weight.input.memory.offset = offset
-                offset += 2 * get_tensor_size(param.mx_weight.input)
-                param.mx_weight.scale.memory.partition = 0
-                param.mx_weight.scale.memory.offset = offset
-                offset += 2 * get_tensor_size(param.mx_weight.scale)
-            if param.HasField("weight"):
-                param.weight.memory.partition = 0
-                param.weight.memory.offset = offset
-                offset += 2 * get_tensor_size(param.weight)
-            if param.HasField('bias'):
-                param.bias.memory.partition = 1
-                param.bias.memory.offset = offset
-                offset += 2 * get_tensor_size(param.bias)
+    # Allocate memory for intermediate tensors
+    activations: Dict[Node, None] = {}
+    for node in model.graph.nodes:
+        # TODO: select ops should be handled differently
+        if _is_nop(node.target) or node.op not in ["call_function", "call_module"]:
+            continue
+        node.meta["memory"] = manager.allocate_memory(node)
+        activations[node] = None
+        # for all the activations stored in the memory, if all its users
+        # have been processed, free the memory
+        orig_nodes = list(manager.tensor_memory_map.keys())
+        for n in orig_nodes:
+            if n.op not in ["call_function", "call_module"]:
+                continue
+            if all(user in activations for user in n.users):
+                manager.free_memory(n)
 
-    for vector_param in accelerator_param.vector_params:
-        vector_param.input.memory.partition = 0
-        vector_param.input.memory.offset = offset
-        offset += 2 * get_tensor_size(vector_param.input)
-        if vector_param.HasField("other"):
-            vector_param.other.memory.partition = 0
-            vector_param.other.memory.offset = offset
-            offset += 2 * get_tensor_size(vector_param.other)
-
-    accelerator_param.output.memory.partition = 0
-    accelerator_param.output.memory.offset = offset
+    for node in model.graph.nodes:
+        if (partition := node.meta.get('memory', None)) is None:
+            print(f"Node {node.name} does not have memory allocated")
+            continue
+        print(f"{node.name}: {partition.start}, {partition.end}")
 
 
 def gen_code(model, args, output_dir=None):
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
 
-    model_params = ModelParams()
-
     ShapeProp(model).propagate(*args)
+    gen_memory_offsets(model)
+
     named_modules = dict(model.named_modules(remove_duplicate=False))
+
+    model_params = ModelParams()
     for node in model.graph.nodes:
         params = []
         if node.op == 'call_module':
@@ -603,7 +585,11 @@ def gen_code(model, args, output_dir=None):
                             user = next(iter(user.users))
                         input_node.meta['permute'] = n
 
+                node_args = iter(node.args)
                 for n in gm.graph.nodes:
+                    if n.op == 'placeholder':
+                        n.meta['memory'] = next(node_args).meta.get('memory', None)
+                        continue
                     param = _map_operation(n, output_dir)
                     if isinstance(param, (MatrixParam, VectorParam)):
                         params.append(param)
@@ -616,8 +602,6 @@ def gen_code(model, args, output_dir=None):
             _set_tensor_field(param.output, node, output_dir)
             model_params.params.append(param)
 
-    for param in model_params.params:
-        _write_memory_offsets(param)
     return model_params
 
 

@@ -83,7 +83,9 @@ def quantize(model, args, inplace=True):
     )
 
     propagate_config(model, 'qconfig', qconfig)
-    if args.do_train:
+    # We have custom LoRA implementation. It needs to be swapped to match exactly
+    # the same as the original trained model
+    if args.do_train or args.lora_rank > 0:
         convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     else:
         # statically quantize all the weights for faster inference

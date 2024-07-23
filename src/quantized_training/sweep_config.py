@@ -1,6 +1,8 @@
+sweep_configurations = {}
+
 # ========== MobileBERT Sweep Configurations ==========
 
-mobilebert_mnli_lora_bf16 = {
+sweep_configurations["mobilebert_mnli_lora_bf16"] = {
     "method": "grid",
     "name": "mnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -11,7 +13,7 @@ mobilebert_mnli_lora_bf16 = {
     }
 }
 
-mobilebert_qnli_lora_bf16 = {
+sweep_configurations["mobilebert_qnli_lora_bf16"] = {
     "method": "grid",
     "name": "qnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -22,7 +24,7 @@ mobilebert_qnli_lora_bf16 = {
     }
 }
 
-mobilebert_mrpc_lora_bf16 ={
+sweep_configurations["mobilebert_mrpc_lora_bf16"] = {
     "method": "grid",
     "name": "mrpc_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -33,7 +35,7 @@ mobilebert_mrpc_lora_bf16 ={
     }
 }
 
-mobilebert_sst2_lora_bf16 = {
+sweep_configurations["mobilebert_sst2_lora_bf16"] = {
     "method": "grid",
     "name": "sst2_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -44,7 +46,7 @@ mobilebert_sst2_lora_bf16 = {
     }
 }
 
-mobilebert_squad_lora_bf16 = {
+sweep_configurations["mobilebert_squad_lora_bf16"] = {
     "method": "grid",
     "name": "squad_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "f1"},
@@ -57,7 +59,7 @@ mobilebert_squad_lora_bf16 = {
 
 # ========== RoBERTa Base Sweep Configurations ==========
 
-roberta_base_mnli_lora_bf16 = {
+sweep_configurations["roberta_base_mnli_lora_bf16"] = {
     "method": "grid",
     "name": "mnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -68,7 +70,7 @@ roberta_base_mnli_lora_bf16 = {
     }
 }
 
-roberta_base_qnli_lora_bf16 = {
+sweep_configurations["roberta_base_qnli_lora_bf16"] = {
     "method": "grid",
     "name": "qnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -79,7 +81,7 @@ roberta_base_qnli_lora_bf16 = {
     }
 }
 
-roberta_base_mrpc_lora_bf16 = {
+sweep_configurations["roberta_base_mrpc_lora_bf16"] = {
     "method": "grid",
     "name": "mrpc_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -90,7 +92,7 @@ roberta_base_mrpc_lora_bf16 = {
     }
 }
 
-roberta_base_sst2_lora_bf16 = {
+sweep_configurations["roberta_base_mrpc_lora_bf16"] = {
     "method": "grid",
     "name": "sst2_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -101,7 +103,7 @@ roberta_base_sst2_lora_bf16 = {
     }
 }
 
-roberta_base_squad_lora_bf16 = {
+sweep_configurations["roberta_base_squad_lora_bf16"] = {
     "method": "grid",
     "name": "squad_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "f1"},
@@ -114,7 +116,7 @@ roberta_base_squad_lora_bf16 = {
 
 # ========== RoBERTa Large Sweep Configurations ==========
 
-roberta_large_mnli_lora_bf16 = {
+sweep_configurations["roberta_large_mnli_lora_bf16"] = {
     "method": "grid",
     "name": "mnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -125,7 +127,7 @@ roberta_large_mnli_lora_bf16 = {
     }
 }
 
-roberta_large_qnli_lora_bf16 = {
+sweep_configurations["roberta_large_qnli_lora_bf16"] = {
     "method": "grid",
     "name": "qnli_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -136,7 +138,7 @@ roberta_large_qnli_lora_bf16 = {
     }
 }
 
-roberta_large_mrpc_lora_bf16 = {
+sweep_configurations["roberta_large_mrpc_lora_bf16"] = {
     "method": "grid",
     "name": "mrpc_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -147,7 +149,7 @@ roberta_large_mrpc_lora_bf16 = {
     }
 }
 
-roberta_large_sst2_lora_bf16 = {
+sweep_configurations["roberta_large_sst2_lora_bf16"] = {
     "method": "grid",
     "name": "sst2_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -158,7 +160,7 @@ roberta_large_sst2_lora_bf16 = {
     }
 }
 
-roberta_large_squad_lora_bf16 = {
+sweep_configurations["roberta_large_squad_lora_bf16"] = {
     "method": "grid",
     "name": "squad_hyperparameter_sweep",
     "metric": {"goal": "maximize", "name": "f1"},
@@ -171,7 +173,7 @@ roberta_large_squad_lora_bf16 = {
 
 # ========== MINOTAUR Sweep Configurations ==========
 
-mobilebert_tiny_mrpc_sgd_lora_bf16 = {
+sweep_configurations["mobilebert_tiny_mrpc_sgd_lora_bf16"] = {
     "method": "grid",
     "name": "mrpc_lora_sweep_step_lr",
     "metric": {"goal": "maximize", "name": "accuracy"},
@@ -179,5 +181,16 @@ mobilebert_tiny_mrpc_sgd_lora_bf16 = {
         "per_device_train_batch_size": {"value": 16},
         "num_train_epochs": {"value": 30},
         "learning_rate": {"max": 15, "min": 6}
+    },
+}
+
+sweep_configurations["mobilebert_tiny_squad_bf16"] = {
+    "method": "grid",
+    "name": "squad_sweep",
+    "metric": {"goal": "maximize", "name": "accuracy"},
+    "parameters": {
+        "per_device_train_batch_size": {"value": 16},
+        "num_train_epochs": {"max": 7, "min": 3},
+        "learning_rate": {"max": 5, "min": 1}
     },
 }

@@ -72,7 +72,6 @@ def write_bash_script(args, cmd):
         f.write('python ' + ' '.join(cmd) + '\n')
 
 def run_task(run_fn, args):
-    # Set up logging
     if args.log_file == "datetime":
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         args.log_file = f'logs/{timestamp}.log'
@@ -89,13 +88,17 @@ def run_task(run_fn, args):
         level=getattr(logging, args.log_level),
     )
 
-    # Create W&B sweep from sweep configuration
-    if args.sweep_config:
-        with open(args.sweep_config, 'r') as file:
-            sweep_configuration = json.load(file)
+    # Create W&B sweep from the sweep configuration
+    if args.sweep_config is not None:
+        if args.sweep_config.endswith(".json"):
+            with open(args.sweep_config, 'r') as file:
+                sweep_configuration = json.load(file)
+        else:
+            from .sweep_config import sweep_configurations
+            sweep_configuration = sweep_configurations[args.sweep_config]
         args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
 
-    # Write slurm or bash script
+    # Write training commands to a script
     if args.action is not None:
         command = copy.deepcopy(sys.argv)
         if args.sweep_config:
@@ -109,24 +112,21 @@ def run_task(run_fn, args):
             write_bash_script(args, command[:index])
         return
 
-    def sweep_function():
-        run = wandb.init()
+    def sweep_fn():
+        wandb.init()
         sweep_args = copy.deepcopy(args)
+        # W&B does not support specifying the sweep range (min, max) as float types
+        # for grid searches. We use int types and multiply the learning rate by the
+        # actual value in the sweep function.
         for k, v in wandb.config.items():
             if k == "learning_rate" and isinstance(v, int):
                 v = float(v) * args.learning_rate
             setattr(sweep_args, k, v)
-        logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
+        logger.info(f"Training/evaluation parameters: {pformat(vars(sweep_args))}")
         run_fn(sweep_args)
 
-    # Perform W&B sweep or run single job
     if args.sweep_id is not None:
-        wandb.agent(
-            args.sweep_id,
-            function=sweep_function,
-            project=args.project,
-            count=args.max_trials,
-        )
+        wandb.agent(args.sweep_id, function=sweep_fn, count=args.max_trials, project=args.project)
     else:
         if args.project is not None:
             wandb.init(
