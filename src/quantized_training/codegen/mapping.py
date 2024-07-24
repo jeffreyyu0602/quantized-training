@@ -19,11 +19,11 @@ from torch.fx.passes.utils.source_matcher_utils import (
 from .mapping_utils import (
     OP_TO_MAPPING_FUNC,
     _set_tensor_field,
-    _is_nop,
     _is_gemm_op,
     _is_elementwise_op,
+    _is_nop,
 )
-from .memory import MemoryManager
+from .memory import MemoryManager, Partition
 from .param_pb2 import (
     AcceleratorParam,
     ModelParams,
@@ -515,6 +515,7 @@ def _compose_accelerator_param(params: List):
 
 
 def gen_memory_offsets(model: GraphModule):
+    named_modules = dict(model.named_modules(remove_duplicate=False))
     manager = MemoryManager(20 * 1024 ** 3)
 
     # Allocate memory for input tensors and parameters
@@ -523,21 +524,57 @@ def gen_memory_offsets(model: GraphModule):
             node.meta["memory"] = manager.allocate_memory(node)
 
     # Allocate memory for intermediate tensors
-    activations: Dict[Node, None] = {}
+    visited: Dict[Node, None] = {}
     for node in model.graph.nodes:
-        # TODO: select ops should be handled differently
-        if _is_nop(node.target) or node.op not in ["call_function", "call_module"]:
+        if node.op not in ["call_function", "call_module"]:
             continue
+
+        # Propagate memory metadata for nop nodes
+        if _is_nop(node.target):
+            node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
+            continue
+
+        if node.target == torch.ops.aten.select.int:
+            assert node.args[1] == 0, "Only support select on the first dimension"
+            memory = node.args[0].meta["memory"]
+            offset = node.args[2] * manager.calculate_tensor_size(node.args[0].shape[1:])
+            node.meta["memory"] = Partition(memory.start + offset, memory.end)
+            continue
+
         node.meta["memory"] = manager.allocate_memory(node)
-        activations[node] = None
-        # for all the activations stored in the memory, if all its users
-        # have been processed, free the memory
-        orig_nodes = list(manager.tensor_memory_map.keys())
-        for n in orig_nodes:
+        visited[node] = None
+
+        # Propagate memory metadata inside each submodule. Different from above,
+        # all the reshape operations within each submodule are fused so we propagate
+        # memory metadata for these nodes as well.
+        if node.op == "call_module":
+            gm = named_modules[node.target]
+            node_args = iter(node.args)
+            for n in gm.graph.nodes:
+                if n.op == 'placeholder':
+                    n.meta['memory'] = next(node_args).meta.get('memory', None)
+                elif _is_nop(n.target) or n.target in [
+                    torch.ops.aten.permute.default,
+                    torch.ops.aten.transpose.int,
+                ]:
+                    n.meta['memory'] = n.args[0].meta.get('memory', None)
+
+        # Free nodes stored in the memory if the node's users have all been processed.
+        active_nodes = list(manager.tensor_memory_map.keys())
+        for n in active_nodes:
             if n.op not in ["call_function", "call_module"]:
                 continue
-            if all(user in activations for user in n.users):
+            all_user_visited = True
+            for user in n.users:
+                while _is_nop(user.target) or user.target == torch.ops.aten.select.int:
+                    user = next(iter(user.users))
+                if user not in visited:
+                    all_user_visited = False
+                    break
+            if all_user_visited:
                 manager.free_memory(n)
+
+    manager.print_partitions()
 
     for node in model.graph.nodes:
         if (partition := node.meta.get('memory', None)) is None:
@@ -585,11 +622,7 @@ def gen_code(model, args, output_dir=None):
                             user = next(iter(user.users))
                         input_node.meta['permute'] = n
 
-                node_args = iter(node.args)
                 for n in gm.graph.nodes:
-                    if n.op == 'placeholder':
-                        n.meta['memory'] = next(node_args).meta.get('memory', None)
-                        continue
                     param = _map_operation(n, output_dir)
                     if isinstance(param, (MatrixParam, VectorParam)):
                         params.append(param)
