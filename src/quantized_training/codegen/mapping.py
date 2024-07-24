@@ -534,6 +534,8 @@ def gen_memory_offsets(model: GraphModule):
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             continue
 
+        # We do not allocate new memory for select operations. Instead, calculate
+        # the memory offset from the select index
         if node.target == torch.ops.aten.select.int:
             assert node.args[1] == 0, "Only support select on the first dimension"
             memory = node.args[0].meta["memory"]
@@ -541,7 +543,30 @@ def gen_memory_offsets(model: GraphModule):
             node.meta["memory"] = Partition(memory.start + offset, memory.end)
             continue
 
-        node.meta["memory"] = manager.allocate_memory(node)
+        if node.target == torch.ops.aten.stack.default:
+            size = 0
+            for n in node.args[0]:
+                size += manager.calculate_tensor_size(n.shape)
+            memory = node.args[0][0].meta["memory"]
+            node.meta["memory"] = Partition(memory.start, memory.start + size)
+            continue
+
+        # For context layers, place them next to each other so that we can
+        # read them using a single memory access in the next operation
+        maybe_stack_node = next(iter(node.users))
+        if maybe_stack_node.target == torch.ops.aten.stack.default:
+            index = maybe_stack_node.args[0].index(node)
+            size = manager.calculate_tensor_size(node.shape)
+            if index == 0:
+                node.meta["memory"] = manager.allocate_memory(
+                    node, size * len(maybe_stack_node.args[0])
+                )
+            else:
+                memory = maybe_stack_node.args[0][0].meta["memory"]
+                start_offset = memory.start + index * size
+                node.meta["memory"] = Partition(start_offset, start_offset + size)
+        else:
+            node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None
 
         # Propagate memory metadata inside each submodule. Different from above,
@@ -566,7 +591,10 @@ def gen_memory_offsets(model: GraphModule):
                 continue
             all_user_visited = True
             for user in n.users:
-                while _is_nop(user.target) or user.target == torch.ops.aten.select.int:
+                while _is_nop(user.target) or user.target in [
+                    torch.ops.aten.select.int,
+                    torch.ops.aten.stack.default,
+                ]:
                     user = next(iter(user.users))
                 if user not in visited:
                     all_user_visited = False

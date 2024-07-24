@@ -19,13 +19,13 @@ class MemoryManager:
             return 1
         return reduce(operator.mul, shape)
 
-    def allocate_memory(self, node):
+    def allocate_memory(self, node, size=None):
         if not hasattr(node, 'shape'):
             print(f"Node {node} does not have a shape attribute")
             return None
 
         # FIXME: assumes double precision
-        tensor_size = self.calculate_tensor_size(node.shape) * 2
+        tensor_size = size or self.calculate_tensor_size(node.shape) * 2
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
