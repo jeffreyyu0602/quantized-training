@@ -17,15 +17,15 @@ class MemoryManager:
     def calculate_tensor_size(self, shape):
         if len(shape) == 0:
             return 1
-        # FIXME: assume double precision for now
-        return reduce(operator.mul, shape) * 2
+        return reduce(operator.mul, shape)
 
     def allocate_memory(self, node):
         if not hasattr(node, 'shape'):
             print(f"Node {node} does not have a shape attribute")
             return None
 
-        tensor_size = self.calculate_tensor_size(node.shape)
+        # FIXME: assumes double precision
+        tensor_size = self.calculate_tensor_size(node.shape) * 2
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
