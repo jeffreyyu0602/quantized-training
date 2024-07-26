@@ -65,12 +65,10 @@ def _set_tensor_field(field, node, output_dir):
 
     if (permute := node.meta.get("permute", None)) is not None:
         input_node = permute.args[0]
-        dims = permute.args[1] if len(permute.args) == 2 else permute.args[1:]
-
         field.permutation.node = input_node.name
-        field.permutation.opcode = permute.target.__name__.split(".")[0]
         field.permutation.shape.extend(input_node.shape)
-        field.permutation.dims.extend(dims)
+        field.permutation.opcode = permute.target.__name__.split(".")[0]
+        field.permutation.dims.extend(permute.args[1:])
         if output_dir is not None:
             _write_tensor_to_file(
                 input_node.value, os.path.join(output_dir, f"{input_node.name}.bin"))

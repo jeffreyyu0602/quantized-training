@@ -2,7 +2,6 @@ import copy
 import itertools
 import operator
 import os
-from functools import reduce
 from typing import List, Dict, Type
 
 import graphviz
@@ -530,7 +529,7 @@ def gen_memory_offsets(model: GraphModule):
             continue
 
         # Propagate memory metadata for nop nodes
-        # TODO: slice op and non-zero select op should be handled better
+        # TODO: slice op and non-zero select op should be handled separately
         if (
             _is_nop(node.target)
             or node.target == torch.ops.aten.slice.Tensor
@@ -591,22 +590,23 @@ def gen_memory_offsets(model: GraphModule):
                 ]:
                     n.meta['memory'] = n.args[0].meta.get('memory', None)
 
-        # Free nodes stored in the memory if the node's users have all been processed.
+        # We don't copy the tensor for select, slice, and stack operations.
+        # Therefore, we need to find if their immediate users have been visited.
+        def _node_visited(n):
+            if _is_nop(n.target) or n.target in [
+                torch.ops.aten.select.int,
+                torch.ops.aten.slice.Tensor,
+                torch.ops.aten.stack.default,
+            ]:
+                return all(_node_visited(user) for user in n.users)
+            return n in visited
+
+        # Free the memory of nodes whose users have all been visited.
         active_nodes = list(manager.tensor_memory_map.keys())
         for n in active_nodes:
             if n.op not in ["call_function", "call_module"]:
                 continue
-            all_user_visited = True
-            for user in n.users:
-                while _is_nop(user.target) or user.target in [
-                    torch.ops.aten.select.int,
-                    torch.ops.aten.stack.default,
-                ]:
-                    user = next(iter(user.users))
-                if user not in visited:
-                    all_user_visited = False
-                    break
-            if all_user_visited:
+            if all(_node_visited(user) for user in n.users):
                 manager.free_memory(n)
 
     manager.print_partitions()

@@ -136,7 +136,7 @@ if __name__ == "__main__":
     add_training_args(parser)
     args = parser.parse_args()
 
-    if "resnet18" == args.model:
+    if args.model == "resnet18":
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
@@ -155,7 +155,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
         )
 
-    if "qresnet18" == args.model:
+    if args.model == "qresnet18":
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
         model.bfloat16()
 
@@ -189,7 +189,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
         )
 
-    if "resnet50" == args.model:
+    if args.model == "resnet50":
         model = resnet50(weights=ResNet50_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
@@ -204,7 +204,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
         )
 
-    if "segformer" == args.model:
+    if args.model == "segformer":
         replace_interpolate()
         model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512").eval()
 
@@ -220,18 +220,7 @@ if __name__ == "__main__":
         )
         pt_out = pt_out.logits
 
-    if "mobilebert" == args.model:
-        model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
-        example_args = (torch.randint(0, 30522, (1, 128), dtype=torch.long),)
-        pt_out, gm_out = transform(
-            model,
-            example_args,
-            output_file="mobilebert",
-            output_dir=args.output_dir,
-        )
-        pt_out = pt_out.logits
-
-    if "mobilebert_no_embed" == args.model:
+    if args.model == "mobilebert":
         model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
@@ -258,7 +247,6 @@ if __name__ == "__main__":
             token_type_ids=token_type_ids,
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
-        example_kwargs = {"return_dict": False}
 
         class MobileBertNoEmbed(torch.nn.Module):
             def __init__(self):
@@ -267,16 +255,63 @@ if __name__ == "__main__":
                 self.classifier = model.classifier
 
             def forward(self, *args, **kwargs):
-                hidden_states = model.mobilebert.encoder(*args, **kwargs)[0]
+                hidden_states = self.mobilebert.encoder(*args, **kwargs)[0]
                 first_token_tensor = hidden_states[:, 0]
-                output = model.classifier(first_token_tensor)
+                output = self.classifier(first_token_tensor)
                 return output
 
         pt_out, gm_out = transform(
             MobileBertNoEmbed(),
             example_args,
-            example_kwargs,
             output_file="mobilebert",
+            output_dir=args.output_dir,
+        )
+        pt_out = pt_out[0]
+
+    if args.model == "bert":
+        model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
+
+        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        input_shape = input_ids.size()
+        attention_mask = torch.ones(input_shape)
+        token_type_ids = torch.zeros(input_shape, dtype=torch.long)
+        position_ids = torch.ones((1, 128), dtype=torch.long)
+        head_mask = None
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = model.bert.get_extended_attention_mask(attention_mask, input_shape)
+
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        head_mask = model.bert.get_head_mask(head_mask, model.config.num_hidden_layers)
+
+        class BertNoEmbed(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.bert = model.bert
+                self.classifier = model.classifier
+
+            def forward(self, *args, **kwargs):
+                hidden_states = self.bert.encoder(*args, **kwargs)[0]
+                first_token_tensor = hidden_states[:, 0]
+                output = self.classifier(first_token_tensor)
+                return output
+
+        embedding_output = model.bert.embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+        )
+        example_args = (embedding_output, extended_attention_mask, head_mask)
+
+        pt_out, gm_out = transform(
+            BertNoEmbed(),
+            example_args,
+            output_file="bert",
             output_dir=args.output_dir,
         )
         pt_out = pt_out[0]

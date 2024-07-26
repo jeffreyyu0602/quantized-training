@@ -9,6 +9,15 @@ class Partition:
         self.node = None  # None means the partition is free
 
 class MemoryManager:
+    """
+    This class implements a simple first-fit memory manager for allocating memory partitions to tensors.
+
+    Attributes:
+        total_memory (int): The total amount of memory available for allocation.
+        memory_partitions (list of Partition): A list of memory partitions.
+        tensor_memory_map (dict): A dictionary mapping tensors to their allocated memory partitions.
+
+    """
     def __init__(self, total_memory):
         self.total_memory = total_memory
         self.memory_partitions = [Partition(start=0, end=total_memory)]
