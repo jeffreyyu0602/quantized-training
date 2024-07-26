@@ -65,13 +65,13 @@ def _set_tensor_field(field, node, output_dir):
 
     if (permute := node.meta.get("permute", None)) is not None:
         input_node = permute.args[0]
+        dims = permute.args[1] if permute.target == torch.ops.aten.permute.default else permute.args[1:]
         field.permutation.node = input_node.name
         field.permutation.shape.extend(input_node.shape)
         field.permutation.opcode = permute.target.__name__.split(".")[0]
-        field.permutation.dims.extend(permute.args[1:])
+        field.permutation.dims.extend(dims)
         if output_dir is not None:
-            _write_tensor_to_file(
-                input_node.value, os.path.join(output_dir, f"{input_node.name}.bin"))
+            _write_tensor_to_file(input_node.value, os.path.join(output_dir, f"{input_node.name}.bin"))
 
     if output_dir is not None:
         _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
