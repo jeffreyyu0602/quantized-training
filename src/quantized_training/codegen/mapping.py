@@ -530,7 +530,12 @@ def gen_memory_offsets(model: GraphModule):
             continue
 
         # Propagate memory metadata for nop nodes
-        if _is_nop(node.target):
+        # TODO: slice op and non-zero select op should be handled better
+        if (
+            _is_nop(node.target)
+            or node.target == torch.ops.aten.slice.Tensor
+            or node.target == torch.ops.aten.select.int and node.args[1] != 0
+        ):
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             continue
 
@@ -543,6 +548,8 @@ def gen_memory_offsets(model: GraphModule):
             node.meta["memory"] = Partition(memory.start + offset, memory.end)
             continue
 
+        # We use the partition of the first input tensor since it preallocates
+        # memory for all the tensors in the stack operation (read below)
         if node.target == torch.ops.aten.stack.default:
             size = 0
             for n in node.args[0]:

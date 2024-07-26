@@ -1,6 +1,5 @@
 import argparse
 import copy
-import logging
 import os
 
 import torch
@@ -8,15 +7,17 @@ from datasets import load_dataset
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToJson
 from torch._export import capture_pre_autograd_graph
-from transformers import AutoModelForSemanticSegmentation, AutoModelForSequenceClassification, AutoImageProcessor
+from torchvision.models import resnet18, resnet50, ResNet18_Weights, ResNet50_Weights
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoModelForSemanticSegmentation,
+    AutoImageProcessor,
+)
 from tqdm import tqdm
 
 from quantized_training import add_training_args, get_quantizer, prepare_pt2e, convert_pt2e
 from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
-from quantized_training.quantizer.quantizer import QuantizationSpec
-
-logging.basicConfig(level=logging.DEBUG)
 
 
 def replace_interpolate():
@@ -127,6 +128,7 @@ def transform(
 
 if __name__ == "__main__":
     torch.manual_seed(0)
+    torch.set_printoptions(precision=10)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
@@ -135,7 +137,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if "resnet18" == args.model:
-        from torchvision.models import resnet18, ResNet18_Weights
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
@@ -155,7 +156,6 @@ if __name__ == "__main__":
         )
 
     if "qresnet18" == args.model:
-        from torchvision.models import resnet18, ResNet18_Weights
         model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
         model.bfloat16()
 
@@ -190,7 +190,6 @@ if __name__ == "__main__":
         )
 
     if "resnet50" == args.model:
-        from torchvision.models import resnet50, ResNet50_Weights
         model = resnet50(weights=ResNet50_Weights.DEFAULT).eval()
 
         module_names = [name for name, _ in model.named_modules()]
@@ -233,29 +232,48 @@ if __name__ == "__main__":
         pt_out = pt_out.logits
 
     if "mobilebert_no_embed" == args.model:
-        from transformers import MobileBertForSequenceClassification
-        model = MobileBertForSequenceClassification.from_pretrained("google/mobilebert-uncased")
-        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
-        position_ids = torch.ones((1, 128), dtype=torch.long)
-        input_shape = input_ids.size()
+        model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
 
+        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        input_shape = input_ids.size()
         attention_mask = torch.ones(input_shape)
-        head_mask = None
         token_type_ids = torch.zeros(input_shape, dtype=torch.long)
+        position_ids = torch.ones((1, 128), dtype=torch.long)
+        head_mask = None
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = model.mobilebert.get_extended_attention_mask(attention_mask, input_shape)
 
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = model.mobilebert.get_head_mask(head_mask, model.config.num_hidden_layers)
 
         embedding_output = model.mobilebert.embeddings(
-            input_ids=input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
         example_kwargs = {"return_dict": False}
+
+        class MobileBertNoEmbed(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mobilebert = model.mobilebert
+                self.classifier = model.classifier
+
+            def forward(self, *args, **kwargs):
+                hidden_states = model.mobilebert.encoder(*args, **kwargs)[0]
+                first_token_tensor = hidden_states[:, 0]
+                output = model.classifier(first_token_tensor)
+                return output
+
         pt_out, gm_out = transform(
-            model.mobilebert.encoder,
+            MobileBertNoEmbed(),
             example_args,
             example_kwargs,
             output_file="mobilebert",
@@ -268,6 +286,5 @@ if __name__ == "__main__":
         print("Results match")
     except Exception as e:
         print(e)
-        torch.set_printoptions(precision=10)
         print(pt_out)
         print(gm_out)
