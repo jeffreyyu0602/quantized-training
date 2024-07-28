@@ -563,9 +563,9 @@ def gen_memory_offsets(model: GraphModule):
         # the memory offset from the select index
         if node.target == torch.ops.aten.select.int:
             assert node.args[1] == 0, "Only support select on the first dimension"
-            memory = node.args[0].meta["memory"]
-            offset = node.args[2] * manager.calculate_tensor_size(node.args[0].shape[1:])
-            node.meta["memory"] = Partition(memory.start + offset, memory.end)
+            size = manager.calculate_tensor_size(node.shape)
+            start_offset = node.args[0].meta["memory"].start + node.args[2] * size
+            node.meta["memory"] = Partition(start_offset, start_offset + size)
             continue
 
         # We use the partition of the first input tensor since it preallocates
