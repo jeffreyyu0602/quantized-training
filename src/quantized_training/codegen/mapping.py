@@ -470,7 +470,28 @@ def fuse_operator(model: GraphModule):
             group.insert(0, transpose_node)
 
     for partition in fused_partitions:
-        _create_and_insert_subgraph(partition, model, named_modules)
+        node = _create_and_insert_subgraph(partition, model, named_modules)
+        named_modules = dict(model.named_modules(remove_duplicate=False))
+        gm = named_modules[node.target]
+
+        # If a permute operation is at the output, annotate the output node.
+        # Otherwise, annotate the immediate user of the permute operation.
+        for n in gm.graph.nodes:
+            if n.op != 'call_function' or n.target not in [
+                torch.ops.aten.permute.default,
+                torch.ops.aten.transpose.int,
+            ]:
+                continue
+
+            user = next(iter(n.users))
+            if user.op == 'output':
+                node.meta['permute'] = n
+            else:
+                input_node = n
+                while not _is_gemm_op(user.target) and not _is_elementwise_op(user.target):
+                    input_node = user
+                    user = next(iter(user.users))
+                input_node.meta['permute'] = n
 
     graph.lint()
     graph.eliminate_dead_code()
@@ -549,35 +570,34 @@ def gen_memory_offsets(model: GraphModule):
 
         # We use the partition of the first input tensor since it preallocates
         # memory for all the tensors in the stack operation (read below)
-        if node.target == torch.ops.aten.stack.default:
-            size = 0
-            for n in node.args[0]:
-                size += manager.calculate_tensor_size(n.shape)
-            memory = node.args[0][0].meta["memory"]
-            node.meta["memory"] = Partition(memory.start, memory.start + size)
+        if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
             continue
 
-        # For context layers, place them next to each other so that we can
+        # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
         maybe_stack_node = next(iter(node.users))
-        if maybe_stack_node.target == torch.ops.aten.stack.default:
+        if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            first_node = maybe_stack_node.args[0][0]
+            if (memory := first_node.meta.get("memory", None)) is None:
+                size = sum(manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0])
+                memory = manager.allocate_memory(first_node, size)
+                first_node.meta["memory"] = memory
+
             index = maybe_stack_node.args[0].index(node)
-            size = manager.calculate_tensor_size(node.shape)
-            if index == 0:
-                node.meta["memory"] = manager.allocate_memory(
-                    node, size * len(maybe_stack_node.args[0])
+            if index > 0:
+                start_offset = memory.start + sum(
+                    manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0][:index]
                 )
-            else:
-                memory = maybe_stack_node.args[0][0].meta["memory"]
-                start_offset = memory.start + index * size
+                size = manager.calculate_tensor_size(node.shape)
                 node.meta["memory"] = Partition(start_offset, start_offset + size)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None
 
-        # Propagate memory metadata inside each submodule. Different from above,
-        # all the reshape operations within each submodule are fused so we propagate
-        # memory metadata for these nodes as well.
+        # Propagate memory metadata for the inputs of submodules. Since reshape
+        # operations are fused within each submodule, we propagate memory metadata
+        # for these nodes as well.
         if node.op == "call_module":
             gm = named_modules[node.target]
             node_args = iter(node.args)
@@ -590,10 +610,11 @@ def gen_memory_offsets(model: GraphModule):
                 ]:
                     n.meta['memory'] = n.args[0].meta.get('memory', None)
 
-        # We don't copy the tensor for select, slice, and stack operations.
-        # Therefore, we need to find if their immediate users have been visited.
+        # We treat cat, select, slice, and stack operations as nops. Therefore,
+        # we need to find if their immediate users have been visited.
         def _node_visited(n):
             if _is_nop(n.target) or n.target in [
+                torch.ops.aten.cat.default,
                 torch.ops.aten.select.int,
                 torch.ops.aten.slice.Tensor,
                 torch.ops.aten.stack.default,
@@ -637,26 +658,6 @@ def gen_code(model, args, output_dir=None):
                     node.args, lambda n: n.value if isinstance(n, Node) else n
                 )
                 ShapeProp(gm).propagate(*n_args)
-
-                # If a permute operation is at the output, annotate the output node.
-                # Otherwise, annotate the immediate user of the permute operation.
-                for n in gm.graph.nodes:
-                    if n.op != 'call_function' or n.target not in [
-                        torch.ops.aten.permute.default,
-                        torch.ops.aten.transpose.int,
-                    ]:
-                        continue
-
-                    user = next(iter(n.users))
-                    if user.op == 'output':
-                        node.meta['permute'] = n
-                    else:
-                        input_node = n
-                        while not _is_gemm_op(user.target) and not _is_elementwise_op(user.target):
-                            input_node = user
-                            user = next(iter(user.users))
-                        input_node.meta['permute'] = n
-
                 for n in gm.graph.nodes:
                     param = _map_operation(n, output_dir)
                     if isinstance(param, (MatrixParam, VectorParam)):

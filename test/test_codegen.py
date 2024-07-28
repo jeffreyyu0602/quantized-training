@@ -219,6 +219,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
         )
         pt_out = pt_out.logits
+        gm_out = gm_out.logits
 
     if args.model == "mobilebert":
         model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
@@ -266,7 +267,6 @@ if __name__ == "__main__":
             output_file="mobilebert",
             output_dir=args.output_dir,
         )
-        pt_out = pt_out[0]
 
     if args.model == "bert":
         model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
@@ -314,7 +314,6 @@ if __name__ == "__main__":
             output_file="bert",
             output_dir=args.output_dir,
         )
-        pt_out = pt_out[0]
 
     try:
         assert torch.all(pt_out == gm_out)
