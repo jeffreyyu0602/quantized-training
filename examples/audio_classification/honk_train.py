@@ -20,11 +20,11 @@ from transformers import set_seed
 
 from honk_model import SpeechResModel, configs
 from quantized_training import (
-    add_training_args,
+    add_qspec_args,
     get_quantizer,
     prepare_pt2e,
     quantize,
-    run_task,
+    setup_logging,
 )
 
 logger = logging.getLogger(__name__)
@@ -252,10 +252,11 @@ def parse_args():
     parser.add_argument('--num_train_epochs', type=int, default=30)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--qat', action='store_true', help='Perform quantization-aware training.')
-    add_training_args(parser)
+    add_qspec_args(parser)
     return parser.parse_args()
 
 
+@setup_logging
 def main(args):
     if args.seed is not None:
         set_seed(args.seed)
@@ -386,4 +387,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)

@@ -37,7 +37,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 
 from utils_data import save_activations, save_errors, save_weights_and_grads
 from modeling_mobilebert import MobileBertForSequenceClassification
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import add_qspec_args, quantize, setup_logging
 
 
 logger = logging.getLogger(__name__)
@@ -186,7 +186,7 @@ def parse_args():
         action="store_true",
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
-    add_training_args(parser)
+    add_qspec_args(parser)
     parser.add_argument("--disable_dropout", action="store_true", help="Whether to disable dropout during training.")
     parser.add_argument("--grad_scale", type=float, default=1.0, help="The scale factor for the gradients.")
     args = parser.parse_args()
@@ -208,6 +208,7 @@ def parse_args():
     return args
 
 
+@setup_logging
 def main(args):
     # args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
@@ -601,6 +602,7 @@ def main(args):
 
     logger.info(f"Best metric:  {best_metric}")
 
+
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)

@@ -8,13 +8,13 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantized_training import (
-    add_training_args,
+    add_qspec_args,
     get_quantizer,
     prepare_pt2e,
     quantize,
-    run_task,
-    plot_layer_distribution,
+    plot_histogram,
     plot_layer_range,
+    setup_logging,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,11 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
-    add_training_args(parser)
+    add_qspec_args(parser)
     return parser.parse_args()
 
+
+@setup_logging
 def main(args):
     device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
     torch_dtype = (
@@ -129,9 +131,10 @@ def main(args):
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
-        plot_layer_distribution(model, args.output_dir)
+        plot_histogram(model, args.output_dir)
         plot_layer_range(model, args.output_dir)
+
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)

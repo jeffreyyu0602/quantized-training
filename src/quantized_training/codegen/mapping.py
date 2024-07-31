@@ -534,14 +534,18 @@ def _compose_accelerator_param(params: List):
     return accelerator_param
 
 
-def gen_memory_offsets(model: GraphModule):
+def gen_memory_offsets(model: GraphModule, separate_weights=False):
     named_modules = dict(model.named_modules(remove_duplicate=False))
-    manager = MemoryManager(20 * 1024 ** 3)
+    manager = MemoryManager(1024 ** 4)
 
     # Allocate memory for input tensors and parameters
+    weight_memory = MemoryManager(1024 ** 4, block_id=1) if separate_weights else manager
     for node in model.graph.nodes:
-        if node.op in ["placeholder", "get_attr"]:
+        if node.op == "placeholder":
             node.meta["memory"] = manager.allocate_memory(node)
+        elif node.op == "get_attr":
+            node.meta["memory"] = weight_memory.allocate_memory(node)
+    weight_memory.print_partitions()
 
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
@@ -565,7 +569,7 @@ def gen_memory_offsets(model: GraphModule):
             assert node.args[1] == 0, "Only support select on the first dimension"
             size = manager.calculate_tensor_size(node.shape)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
-            node.meta["memory"] = Partition(start_offset, start_offset + size)
+            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.block_id)
             continue
 
         # We use the partition of the first input tensor since it preallocates
@@ -590,7 +594,7 @@ def gen_memory_offsets(model: GraphModule):
                     manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0][:index]
                 )
                 size = manager.calculate_tensor_size(node.shape)
-                node.meta["memory"] = Partition(start_offset, start_offset + size)
+                node.meta["memory"] = Partition(start_offset, start_offset + size, memory.block_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None

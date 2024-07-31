@@ -4,12 +4,13 @@ import json
 import logging
 import os
 import sys
+from functools import wraps
 from pprint import pformat
 
 import wandb
 
 __all__ = [
-    "run_task",
+    "setup_logging",
 ]
 
 logger = logging.getLogger(__name__)
@@ -71,69 +72,73 @@ def write_bash_script(args, cmd):
         f.write('#!/bin/bash\n')
         f.write('python ' + ' '.join(cmd) + '\n')
 
-def run_task(run_fn, args):
-    if args.log_file == "datetime":
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        args.log_file = f'logs/{timestamp}.log'
+def setup_logging(func):
+    @wraps(func)
+    def wrapper(args, *func_args, **func_kwargs):
+        if args.log_file == "datetime":
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            args.log_file = f'logs/{timestamp}.log'
 
-    if args.log_file is not None:
-        dirname = os.path.dirname(args.log_file)
-        if dirname != "":
-            os.makedirs(dirname, exist_ok=True)
+        if args.log_file is not None:
+            dirname = os.path.dirname(args.log_file)
+            if dirname != "":
+                os.makedirs(dirname, exist_ok=True)
 
-    logging.basicConfig(
-        filename=args.log_file,
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=getattr(logging, args.log_level),
-    )
+        logging.basicConfig(
+            filename=args.log_file,
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=getattr(logging, args.log_level),
+        )
 
-    # Create W&B sweep from the sweep configuration
-    if args.sweep_config is not None:
-        if args.sweep_config.endswith(".json"):
-            with open(args.sweep_config, 'r') as file:
-                sweep_configuration = json.load(file)
+        # Create W&B sweep from the sweep configuration
+        if args.sweep_config is not None:
+            if args.sweep_config.endswith(".json"):
+                with open(args.sweep_config, 'r') as file:
+                    sweep_configuration = json.load(file)
+            else:
+                from .sweep_config import sweep_configurations
+                sweep_configuration = sweep_configurations[args.sweep_config]
+            args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
+
+        # Write training commands to a script
+        if args.action is not None:
+            command = copy.deepcopy(sys.argv)
+            if args.sweep_config:
+                index = command.index('--sweep_config')
+                command[index:index + 2] = ['--sweep_id', args.sweep_id]
+
+            index = command.index(args.action)
+            if args.action == "slurm":
+                write_slurm_script(args, command[:index])
+            elif args.action == "bash":
+                write_bash_script(args, command[:index])
+            return
+
+        def sweep_fn():
+            wandb.init()
+            sweep_args = copy.deepcopy(args)
+            # W&B does not support specifying the sweep range (min, max) as float types
+            # for grid searches. We use int types and multiply the learning rate by the
+            # actual value in the sweep function.
+            for k, v in wandb.config.items():
+                if k == "learning_rate" and isinstance(v, int):
+                    v = float(v) * args.learning_rate
+                setattr(sweep_args, k, v)
+            logger.info(f"Training/evaluation parameters: {pformat(vars(sweep_args))}")
+            func(args, *func_args, **func_kwargs)
+
+        if args.sweep_id is not None:
+            wandb.agent(args.sweep_id, function=sweep_fn, count=args.max_trials, project=args.project)
         else:
-            from .sweep_config import sweep_configurations
-            sweep_configuration = sweep_configurations[args.sweep_config]
-        args.sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
+            if args.project is not None:
+                wandb.init(
+                    project=args.project,
+                    name=args.run_name,
+                    id=args.run_id,
+                    resume="allow"
+                )
+            logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
+            func(args, *func_args, **func_kwargs)
 
-    # Write training commands to a script
-    if args.action is not None:
-        command = copy.deepcopy(sys.argv)
-        if args.sweep_config:
-            index = command.index('--sweep_config')
-            command[index:index + 2] = ['--sweep_id', args.sweep_id]
-
-        index = command.index(args.action)
-        if args.action == "slurm":
-            write_slurm_script(args, command[:index])
-        elif args.action == "bash":
-            write_bash_script(args, command[:index])
-        return
-
-    def sweep_fn():
-        wandb.init()
-        sweep_args = copy.deepcopy(args)
-        # W&B does not support specifying the sweep range (min, max) as float types
-        # for grid searches. We use int types and multiply the learning rate by the
-        # actual value in the sweep function.
-        for k, v in wandb.config.items():
-            if k == "learning_rate" and isinstance(v, int):
-                v = float(v) * args.learning_rate
-            setattr(sweep_args, k, v)
-        logger.info(f"Training/evaluation parameters: {pformat(vars(sweep_args))}")
-        run_fn(sweep_args)
-
-    if args.sweep_id is not None:
-        wandb.agent(args.sweep_id, function=sweep_fn, count=args.max_trials, project=args.project)
-    else:
-        if args.project is not None:
-            wandb.init(
-                project=args.project,
-                name=args.run_name,
-                id=args.run_id,
-                resume="allow"
-            )
-        logger.info(f"Training/evaluation parameters: {pformat(vars(args))}")
-        run_fn(args)
+    return wrapper

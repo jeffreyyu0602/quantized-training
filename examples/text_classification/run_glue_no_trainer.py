@@ -50,7 +50,7 @@ from transformers.utils.versions import require_version
 import wandb
 from peft import LoraConfig, TaskType, get_peft_model
 
-from quantized_training import add_training_args, quantize, run_task
+from quantized_training import add_qspec_args, quantize, setup_logging
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -204,7 +204,7 @@ def parse_args():
         action="store_true",
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
-    add_training_args(parser)
+    add_qspec_args(parser)
     args = parser.parse_args()
 
     # Sanity checks
@@ -224,6 +224,7 @@ def parse_args():
     return args
 
 
+@setup_logging
 def main(args):
     # args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
@@ -782,4 +783,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)

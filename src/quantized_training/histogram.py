@@ -10,7 +10,7 @@ from scipy.interpolate import make_interp_spline
 
 logger = logging.getLogger(__name__)
 
-def get_histogram_pre_process(model):
+def get_grouped_histogram(model):
     layer_groups = defaultdict(list)
     for name, module in model.named_modules():
         if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
@@ -21,9 +21,9 @@ def get_histogram_pre_process(model):
             layer_groups[prefix].append((layer_name, module.histogram.cpu().numpy()))
     return layer_groups
 
-def plot_layer_distribution(model, output_dir):
-    histc = get_histogram_pre_process(model)
-    for block_name, histograms in histc.items():
+def plot_histogram(model, output_dir):
+    histc = get_grouped_histogram(model)
+    for layer_name, histograms in histc.items():
         hist_sum = np.sum(np.stack([hist for _, hist in histograms]), axis=0)
         cumulative_sum = np.cumsum(hist_sum) / np.sum(hist_sum)
         min_quantile = np.searchsorted(cumulative_sum, 0.005)
@@ -46,14 +46,14 @@ def plot_layer_distribution(model, output_dir):
 
         plt.xlabel('Exponent Value')
         plt.ylabel('Frequency')
-        plt.title(f'{block_name} Tensor Distribution')
+        plt.title(f'{layer_name} Histogram')
         plt.legend(loc='upper left', bbox_to_anchor=(1, 1), ncol=1)
         plt.subplots_adjust(right=0.75)
-        plt.savefig(os.path.join(output_dir, f"{block_name}.png"))
+        plt.savefig(os.path.join(output_dir, f"{layer_name}.png"))
         plt.close()
 
 def plot_layer_range(model, output_dir):
-    histc = get_histogram_pre_process(model)
+    histc = get_grouped_histogram(model)
     # Step 1: Aggregate histograms by layer name
     layer_histograms = {}
     for _, histograms in histc.items():

@@ -47,15 +47,15 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-3. Create an argument parser and add relevant quantization arguments by calling add_training_args.
+3. Create an argument parser and add relevant quantization arguments by calling add_qspec_args.
 
 ```python
 import argparse
-from quantized_training import add_training_args
+from quantized_training import add_qspec_args
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_id', type=str, required=True, help='Pretrained model identifier')
-add_training_args(parser)
+add_qspec_args(parser)
 args= parser.parse_args()
 
 ```

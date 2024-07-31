@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum
 from typing import Optional
 
 from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
@@ -31,7 +31,7 @@ PARAMS_TYPE = {
     'block_size': int,
 }
 
-def _get_default_qmax(dtype):
+def get_default_qmax(dtype):
     if dtype == "posit8_1":
         return 64
 
@@ -79,7 +79,7 @@ class QuantizationSpec(QuantizationSpecBase):
             params[key] = PARAMS_TYPE[key](value)
 
         if 'qscheme' in params:
-            params.setdefault('quant_max', _get_default_qmax(params['dtype']))
+            params.setdefault('quant_max', get_default_qmax(params['dtype']))
             params.setdefault('amax_history_len', 50)
 
         return QuantizationSpec(**params)

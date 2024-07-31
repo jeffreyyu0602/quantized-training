@@ -13,12 +13,12 @@ __all__ = [
     "FusedAmaxObsFakeQuantize",
     "QConfig",
     "QuantizationSpec",
-    "add_training_args",
+    "add_qspec_args",
     "convert",
     "get_qconfig",
     "get_quantized_model",
     "get_quantizer",
-    "plot_layer_distribution",
+    "plot_histogram",
     "plot_layer_range",
     "prepare",
     "prepare_pt2e",
@@ -28,7 +28,7 @@ __all__ = [
     "quantize_to_fp8_e5m2",
     "quantize_to_posit",
     "replace_softmax",
-    "run_task",
+    "setup_logging",
 ]
 
 class qscheme: ...

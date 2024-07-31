@@ -3,9 +3,10 @@ from functools import reduce
 
 
 class Partition:
-    def __init__(self, start, end):
+    def __init__(self, start, end, block_id=None):
         self.start = start
         self.end = end
+        self.block_id = block_id
         self.node = None  # None means the partition is free
 
 class MemoryManager:
@@ -18,9 +19,10 @@ class MemoryManager:
         tensor_memory_map (dict): A dictionary mapping tensors to their allocated memory partitions.
 
     """
-    def __init__(self, total_memory):
+    def __init__(self, total_memory, block_id=0):
         self.total_memory = total_memory
-        self.memory_partitions = [Partition(start=0, end=total_memory)]
+        self.block_id = block_id
+        self.memory_partitions = [Partition(start=0, end=total_memory, block_id=self.block_id)]
         self.tensor_memory_map = {}
 
     def calculate_tensor_size(self, shape):
@@ -38,12 +40,14 @@ class MemoryManager:
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
-                    new_partition = Partition(start=partition.start + tensor_size, end=partition.end)
+                    new_partition = Partition(
+                        start=partition.start + tensor_size, end=partition.end, block_id=self.block_id
+                    )
                     partition.end = partition.start + tensor_size
                     self.memory_partitions.insert(self.memory_partitions.index(partition) + 1, new_partition)
                 self.tensor_memory_map[node] = partition
                 partition.node = node
-                return Partition(start=partition.start, end=partition.end)
+                return Partition(start=partition.start, end=partition.end, block_id=self.block_id)
         return None
 
     def free_memory(self, node):

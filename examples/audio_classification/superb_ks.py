@@ -7,7 +7,7 @@ from datasets import load_dataset
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 from torchaudio.sox_effects import apply_effects_file
 
-from quantized_training import add_training_args, run_task
+from quantized_training import add_qspec_args, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(description="Process model parameters.")
     parser.add_argument('--model_id', help='Fine-tuned model identifier')
-    add_training_args(parser)
+    add_qspec_args(parser)
     return parser.parse_args()
 
 
@@ -58,6 +58,7 @@ def sample_noise(example):
 #     return example
 
 
+@setup_logging
 def main(args):
     dataset = load_dataset("superb", "ks", split="test")
     dataset = dataset.map(map_to_array)
@@ -100,4 +101,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)

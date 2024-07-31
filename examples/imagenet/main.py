@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
 from tqdm import tqdm
-from quantized_training import add_training_args, quantize
+from quantized_training import add_qspec_args, quantize
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -89,7 +89,7 @@ parser.add_argument('--fuse_conv_bn', action="store_true", help="Whether to perf
 parser.add_argument('--model_id', default=None, help="Model checkpoint for evaluation.")
 parser.add_argument('--save_val_dataset', action="store_true", help="Whether to save data used for evaluation.")
 parser.add_argument('--output_dir', default=None, help="Directory to save model checkpoints.")
-add_training_args(parser)
+add_qspec_args(parser)
 
 best_acc1 = 0
 

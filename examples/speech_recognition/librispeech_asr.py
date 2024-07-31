@@ -8,11 +8,11 @@ from evaluate import load
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 from quantized_training import (
-    add_training_args,
+    add_qspec_args,
     quantize,
-    run_task,
-    plot_layer_distribution,
+    plot_histogram,
     plot_layer_range,
+    setup_logging,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,11 @@ def parse_args():
     parser.add_argument("--model_id", default="openai/whisper-tiny", help="Model to perform evaluation.")
     parser.add_argument("--batch_size", type=int, default=8, help="Evaluation batch size.")
     parser.add_argument("--output_dir", default=None, help="Output directory for scores.")
-    add_training_args(parser)
+    add_qspec_args(parser)
     return parser.parse_args()
 
+
+@setup_logging
 def main(args):
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
@@ -35,7 +37,10 @@ def main(args):
     librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        args.model_id, attn_implementation="eager", low_cpu_mem_usage=True, use_safetensors=True
+        args.model_id,
+        attn_implementation="eager",
+        low_cpu_mem_usage=True,
+        use_safetensors=True,
     ).to(device)
 
     processor = AutoProcessor.from_pretrained(args.model_id)
@@ -69,9 +74,11 @@ def main(args):
         with open(os.path.join(args.output_dir, "references.txt"), "w") as f:
             f.write('\n'.join(result["reference"]) + '\n')
         if args.record_histogram:
-            plot_layer_distribution(model, args.output_dir)
+            plot_histogram(model, args.output_dir)
             plot_layer_range(model, args.output_dir)
+
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)
+

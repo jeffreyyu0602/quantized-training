@@ -60,7 +60,7 @@ def _set_tensor_field(field, node, output_dir):
         field.shape.append(1)
 
     if (memory := node.meta.get("memory", None)) is not None:
-        field.memory.partition = 0
+        field.memory.partition = memory.block_id
         field.memory.offset = memory.start
 
     if (permute := node.meta.get("permute", None)) is not None:

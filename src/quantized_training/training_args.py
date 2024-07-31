@@ -8,7 +8,7 @@ from quantized_training.quantizer.quantizer import QuantizationSpec
 from quantized_training.utils import SLURM_ARGS
 
 __all__ = [
-    "add_training_args",
+    "add_qspec_args",
 ]
 
 
@@ -219,7 +219,7 @@ class QuantizationArguments:
     )
 
 
-def add_training_args(parser=None):
+def add_qspec_args(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="Run quantized inference or training.")
     #----------------------------------------------------

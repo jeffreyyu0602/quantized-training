@@ -15,11 +15,11 @@ from transformers import AutoModelForSemanticSegmentation
 
 from metrics import eval_metrics
 from quantized_training import (
-    add_training_args,
+    add_qspec_args,
     convert_pt2e,
     get_quantizer,
     prepare_pt2e,
-    run_task,
+    setup_logging,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,14 +70,13 @@ def np2tmp(array, temp_file_name=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process model parameters.")
-    parser.add_argument(
-        '--model_id', required=True, help='Fine-tuned model identifier'
-    )
+    parser.add_argument('--model_id', required=True, help='Fine-tuned model identifier')
     parser.add_argument('--attention_probs_qmax', type=int, default=None)
-    add_training_args(parser)
+    add_qspec_args(parser)
     return parser.parse_args()
 
 
+@setup_logging
 def main(args):
     dataset = load_dataset("scene_parse_150", split="validation")
 
@@ -224,4 +223,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_task(main, args)
+    main(args)
