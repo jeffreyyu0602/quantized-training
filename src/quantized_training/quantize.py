@@ -82,20 +82,20 @@ def quantize(model, args, inplace=True):
         args.force_scale_power_of_two
     )
 
+    for name, param in model.named_parameters():
+        if 'bias' in name:
+            continue
+        obs_or_fq = qconfig.weight(device=param.device)
+        if getattr(obs_or_fq, 'qscheme', None) is not None:
+            obs_or_fq(param.data)
+        param.data = obs_or_fq(param.data)
+
     propagate_config(model, 'qconfig', qconfig)
-    # We have custom LoRA implementation. It needs to be swapped to match exactly
-    # the same as the original trained model
+
+    # If doing quantization aware training, swap QAT modules. LoRA has custom
+    # implementation, so it needs to be swapped to match the training behavior.
     if args.do_train or args.lora_rank > 0:
         convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
-    else:
-        # statically quantize all the weights for faster inference
-        for name, param in model.named_parameters():
-            if 'bias' in name:
-                continue
-            obs_or_fq = qconfig.weight(device=param.device)
-            if getattr(obs_or_fq, 'qscheme', None) is not None:
-                obs_or_fq(param.data)
-            param.data = obs_or_fq(param.data)
 
     if args.activation is None:
         args.quantize_forward = None

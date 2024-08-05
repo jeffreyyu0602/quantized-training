@@ -15,7 +15,7 @@ from transformers import (
 )
 from tqdm import tqdm
 
-from quantized_training import add_training_args, get_quantizer, prepare_pt2e, convert_pt2e
+from quantized_training import add_qspec_args, convert_pt2e, get_quantizer, prepare_pt2e
 from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -93,9 +93,16 @@ def transform(
         gm = copy.deepcopy(model)
     else:
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
-        _convert_scalars_to_attrs(gm)
 
-    gm = fuse_operator(gm)
+    vector_stages = {
+        0: ["gemm"],
+        1: ["add", "sub", "mul", "div"],
+        2: ["exp"],
+        3: ["add", "mul", "div"],
+        4: ["relu", "gelu"],
+    }
+
+    gm = fuse_operator(gm, vector_stages)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
@@ -133,7 +140,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--output_dir", required=True, help="Output directory for generated tensor files")
-    add_training_args(parser)
+    add_qspec_args(parser)
     args = parser.parse_args()
 
     if args.model == "resnet18":

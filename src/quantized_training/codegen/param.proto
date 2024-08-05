@@ -27,18 +27,19 @@ message MXTensor {
   Tensor scale = 2;
 }
 
-// Tensor with hardware specific information
-// message TiledTensor {
-//   Tesnor tensor = 1;
-//   Memory memory = 2;
-// }
-
 // Define message for elementwise operations
 message VectorParam {
   string name = 1;
   string opcode = 2;
-  Tensor input = 3;
-  Tensor other = 4;
+  oneof input_type {
+    Tensor input = 3;
+    float input_scalar = 4;
+  }
+  oneof other_type {
+    Tensor other = 5;
+    float other_scalar = 6;
+  }
+  repeated int32 dim = 7;
 }
 
 // Define message for GEMM and layer norm

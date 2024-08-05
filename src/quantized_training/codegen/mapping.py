@@ -47,21 +47,25 @@ OPERATOR_MAPPINGS = {
 }
 
 
-def _decompose_node(graph: Graph, gm: GraphModule, args: List[Node], output_node: Node):
+def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node):
     arg_count = 0
     value_remap = {}
     for node in gm.graph.nodes:
         if node.op == 'placeholder':
-            value_remap[node] = args[arg_count]
+            value_remap[node] = orig_node.args[arg_count]
             arg_count += 1
         elif node.op == 'output':
-            output_node.replace_all_uses_with(value_remap[node.args[0][0]])
-        elif node.op == 'call_function':
-            with graph.inserting_before(output_node):
-                value_remap[node] = graph.node_copy(node, lambda n : value_remap[n])
+            orig_node.replace_all_uses_with(value_remap[node.args[0][0]])
+        else:
+            with model.graph.inserting_before(orig_node):
+                value_remap[node] = model.graph.node_copy(node, lambda n : value_remap[n])
+
             source_fn_st = value_remap[node].meta.setdefault('source_fn_stack', [])
             source_fn = source_fn_st[-1]
             source_fn_st[-1] = (value_remap[node].name, source_fn[1])
+
+            if node.op == "get_attr":
+                model.register_buffer(value_remap[node].target, gm.get_buffer(node.target))
     output_node = list(gm.graph.nodes)[-1]
     return list(map(lambda n: value_remap[n], output_node.args[0]))
 
@@ -78,7 +82,7 @@ class BMM(torch.nn.Module):
         return result
 
 
-def _decompose_bmm(graph: Graph, node: Node):
+def _decompose_bmm(model: GraphModule, node: Node):
     assert node.op == 'call_function' and node.target == torch.ops.aten.matmul.default
     input1 = torch.randn(node.args[0].meta['val'].size())
     input2 = torch.randn(node.args[1].meta['val'].size())
@@ -89,8 +93,8 @@ def _decompose_bmm(graph: Graph, node: Node):
         return None
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2))
-    output_nodes = _decompose_node(graph, gm, node.args, node)
-    graph.erase_node(node)
+    output_nodes = _decompose_node(model, gm, node)
+    model.graph.erase_node(node)
     return output_nodes[0]
 
 
@@ -137,8 +141,8 @@ def split_multi_head_attention(model: GraphModule):
             user_node = next(iter(user_node.users))
             fused_nodes.append(user_node)
 
-        output_1 = _decompose_bmm(graph, fused_nodes[0])
-        output_2 = _decompose_bmm(graph, fused_nodes[-1])
+        output_1 = _decompose_bmm(model, fused_nodes[0])
+        output_2 = _decompose_bmm(model, fused_nodes[-1])
         if output_1 is None and output_2 is None:
             continue
 
@@ -243,42 +247,43 @@ def _partitions_sequential(partitions: List[SourcePartition], node_order: Dict[N
     return True
 
 
-def make_partition(nodes: List[Node], module_type: Type) -> SourcePartition:
-    input_nodes = set()
-    output_nodes = set()
-    params = set()
-    for node in nodes:
-        for arg in node.args:
-            if isinstance(arg, Node) and arg not in nodes:
-                input_nodes.add(arg)
+def _make_node_partition(node: Node) -> SourcePartition:
+    module_type = None
+    if (source_fn_st := node.meta.get("source_fn_stack", None)) is not None:
+        module_type = source_fn_st[-1][1]
 
-        if node.op == "get_attr":
-            params.add(node)
+    def make_partition(nodes: List[Node], module_type: Type) -> SourcePartition:
+        input_nodes = set()
+        output_nodes = set()
+        params = set()
+        for node in nodes:
+            for arg in node.args:
+                if isinstance(arg, Node) and arg not in nodes:
+                    input_nodes.add(arg)
 
-        for user in node.users.keys():
-            if user not in nodes:
-                output_nodes.add(node)
+            if node.op == "get_attr":
+                params.add(node)
 
-    return SourcePartition(
-        nodes,
-        module_type,
-        list(input_nodes),
-        list(output_nodes),
-        list(params),  # type: ignore[arg-type]
-    )
+            for user in node.users.keys():
+                if user not in nodes:
+                    output_nodes.add(node)
+
+        return SourcePartition(
+            nodes,
+            module_type,
+            list(input_nodes),
+            list(output_nodes),
+            list(params),  # type: ignore[arg-type]
+        )
+
+    return make_partition([node], module_type)
 
 
-def fuse_operator(model: GraphModule):
+def fuse_operator(model: GraphModule, vector_stages=None):
+    if vector_stages is None:
+        vector_stages = {}
+
     split_multi_head_attention(model)
-
-    # TODO: this should be passed in as an argument
-    vector_stages = {
-        0: ["gemm"],
-        1: ["add", "sub", "mul", "div"],
-        2: ["exp"],
-        3: ["add", "mul", "div"],
-        4: ["relu", "gelu"],
-    }
 
     graph = model.graph
 
@@ -288,7 +293,8 @@ def fuse_operator(model: GraphModule):
 
     fused_partitions = []
     for stage, ops in vector_stages.items():
-        wanted_sources = [item for op in ops for item in OPERATOR_MAPPINGS[op]]
+        # If there is no corresponding mapping, we directly append the op string
+        wanted_sources = [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
 
@@ -303,11 +309,21 @@ def fuse_operator(model: GraphModule):
         for fp in fused_partitions:
             if isinstance(fp, SourcePartition) and fp.output_nodes[0] in fused_nodes:
                 continue
+            # There could be some nop nodes between the two partitions. We need to
+            # manually insert them into the fusion candidates.
+            last_node = fp[-1] if isinstance(fp, list) else fp
+            last_node = last_node.output_nodes[0]
+            node_iter = next(iter(last_node.users))
+            nop_nodes = []
+            while _is_nop(node_iter.target) and len(node_iter.users) == 1:
+                nop_nodes.append(_make_node_partition(node_iter))
+                node_iter = next(iter(node_iter.users))
+
             matched = False
             for p in partitions:
                 if p.output_nodes[0] in fused_nodes:
                     continue
-                candidate = [*fp, p] if isinstance(fp, list) else [fp, p]
+                candidate = [*fp, *nop_nodes, p] if isinstance(fp, list) else [fp, *nop_nodes, p]
                 if _partitions_sequential(candidate, node_order):
                     fusion_candidates.append(candidate)
                     fused_nodes[p.output_nodes[0]] = None
@@ -420,12 +436,7 @@ def fuse_operator(model: GraphModule):
                 input_node = output_node.args[0]
                 split_nodes_on_path(graph, reshape_nodes)
                 for new_user in input_node.users:
-                    if (source_fn_st := new_user.meta.get("source_fn_stack", None)):
-                        module_type = source_fn_st[-1][1]
-                    else:
-                        module_type = str(new_user.target).split(".")[-2]
-                    par = make_partition([new_user], module_type)
-                    partitions.insert(0, par)
+                    partitions.insert(0, _make_node_partition(new_user))
                 break
 
             user = next(iter(user.users))
@@ -538,14 +549,14 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
     named_modules = dict(model.named_modules(remove_duplicate=False))
     manager = MemoryManager(1024 ** 4)
 
-    # Allocate memory for input tensors and parameters
-    weight_memory = MemoryManager(1024 ** 4, block_id=1) if separate_weights else manager
+    # Allocate memory for inputs and model parameters
+    weights = MemoryManager(1024 ** 4, block_id=1) if separate_weights else manager
     for node in model.graph.nodes:
         if node.op == "placeholder":
             node.meta["memory"] = manager.allocate_memory(node)
         elif node.op == "get_attr":
-            node.meta["memory"] = weight_memory.allocate_memory(node)
-    weight_memory.print_partitions()
+            node.meta["memory"] = weights.allocate_memory(node)
+    weights.print_partitions()
 
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
@@ -604,15 +615,16 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
         # for these nodes as well.
         if node.op == "call_module":
             gm = named_modules[node.target]
-            node_args = iter(node.args)
-            for n in gm.graph.nodes:
-                if n.op == 'placeholder':
-                    n.meta['memory'] = next(node_args).meta.get('memory', None)
-                elif _is_nop(n.target) or n.target in [
-                    torch.ops.aten.permute.default,
-                    torch.ops.aten.transpose.int,
-                ]:
-                    n.meta['memory'] = n.args[0].meta.get('memory', None)
+            if isinstance(gm, GraphModule):
+                node_args = iter(node.args)
+                for n in gm.graph.nodes:
+                    if n.op == 'placeholder':
+                        n.meta['memory'] = next(node_args).meta.get('memory', None)
+                    elif _is_nop(n.target) or n.target in [
+                        torch.ops.aten.permute.default,
+                        torch.ops.aten.transpose.int,
+                    ]:
+                        n.meta['memory'] = n.args[0].meta.get('memory', None)
 
         # We treat cat, select, slice, and stack operations as nops. Therefore,
         # we need to find if their immediate users have been visited.

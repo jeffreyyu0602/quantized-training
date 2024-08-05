@@ -32,6 +32,7 @@ from torch.ao.quantization.quantizer import (
 from torch.ao.quantization import ObserverOrFakeQuantize
 
 import quantized_training as qt
+from quantized_training.codegen.mapping import _decompose_node
 from quantized_training.export_utils import _allow_exported_model_train_eval
 from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize, _get_fake_quant_fn
 from quantized_training.quantizer.quantizer import QuantizationSpec
@@ -284,7 +285,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
 
     input_node = node.args[0]
     if input_node.op == 'get_attr':
-        # quantize model parameter and remove fq module
+        # Quantize weight and remove the fq module
         param = param_dict[input_node.target]
         param.data = torch.ops.quantized_ops.quantize_symmetric(
             param.data,
@@ -294,17 +295,17 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         )
         node.replace_all_uses_with(input_node)
 
-        # annotate weight node dtype
+        # Annotate weight dtype
         input_node.meta["dtype"] = input_dtype
 
-        # reshape weight scale to match the shape of the output tensor.
+        # Reshape weight scale to match the shape of the output tensor.
         # This is necessary for per-channel weight quantization.
         if scale.ndim == 4:
             scale = scale.view(-1, 1, 1)
         elif scale.ndim == 2:
             scale = scale.view(-1)
     else:
-        # replace fake quant module with a quantize node
+        # Replace fake quant module with a quantize node
         with graph.inserting_before(node):
             qparam_node = create_getattr_from_value(
                 model, graph, next(iter(node.users)).name + "_scale_", scale)
@@ -317,11 +318,11 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 {}
             )
         node.replace_all_uses_with(quantized_node)
-        # annotate input node dtype
+        # Annotate input dtype
         quantized_node.meta["dtype"] = input_dtype
     graph.erase_node(node)
 
-    # insert a dequantize node after each user
+    # Insert a dequantize node after each user
     for user_node in orig_fq_users:
         user_node.meta["dtype"] = output_dtype
         maybe_dq_node = next(iter(user_node.users))
@@ -351,7 +352,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                     continue
                 user.replace_input_with(user_node, dequantized_node)
         else:
-            # update scale buffer used in the dequantize node
+            # Update scale buffer used in the dequantize node
             output_qparam_node = maybe_dq_node.args[1]
             scale = scale * model.get_buffer(output_qparam_node.target)
             model.register_buffer(output_qparam_node.target, scale)
@@ -367,14 +368,20 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         bias_node = user_node.args[2]
         if bias_node is not None:
             bias_node.meta["dtype"] = bias_dtype
+
+            # Save the original bias value because we need to update it with both
+            # the input and weight scale.
             param = param_dict[bias_node.target]
-            if not hasattr(param, 'orig_data'):
-                param.orig_data = param.data.clone()
-            fq_fn = _get_fake_quant_fn(bias_dtype)
+            if (bias_value := bias_node.meta.get("orig_data")) is None:
+                bias_value = param.data.clone()
+                bias_node.meta["orig_data"] = bias_value
+
             qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-            qvalues = fq_fn(qvalues)
+            if bias_dtype is not None:
+                fq_fn = _get_fake_quant_fn(bias_dtype)
+                qvalues = fq_fn(qvalues)
             param.data = torch.ops.quantized_ops.quantize_symmetric(
-                param.orig_data, scale.flatten(), bias_dtype, qvalues)
+                bias_value, scale.flatten(), bias_dtype, qvalues)
 
 
 def _fuse_dequantize_quantize(model: GraphModule):
@@ -501,13 +508,11 @@ def _replace_mx_observer_node(
     input: torch.Tensor,
     activation_post_process: torch.nn.Module,
 ) -> torch.Tensor:
-    dtype = activation_post_process.dtype
-    quant_max = activation_post_process.quant_max
     axes = activation_post_process.ch_axis
-    block_size = activation_post_process.block_size
-
     axes = [axes] if type(axes) == int else axes
     axes = [x + input.ndim if x < 0 else x for x in axes]
+
+    block_size = activation_post_process.block_size
 
     pad, orig_shape, padded_shape = _calculate_mx_padding(
         input, axes, block_size
@@ -515,8 +520,10 @@ def _replace_mx_observer_node(
 
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
+    emax = math.floor(math.log2(activation_post_process.quant_max))
+
     @torch._dynamo.assume_constant_result
-    def _get_qvalues():
+    def get_qvalues():
         return activation_post_process.qvalues
 
     class QuantizeMX(torch.nn.Module):
@@ -526,34 +533,16 @@ def _replace_mx_observer_node(
             reshaped = reshaped.view(padded_shape)
 
             amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
-            # shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype)))
-            shared_exp = torch.floor(torch.log2(amax))
-            shared_exp = shared_exp - math.floor(math.log2(quant_max))
+            shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
             scale = 2 ** shared_exp
-
-            qvalues = _get_qvalues()
-            input = torch.ops.quantized_ops.quantize_symmetric(input, scale, dtype, qvalues, block_size)
+            qvalues = get_qvalues()
+            input = torch.ops.quantized_ops.quantize_symmetric(
+                input, scale, activation_post_process.dtype, qvalues, block_size
+            )
             return (input, scale)
 
     gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
-    graph = model.graph
-
-    value_remap = {}
-    for n in gm.graph.nodes:
-        if n.op == 'placeholder':
-            value_remap[n] = node.args[0]
-        elif n.op == 'output':
-            node.replace_all_uses_with(value_remap[n.args[0][0]])
-        else:
-            with graph.inserting_before(node):
-                value_remap[n] = graph.node_copy(n, lambda n : value_remap[n])
-            if n.op == "get_attr":
-                model.register_buffer(value_remap[n].target, gm.get_buffer(n.target))
-            source_fn_st = value_remap[node].meta.setdefault('source_fn_stack', [])
-            source_fn = source_fn_st[-1]
-            source_fn_st[-1] = (value_remap[node].name, source_fn[1])
-    output_node = list(gm.graph.nodes)[-1]
-    return map(lambda n: value_remap[n], output_node.args[0])
+    return _decompose_node(model, gm, node)
 
 
 def _replace_observer_with_quantize_mx_node_decomposed(
@@ -650,10 +639,6 @@ def convert_pt2e(model: GraphModule):
                     _replace_observer_with_quantize_dequantize_node_decomposed(model, node, modules)
 
     _fuse_dequantize_quantize(model)
-
-    model.graph.print_tabular()
-    for name, param in model.named_parameters():
-        print(name, param)
 
     model.graph.lint()
     model.recompile()

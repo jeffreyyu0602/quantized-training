@@ -48,7 +48,8 @@ def quantize_symmetric(
 
     if block_size is not None:
         scale = _broadcast_shapes(scale, input, block_size)
-    return _quantize(input / scale, qvalues)
+    output = _quantize(input / scale, qvalues)
+    return torch.nan_to_num(output)
 
 quantized_decomposed_lib.define(
     "dequantize_symmetric(Tensor input, Tensor scale, str dtype, Tensor qvalues) -> Tensor")

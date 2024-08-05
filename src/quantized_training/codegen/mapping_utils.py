@@ -200,28 +200,31 @@ def _is_gemm_op(op: Callable) -> bool:
 
 def _is_elementwise_op(op: Callable) -> bool:
     return op in [
+        torch.ops.aten.abs.default,
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add_.Tensor,
-        torch.ops.aten.sub.Tensor,
-        torch.ops.aten.sub_.Tensor,
-        torch.ops.aten.mul.Tensor,
-        torch.ops.aten.mul_.Tensor,
+        torch.ops.aten.amax.default,
         torch.ops.aten.div.Tensor,
         torch.ops.aten.div_.Tensor,
         torch.ops.aten.exp.default,
-        torch.ops.aten.pow.Scalar,
-        torch.ops.aten.log.default,
-        torch.ops.aten.log2.default,
-        torch.ops.aten.reciprocal.default,
-        torch.ops.aten.sqrt.default,
         torch.ops.aten.floor.default,
-        torch.ops.aten.tanh.default,
-        torch.ops.aten.relu.default,
-        torch.ops.aten.relu_.default,
         torch.ops.aten.gelu.default,
         torch.ops.aten.gelu_.default,
-        torch.ops.quantized_ops.quantize_symmetric,
-        torch.ops.quantized_ops.dequantize_symmetric,
+        torch.ops.aten.log.default,
+        torch.ops.aten.log2.default,
+        torch.ops.aten.mul.Tensor,
+        torch.ops.aten.mul_.Tensor,
+        torch.ops.aten.pow.Scalar,
+        torch.ops.aten.reciprocal.default,
+        torch.ops.aten.relu.default,
+        torch.ops.aten.relu_.default,
+        torch.ops.aten.sqrt.default,
+        torch.ops.aten.sub.Tensor,
+        torch.ops.aten.sub_.Tensor,
+        torch.ops.aten.tanh.default,
+        torch.ops.quantized_ops.dequantize_symmetric.default,
+        torch.ops.quantized_ops.quantize_symmetric.default,
+
     ]
 
 
@@ -246,10 +249,20 @@ def map_elementwise(node, output_dir):
     param = VectorParam()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
-    _set_tensor_field(param.input, node.args[0], output_dir)
-    if len(node.args) > 1:
-        _set_tensor_field(param.other, node.args[1], output_dir)
+    if isinstance(node.args[0], Node):
+        _set_tensor_field(param.input, node.args[0], output_dir)
+    else:
+        param.input_scalar = node.args[0]
 
+    if len(node.args) > 1:
+        if isinstance(node.args[1], Node):
+            _set_tensor_field(param.other, node.args[1], output_dir)
+        elif node.target == torch.ops.aten.amax.default:
+            param.dim.extend(node.args[1])
+        else:
+            param.other_scalar = node.args[1]
+
+    # TODO: do not overload opcode. Add a new field called dtype for quantize/dequantize operations
     if node.target == torch.ops.quantized_ops.quantize_symmetric:
         param.opcode += "_to_" + node.args[2]
     elif node.target == torch.ops.quantized_ops.dequantize_symmetric:
