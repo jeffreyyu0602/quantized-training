@@ -16,7 +16,15 @@ from transformers import (
 from tqdm import tqdm
 
 from quantized_training import add_qspec_args, convert_pt2e, get_quantizer, prepare_pt2e
-from quantized_training.codegen.mapping import gen_code, gen_compute_graph, fuse_operator
+from quantized_training.codegen import (
+    MemoryManager,
+    ShapeProp,
+    allocate_activations,
+    allocate_weights,
+    fuse_operator,
+    gen_code,
+    gen_compute_graph,
+)
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 
@@ -68,11 +76,11 @@ def _pair_conv_bn(layers):
     return pairs
 
 
-def flatten(mixed_list):
+def flatten_args(mixed_list):
     flattened_list = []
     for element in mixed_list:
         if isinstance(element, list):
-            flattened_list.extend(flatten(element))
+            flattened_list.extend(flatten_args(element))
         else:
             flattened_list.append(element)
     return flattened_list
@@ -93,6 +101,7 @@ def transform(
         gm = copy.deepcopy(model)
     else:
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
+        _convert_scalars_to_attrs(gm)
 
     vector_stages = {
         0: ["gemm"],
@@ -108,7 +117,22 @@ def transform(
     pt_out = model(*example_args, **example_kwargs)
     gm_out = gm(*example_args, *list(example_kwargs.values()))
 
-    uplifted_args = flatten(list(example_args)) + list(example_kwargs.values())
+    uplifted_args = flatten_args(list(example_args)) + list(example_kwargs.values())
+
+    ShapeProp(gm).propagate(*uplifted_args)
+
+    manager = MemoryManager(1024 ** 4)
+    allocate_weights(gm, manager)
+    allocate_activations(gm, manager)
+
+    manager.print_partitions()
+    print("\nMemory allocated to tensors:")
+    for node in gm.graph.nodes:
+        if (partition := node.meta.get('memory', None)) is None:
+            print(f"Node {node.name} does not have memory allocated")
+            continue
+        print(f"{node.name}: {partition.start}, {partition.end}")
+
     params = gen_code(
         gm,
         uplifted_args,

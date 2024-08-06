@@ -3,11 +3,12 @@ from functools import reduce
 
 
 class Partition:
-    def __init__(self, start, end, block_id=None):
+    def __init__(self, start, end, partition_id=None):
         self.start = start
         self.end = end
-        self.block_id = block_id
+        self.partition_id = partition_id
         self.node = None  # None means the partition is free
+
 
 class MemoryManager:
     """
@@ -19,10 +20,13 @@ class MemoryManager:
         tensor_memory_map (dict): A dictionary mapping tensors to their allocated memory partitions.
 
     """
-    def __init__(self, total_memory, block_id=0):
+    total_partitions = 0
+
+    def __init__(self, total_memory):
         self.total_memory = total_memory
-        self.block_id = block_id
-        self.memory_partitions = [Partition(start=0, end=total_memory, block_id=self.block_id)]
+        self.partition_id = MemoryManager.total_partitions
+        MemoryManager.total_partitions += 1
+        self.memory_partitions = [Partition(start=0, end=total_memory, partition_id=self.partition_id)]
         self.tensor_memory_map = {}
 
     def calculate_tensor_size(self, shape):
@@ -41,13 +45,15 @@ class MemoryManager:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
                     new_partition = Partition(
-                        start=partition.start + tensor_size, end=partition.end, block_id=self.block_id
+                        start=partition.start + tensor_size,
+                        end=partition.end,
+                        partition_id=self.partition_id,
                     )
                     partition.end = partition.start + tensor_size
                     self.memory_partitions.insert(self.memory_partitions.index(partition) + 1, new_partition)
                 self.tensor_memory_map[node] = partition
                 partition.node = node
-                return Partition(start=partition.start, end=partition.end, block_id=self.block_id)
+                return Partition(start=partition.start, end=partition.end, partition_id=self.partition_id)
         return None
 
     def free_memory(self, node):

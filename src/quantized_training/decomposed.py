@@ -13,7 +13,7 @@ def _broadcast_shapes(input, target, block_size=32):
             break
         if input.shape[dim] != target.shape[dim]:
             input = torch.repeat_interleave(input, block_size, dim)
-    if not list(input.shape) == list(target.shape):
+    if list(input.shape) != list(target.shape):
         slices = [slice(0, x) for x in target.shape]
         input = input[slices]
     return input

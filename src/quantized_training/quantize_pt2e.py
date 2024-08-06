@@ -268,8 +268,6 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     assert isinstance(node.target, str)
     activation_post_process = modules[node.target]
 
-    orig_fq_users = list(node.users.keys())
-
     param_dict = dict(model.named_parameters())
 
     input_dtype = activation_post_process.dtype
@@ -278,10 +276,12 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     if input_dtype in _DTYPE_TO_QVALUE_DTYPE:
         output_dtype, bias_dtype = _DTYPE_TO_QVALUE_DTYPE[input_dtype].values()
 
-    device = assert_and_get_unique_device(activation_post_process)
-    # Get the dtype of the model and later convert scale to this dtype
     param = next(iter(model.parameters()))
     scale = activation_post_process.scale.to(param.dtype)
+
+    orig_fq_users = list(node.users.keys())
+
+    device = assert_and_get_unique_device(activation_post_process)
 
     input_node = node.args[0]
     if input_node.op == 'get_attr':
@@ -555,9 +555,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     assert isinstance(node.target, str)
     activation_post_process = modules[node.target]
 
-    orig_fq_users = list(node.users.keys())
-
     param_dict = dict(model.named_parameters())
+
+    orig_fq_users = list(node.users.keys())
 
     input_dtype = activation_post_process.dtype
 
@@ -589,14 +589,13 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         # annotate weight node dtype
         input_node.meta["dtype"] = input_dtype
     else:
-        device = assert_and_get_unique_device(activation_post_process)
-        example_input = torch.randn(input_node.meta['val'].shape).to(device)
         quantized_node, qparam_node_inp = _replace_mx_observer_node(
             model,
             node,
-            example_input,
+            input_node.meta['val'],
             activation_post_process,
         )
+        quantized_node.meta["dtype"] = input_dtype
     graph.erase_node(node)
 
     for user_node in orig_fq_users:

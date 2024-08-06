@@ -44,9 +44,12 @@ def _get_module_name(n: Node):
 
 def _set_tensor_field(field, node, output_dir):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
-        f"Expected a Node with value attribute, got {node}"
+        f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
     )
+
     tensor = node.value
+    if output_dir is not None:
+        _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
 
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
@@ -60,21 +63,21 @@ def _set_tensor_field(field, node, output_dir):
         field.shape.append(1)
 
     if (memory := node.meta.get("memory", None)) is not None:
-        field.memory.partition = memory.block_id
+        field.memory.partition = memory.partition_id
         field.memory.offset = memory.start
 
-    if (permute := node.meta.get("permute", None)) is not None:
-        input_node = permute.args[0]
-        dims = permute.args[1] if permute.target == torch.ops.aten.permute.default else permute.args[1:]
+    if (reshape := node.meta.get("reshape", None)) is not None:
+        input_node = reshape.args[0]
+        if output_dir is not None:
+            _write_tensor_to_file(
+                input_node.value,
+                os.path.join(output_dir, f"{input_node.name}.bin")
+            )
         field.permutation.node = input_node.name
         field.permutation.shape.extend(input_node.shape)
-        field.permutation.opcode = permute.target.__name__.split(".")[0]
-        field.permutation.dims.extend(dims)
-        if output_dir is not None:
-            _write_tensor_to_file(input_node.value, os.path.join(output_dir, f"{input_node.name}.bin"))
-
-    if output_dir is not None:
-        _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
+        field.permutation.opcode = reshape.target.__name__.split(".")[0]
+        is_permute = reshape.target == torch.ops.aten.permute.default
+        field.permutation.dims.extend(reshape.args[1] if is_permute else reshape.args[1:])
 
 
 def _set_repeated_field(field, value):

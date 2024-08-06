@@ -46,6 +46,8 @@ OPERATOR_MAPPINGS = {
     "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul],
 }
 
+DEFAULT_MEMORY_SIZE = 1024 ** 4
+
 
 def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node):
     arg_count = 0
@@ -84,8 +86,8 @@ class BMM(torch.nn.Module):
 
 def _decompose_bmm(model: GraphModule, node: Node):
     assert node.op == 'call_function' and node.target == torch.ops.aten.matmul.default
-    input1 = torch.randn(node.args[0].meta['val'].size())
-    input2 = torch.randn(node.args[1].meta['val'].size())
+    input1 = node.args[0].meta['val']
+    input2 = node.args[1].meta['val']
 
     input1_dims = sum(1 for d in input1.shape if d > 1)
     input2_dims = sum(1 for d in input2.shape if d > 1)
@@ -163,11 +165,11 @@ def split_multi_head_attention(model: GraphModule):
 
         from torch.fx.experimental import proxy_tensor
 
-        # manually update the fake tensor metavalue of each node
+        # Update tensor metadata of each node
         for group in node_groups:
             for node in group:
                 args = torch.fx.node.map_aggregate(
-                    node.args, lambda n: torch.randn(n.meta['val'].size()) if isinstance(n, Node) else n
+                    node.args, lambda n: n.meta['val'] if isinstance(n, Node) else n
                 )
                 out = node.target(*args)
                 node.meta['val'] = proxy_tensor.extract_val(out)
@@ -496,13 +498,13 @@ def fuse_operator(model: GraphModule, vector_stages=None):
 
             user = next(iter(n.users))
             if user.op == 'output':
-                node.meta['permute'] = n
+                node.meta['reshape'] = n
             else:
                 input_node = n
                 while not _is_gemm_op(user.target) and not _is_elementwise_op(user.target):
                     input_node = user
                     user = next(iter(user.users))
-                input_node.meta['permute'] = n
+                input_node.meta['reshape'] = n
 
     graph.lint()
     graph.eliminate_dead_code()
@@ -545,18 +547,24 @@ def _compose_accelerator_param(params: List):
     return accelerator_param
 
 
-def gen_memory_offsets(model: GraphModule, separate_weights=False):
-    named_modules = dict(model.named_modules(remove_duplicate=False))
-    manager = MemoryManager(1024 ** 4)
+def allocate_weights(model: GraphModule, manager: MemoryManager = None):
+    if manager is None:
+        manager = MemoryManager(DEFAULT_MEMORY_SIZE)
 
-    # Allocate memory for inputs and model parameters
-    weights = MemoryManager(1024 ** 4, block_id=1) if separate_weights else manager
+    for node in model.graph.nodes:
+        if node.op == "get_attr":
+            node.meta["memory"] = manager.allocate_memory(node)
+
+
+def allocate_activations(model: GraphModule, manager: MemoryManager = None):
+    if manager is None:
+        manager = MemoryManager(DEFAULT_MEMORY_SIZE)
+
     for node in model.graph.nodes:
         if node.op == "placeholder":
             node.meta["memory"] = manager.allocate_memory(node)
-        elif node.op == "get_attr":
-            node.meta["memory"] = weights.allocate_memory(node)
-    weights.print_partitions()
+
+    named_modules = dict(model.named_modules(remove_duplicate=False))
 
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
@@ -580,7 +588,7 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
             assert node.args[1] == 0, "Only support select on the first dimension"
             size = manager.calculate_tensor_size(node.shape)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
-            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.block_id)
+            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
 
         # We use the partition of the first input tensor since it preallocates
@@ -605,7 +613,7 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
                     manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0][:index]
                 )
                 size = manager.calculate_tensor_size(node.shape)
-                node.meta["memory"] = Partition(start_offset, start_offset + size, memory.block_id)
+                node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None
@@ -613,18 +621,17 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
         # Propagate memory metadata for the inputs of submodules. Since reshape
         # operations are fused within each submodule, we propagate memory metadata
         # for these nodes as well.
-        if node.op == "call_module":
+        if node.op == "call_module" and isinstance(named_modules[node.target], GraphModule):
             gm = named_modules[node.target]
-            if isinstance(gm, GraphModule):
-                node_args = iter(node.args)
-                for n in gm.graph.nodes:
-                    if n.op == 'placeholder':
-                        n.meta['memory'] = next(node_args).meta.get('memory', None)
-                    elif _is_nop(n.target) or n.target in [
-                        torch.ops.aten.permute.default,
-                        torch.ops.aten.transpose.int,
-                    ]:
-                        n.meta['memory'] = n.args[0].meta.get('memory', None)
+            node_args = iter(node.args)
+            for n in gm.graph.nodes:
+                if n.op == 'placeholder':
+                    n.meta['memory'] = next(node_args).meta.get('memory', None)
+                elif _is_nop(n.target) or n.target in [
+                    torch.ops.aten.permute.default,
+                    torch.ops.aten.transpose.int,
+                ]:
+                    n.meta['memory'] = n.args[0].meta.get('memory', None)
 
         # We treat cat, select, slice, and stack operations as nops. Therefore,
         # we need to find if their immediate users have been visited.
@@ -641,29 +648,19 @@ def gen_memory_offsets(model: GraphModule, separate_weights=False):
         # Free the memory of nodes whose users have all been visited.
         active_nodes = list(manager.tensor_memory_map.keys())
         for n in active_nodes:
-            if n.op not in ["call_function", "call_module"]:
+            if n.op not in ["placeholder", "call_function", "call_module"]:
                 continue
             if all(_node_visited(user) for user in n.users):
                 manager.free_memory(n)
-
-    manager.print_partitions()
-
-    for node in model.graph.nodes:
-        if (partition := node.meta.get('memory', None)) is None:
-            print(f"Node {node.name} does not have memory allocated")
-            continue
-        print(f"{node.name}: {partition.start}, {partition.end}")
 
 
 def gen_code(model, args, output_dir=None):
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
 
-    ShapeProp(model).propagate(*args)
-    gen_memory_offsets(model)
-
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
+    ShapeProp(model).propagate(*args)
     model_params = ModelParams()
     for node in model.graph.nodes:
         params = []
