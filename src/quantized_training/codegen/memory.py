@@ -1,6 +1,8 @@
 import operator
 from functools import reduce
 
+import torch
+
 
 class Partition:
     def __init__(self, start, end, partition_id=None):
@@ -8,6 +10,9 @@ class Partition:
         self.end = end
         self.partition_id = partition_id
         self.node = None  # None means the partition is free
+
+    def __str__(self):
+        return f"Partition(start={self.start}, end={self.end}, partition_id={self.partition_id})"
 
 
 class MemoryManager:
@@ -39,8 +44,24 @@ class MemoryManager:
             print(f"Node {node} does not have a shape attribute")
             return None
 
-        # FIXME: assumes double precision
-        tensor_size = size or self.calculate_tensor_size(node.shape) * 2
+        tensor_size = size or self.calculate_tensor_size(node.shape)
+
+        # TODO: this should be removed for proper double precision handling
+        # On Minotaur, biases are hardcoded to double precision. Attention masks
+        # are implemented as biases. Therefore, they need to be in double
+        # precision as well. Softmax inputs use double precision for better accuracy.
+        if node.op == "get_attr" and len(node.shape) == 1:
+            tensor_size *= 2
+            print(f"Node {node} is a bias tensor")
+
+        if node.op == "placeholder" and len([d for d in node.shape if d > 1]) == 1:
+            tensor_size *= 2
+            print(f"Node {node} is an attention mask")
+
+        if next(iter(node.users)).target == torch.ops.aten.softmax.int:
+            tensor_size *= 2
+            print(f"Node {node} is an input to softmax")
+
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
@@ -75,5 +96,5 @@ class MemoryManager:
 
     def print_partitions(self):
         for partition in self.memory_partitions:
-            status = 'free' if partition.node is None else 'allocated'
-            print(f"Partition from {partition.start} to {partition.end} is {status}. Nodes: {partition.node}")
+            status = 'free' if partition.node is None else partition.node.name
+            print(f"Partition from {partition.start} to {partition.end}: {status}")
