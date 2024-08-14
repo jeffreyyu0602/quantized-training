@@ -1,5 +1,4 @@
 import argparse
-import copy
 import os
 import random
 import shutil
@@ -8,7 +7,6 @@ import warnings
 from enum import Enum
 
 import torch
-import torch.ao.nn.intrinsic as nni
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -82,13 +80,19 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
-parser.add_argument('--num_eval_samples', default=1000, help="Number of samples for evaluation.")
-parser.add_argument('--num_train_samples_per_epoch', default=50000, help="Number of samples to train per epoch")
-parser.add_argument('--use_2x2_maxpool', action="store_true", help="Whether to use 2x2 maxpool.")
-parser.add_argument('--fuse_conv_bn', action="store_true", help="Whether to perform quantization aware training.")
+parser.add_argument('--num_eval_samples', default=None,
+                    help="Number of samples to evaluate on.")
+parser.add_argument('--num_train_samples_per_epoch', default=50000, type=int,
+                    help="Number of samples to train on per epoch")
+parser.add_argument('--max_pool2x2', action="store_true",
+                    help="Whether to replace 3x3 maxpool with 2x2.")
+parser.add_argument('--bn_folding', action="store_true",
+                    help="Whether to fold batch normalization into conv.")
 parser.add_argument('--model_id', default=None, help="Model checkpoint for evaluation.")
-parser.add_argument('--save_val_dataset', action="store_true", help="Whether to save data used for evaluation.")
-parser.add_argument('--output_dir', default=None, help="Directory to save model checkpoints.")
+parser.add_argument('--save_val_dataset', action="store_true",
+                    help="Whether to save the validation dataset.")
+parser.add_argument('--output_dir', default=None,
+                    help="Directory to save model checkpoints.")
 add_qspec_args(parser)
 
 best_acc1 = 0
@@ -202,14 +206,14 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         device = torch.device("cpu")
 
-    if args.use_2x2_maxpool:
+    if args.max_pool2x2:
         for module in model.modules():
             if isinstance(module, nn.MaxPool2d):
                 module.kernel_size = 2
                 module.stride = 2
                 module.padding = 0
 
-    if args.fuse_conv_bn:
+    if args.bn_folding:
         from utils import _pair_conv_bn
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
@@ -218,6 +222,8 @@ def main_worker(gpu, ngpus_per_node, args):
     quantize(model, args)
 
     example_inputs = torch.randn(1, 3, 224, 224).to(device)
+    if args.bf16:
+        example_inputs = example_inputs.bfloat16()
     with torch.no_grad():
         model(example_inputs)
 
@@ -317,7 +323,8 @@ def main_worker(gpu, ngpus_per_node, args):
             ]))
 
     # Randomly select a subset of samples for evaluation and optionally save data
-    args.num_eval_samples = int(args.num_eval_samples) if args.num_eval_samples is not None else None
+    if args.num_eval_samples is not None:
+        args.num_eval_samples = int(args.num_eval_samples)
     if args.num_eval_samples is not None and args.num_eval_samples < len(val_dataset):
         indices = random.sample(range(len(val_dataset)), args.num_eval_samples)
         val_dataset = Subset(val_dataset, indices=indices)
