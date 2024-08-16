@@ -1,8 +1,10 @@
 import argparse
+import itertools
 import os
 import re
 import subprocess
 import sys
+
 import pandas as pd
 
 models = [
@@ -24,7 +26,7 @@ operations = [
 dtypes = ['posit8_1', 'e4m3']
 
 
-def _run_squad(model, ops, dtype, log_file, gpu):
+def run_evaluation(model, ops, dtype, log_file, gpu):
     command = [
         'python', 'examples/question_answering/run_qa_no_trainer.py',
         '--model_name_or_path', model,
@@ -45,7 +47,7 @@ def _run_squad(model, ops, dtype, log_file, gpu):
     subprocess.run(command, check=True)
 
 
-def _read_scores(log_file, out_file):
+def extract_f1_scores(log_file, out_file):
     with open(log_file, 'r') as file, open(out_file + '.out', 'w') as out:
         scores = (re.findall(r"'f1': (\d+\.\d+)", file.read()))
         for i in range(0, len(scores), 10):
@@ -53,7 +55,7 @@ def _read_scores(log_file, out_file):
         return scores
 
 
-def _write_csv(scores, out_file):
+def write_csv(scores, out_file):
     assert len(scores) == 50, "Expected 50 scores, got %d" % len(scores)
 
     rows = [
@@ -81,11 +83,9 @@ def _write_csv(scores, out_file):
 
 
 def run_experiments(args):
-    for ops in operations:
-        for model in models:
-            for dtype in dtypes:
-                _run_squad(model, ops, dtype, args.log_file, args.gpu)
-                scores = _read_scores(args.log_file, args.out_file)
+    for ops, model, dtype in itertools.product(operations, models, dtypes):
+        run_evaluation(model, ops, dtype, args.log_file, args.gpu)
+        scores = extract_f1_scores(args.log_file, args.out_file)
     print("All commands executed.")
 
     rows = [
@@ -113,13 +113,11 @@ def run_experiments(args):
 
 
 def run_experiments_v2(args):
-    for model in models:
-        for ops in operations:
-            for dtype in dtypes:
-                _run_squad(model, ops, dtype, args.log_file, args.gpu)
-                scores = _read_scores(args.log_file, args.out_file)
+    for model, ops, dtype in itertools.product(models, operations, dtypes):
+        run_evaluation(model, ops, dtype, args.log_file, args.gpu)
+        scores = extract_f1_scores(args.log_file, args.out_file)
     print("All commands executed.")
-    _write_csv(scores, args.out_file)
+    write_csv(scores, args.out_file)
 
 
 if __name__ == "__main__":
@@ -131,8 +129,8 @@ if __name__ == "__main__":
 
     if os.path.exists(args.log_file) and os.path.getsize(args.log_file) > 0:
         print("Log file exists and is not empty. Extracting scores...")
-        scores = _read_scores(args.log_file, args.out_file)
-        _write_csv(scores, args.out_file)
+        scores = extract_f1_scores(args.log_file, args.out_file)
+        write_csv(scores, args.out_file)
         sys.exit(0)
 
     run_experiments_v2(args)

@@ -219,6 +219,9 @@ def main_worker(gpu, ngpus_per_node, args):
         modules_to_fuse = _pair_conv_bn(module_names)
         model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
+    # If we are doing QAT or inference with batch norm folded, we need to swap
+    # the intrinsic modules with their quantized counterparts.
+    args.do_train = args.bn_folding or not args.evaluate
     quantize(model, args)
 
     example_inputs = torch.randn(1, 3, 224, 224).to(device)
