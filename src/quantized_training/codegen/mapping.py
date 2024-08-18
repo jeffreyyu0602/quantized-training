@@ -49,27 +49,34 @@ OPERATOR_MAPPINGS = {
 DEFAULT_MEMORY_SIZE = 1024 ** 4
 
 
-def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node):
-    arg_count = 0
+def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> List[Node]:
+    arg_index = 0
     value_remap = {}
     for node in gm.graph.nodes:
         if node.op == 'placeholder':
-            value_remap[node] = orig_node.args[arg_count]
-            arg_count += 1
+            value_remap[node] = orig_node.args[arg_index]
+            arg_index += 1
         elif node.op == 'output':
             orig_node.replace_all_uses_with(value_remap[node.args[0][0]])
         else:
             with model.graph.inserting_before(orig_node):
-                value_remap[node] = model.graph.node_copy(node, lambda n : value_remap[n])
-
-            source_fn_st = value_remap[node].meta.setdefault('source_fn_stack', [])
-            source_fn = source_fn_st[-1]
-            source_fn_st[-1] = (value_remap[node].name, source_fn[1])
+                new_node = model.graph.node_copy(node, lambda n : value_remap[n])
+            value_remap[node] = new_node
 
             if node.op == "get_attr":
-                model.register_buffer(value_remap[node].target, gm.get_buffer(node.target))
+                model.register_buffer(new_node.target, gm.get_buffer(node.target))
+
+            # Update the node name in the source_fn_stack, which is used in get_source_partitions
+            if (source_fn_st := new_node.meta.get('source_fn_stack', None)) is not None:
+                source_fn = source_fn_st[-1]
+                source_fn_st[-1] = (new_node.name, source_fn[1])
+
+            # TODO copy other metadata?
+            if (nn_module_stack := orig_node.meta.get('nn_module_stack', None)) is not None:
+                new_node.meta.setdefault('nn_module_stack', copy.deepcopy(nn_module_stack))
+
     output_node = list(gm.graph.nodes)[-1]
-    return list(map(lambda n: value_remap[n], output_node.args[0]))
+    return [value_remap[n] for n in output_node.args[0]]
 
 
 class BMM(torch.nn.Module):
@@ -107,18 +114,16 @@ def split_nodes_on_path(graph: Graph, nodes: List[Node]):
         for i, user in enumerate(orig_users):
             with graph.inserting_before(user):
                 new_node = graph.node_copy(node, lambda n: n)
-            # node_copy does a shallow copy of the meta dictionary. This will
-            # cause all the copied nodes to have the same source_fn_stack and
-            # be grouped into a single SourcePartition. Performing a deepcopy
-            # on node meta cause unknown segfaults. So we manually update the
-            # source_fn_stack here.
+            user.replace_input_with(node, new_node)
+            node_groups[i].insert(0, new_node)
+
+            # The node_copy function performs a shallow copy of the metadata dictionary.
+            # As a result, modifying the source_fn metadata could affect other nodes. To
+            # prevent these side effects, we perform a deep copy of the source_fn_stack.
             source_fn_st = copy.deepcopy(node.meta['source_fn_stack'])
             source_fn = source_fn_st[-1]
             source_fn_st[-1] = (new_node.name, source_fn[1])
             new_node.meta['source_fn_stack'] = source_fn_st
-            # replace all uses of the original node with the new node
-            user.replace_input_with(node, new_node)
-            node_groups[i].insert(0, new_node)
         graph.erase_node(node)
     return node_groups
 
@@ -187,6 +192,7 @@ def _create_subgraph(nodes: List[Node]):
         if isinstance(arg, Node) and arg not in value_remap:
             value_remap[arg] = new_graph.placeholder(arg.name)
             new_args.append(arg)
+            value_remap[arg].meta['source_node'] = arg
         elif isinstance(arg, (list, tuple)):
             for n in arg:
                 process_arg(n)
@@ -217,6 +223,7 @@ def _create_and_insert_subgraph(
     nodes[-1].replace_all_uses_with(new_node)
     for node in reversed(nodes):
         model.graph.erase_node(node)
+    new_node.meta['source_module'] = submodule
     return new_node
 
 

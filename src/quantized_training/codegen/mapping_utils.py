@@ -47,6 +47,33 @@ def _set_tensor_field(field, node, output_dir):
         f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
     )
 
+    def _normalize_name(name):
+        return name.replace("[", "_").replace("]", "").replace(".", "_")
+
+    module_name = node.name
+    if node.op == "get_attr":
+        module_name = _normalize_name(node.target)
+        print(f"{node.name} -> {module_name}")
+    elif node.op == "placeholder":
+        if (
+            (source_node := node.meta.get("source_node", None)) is not None
+            and source_node.op == "get_attr"
+        ):
+            module_name = _normalize_name(source_node.target)
+            print(f"{node.name} -> {module_name}")
+    elif node.op == "call_function":
+        module_names = _get_module_name(node)
+        if len(module_names) > 0:
+            module_name = _normalize_name(module_names[-1])
+            print(f"{node.name} -> {module_name}")
+    elif node.op == "call_module":
+        if (gm := node.meta.get("source_module", None)) is not None:
+            first_node = next(n for n in gm.graph.nodes if n.op == "call_function")
+            module_names = _get_module_name(first_node)
+            if len(module_names) > 0:
+                module_name = _normalize_name(module_names[-1])
+                print(f"{node.name} -> {module_name}_fused")
+
     tensor = node.value
     if output_dir is not None:
         _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
