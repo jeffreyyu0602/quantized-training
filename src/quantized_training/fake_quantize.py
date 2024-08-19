@@ -28,7 +28,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def _get_fake_quant_fn(dtype: str):
+def get_fake_quant_fn(dtype: str):
     """Return the quantization function for the given dtype."""
     if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
         nbits, es = match.groups()
@@ -216,7 +216,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         device = kwargs.get("device", None)
         # Generates a mapping from bfloat16 to quantized values of the given dtype
         input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-        self.fake_quant_fn = _get_fake_quant_fn(dtype)
+        self.fake_quant_fn = get_fake_quant_fn(dtype)
         self.register_buffer("qvalues", self.fake_quant_fn(input), persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}

@@ -1,46 +1,34 @@
 import copy
 import math
 from dataclasses import asdict, replace
-from typing import Optional, Any, Callable
+from typing import Dict, Tuple, Union, Any, Optional, Callable
 
 import torch
-from torch._export import capture_pre_autograd_graph
+from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
-
-from torch.ao.quantization.fx.prepare import (
-    _insert_obs_or_fq,
-    _save_state,
-    _is_activation_post_process_node,
-    _create_obs_or_fq_from_qspec,
-)
-from torch.fx import (
-    GraphModule,
-    Graph,
-    Node,
-)
-from torch.fx.node import Argument
-
-from torch.ao.quantization import QConfigMapping
-from torch.ao.quantization.qconfig import QConfigAny
-from torch.ao.quantization.fx.custom_config import PrepareCustomConfig
-from typing import Dict, Tuple, Union, Any, Optional
+from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
 from torch.ao.quantization.quantizer import (
     EdgeOrNode,
     SharedQuantizationSpec,
     QuantizationSpecBase,
 )
-from torch.ao.quantization import ObserverOrFakeQuantize
+from torch._export import capture_pre_autograd_graph
+from torch.fx import (
+    GraphModule,
+    Graph,
+    Node,
+)
 
 import quantized_training as qt
 from quantized_training.codegen.mapping import _decompose_node
 from quantized_training.export_utils import _allow_exported_model_train_eval
-from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize, _get_fake_quant_fn
+from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize, get_fake_quant_fn
 from quantized_training.quantizer.quantizer import QuantizationSpec
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .decomposed import quantized_decomposed_lib
-from .mx_utils import _reshape_to_blocks, _shared_exponents, _undo_reshape_to_blocks
+from .mx_utils import _reshape_to_blocks, _shared_exponents
 
 
 def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
@@ -191,13 +179,12 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     prepare._get_obs_or_fq_map = _get_obs_or_fq_map
 
     # Make sure captured model is on the same device as the original model
-    model_device = assert_and_get_unique_device(model)
     model = capture_pre_autograd_graph(
         model,
         args=args,
         kwargs=kwargs,
         dynamic_shapes=dynamic_shapes,
-    ).to(model_device)
+    )
 
     model = prepare_pt2e(model, quantizer)
     _allow_exported_model_train_eval(model)
@@ -332,7 +319,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         ):
             qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
             if output_dtype is not None:
-                fq_fn = _get_fake_quant_fn(output_dtype)
+                fq_fn = get_fake_quant_fn(output_dtype)
                 qvalues = fq_fn(qvalues)
             with graph.inserting_before(maybe_dq_node):
                 output_qparam_node = create_getattr_from_value(
@@ -378,15 +365,14 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
 
             qvalues = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
             if bias_dtype is not None:
-                fq_fn = _get_fake_quant_fn(bias_dtype)
+                fq_fn = get_fake_quant_fn(bias_dtype)
                 qvalues = fq_fn(qvalues)
             param.data = torch.ops.quantized_ops.quantize_symmetric(
                 bias_value, scale.flatten(), bias_dtype, qvalues)
 
 
 def _fuse_dequantize_quantize(model: GraphModule):
-    from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
-
+    # TODO combine dequantize and quantize into a single quantize node
     dequantize_quantize_pattern = [
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
