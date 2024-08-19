@@ -38,6 +38,7 @@ RESIDUAL_LAYERS = [
 ]
 
 def propagate_config(module, name, qconfig):
+    # TODO set qconfig ch_axis according to the module type and qscheme.
     setattr(module, name, qconfig)
 
     for child in module.children():
@@ -79,8 +80,10 @@ def quantize(model, args, inplace=True):
         args.weight,
         args.error,
         args.record_histogram,
-        args.force_scale_power_of_two
+        args.force_scale_power_of_two,
     )
+
+    propagate_config(model, 'qconfig', qconfig)
 
     for name, param in model.named_parameters():
         if 'bias' in name:
@@ -90,11 +93,9 @@ def quantize(model, args, inplace=True):
             obs_or_fq(param.data)
         param.data = obs_or_fq(param.data)
 
-    propagate_config(model, 'qconfig', qconfig)
-
     # If doing quantization aware training, swap QAT modules. LoRA has custom
     # implementation, so it needs to be swapped to match the training behavior.
-    if args.do_train or args.lora_rank > 0:
+    if args.weight is not None and (args.do_train or args.lora_rank > 0):
         convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
 
     if args.activation is None:
@@ -122,10 +123,10 @@ def _register_module_hook(module, hook_name, name):
     obs_or_fq_dict = nn.ModuleDict()
     module.add_module(hook_name, obs_or_fq_dict)
 
-    # TODO: statically create all fake quant modules depends on the type of the
+    # TODO statically create all fake quant modules depends on the type of the
     # input module. Only MatmulFunctional, AddFunctional, and MulFunctional have
     # two inputs
-    def _forward_and_backward_pre_hook(self, inputs):
+    def observer_pre_hook(self, inputs):
         new_inputs = []
         for i, input in enumerate(inputs):
             if not isinstance(input, torch.Tensor):
@@ -144,15 +145,15 @@ def _register_module_hook(module, hook_name, name):
             new_inputs.append(obs_or_fq_dict[obs_or_fq_name](input))
         return tuple(new_inputs)
 
-    def _backward_hook(self, grad_inputs, grad_outputs):
-        return _forward_and_backward_pre_hook(self, grad_inputs)
+    def backward_hook(self, grad_inputs, grad_outputs):
+        return observer_pre_hook(self, grad_inputs)
 
     if hook_name == 'activation_pre_process':
-        module.register_forward_pre_hook(_forward_and_backward_pre_hook)
+        module.register_forward_pre_hook(observer_pre_hook)
     elif hook_name == 'error_pre_process':
-        module.register_full_backward_pre_hook(_forward_and_backward_pre_hook)
+        module.register_full_backward_pre_hook(observer_pre_hook)
     elif hook_name == 'error_post_process':
-        module.register_full_backward_hook(_backward_hook)
+        module.register_full_backward_hook(backward_hook)
 
 def _add_observer_(
         module, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
@@ -269,8 +270,13 @@ def swap_module(mod, mapping, custom_module_class_mapping):
         # Preserve module's pre forward hooks. They'll be called on quantized input
         for pre_hook_fn in mod._forward_pre_hooks.values():
             new_mod.register_forward_pre_hook(pre_hook_fn)
+        # Preserve module's forward hooks. They'll be called on inputs to residual
+        for hook_fn in mod._forward_hooks.values():
+            new_mod.register_forward_hook(hook_fn)
+        # Preserve module's pre backward hooks. They'll be called on input gradients
         for pre_hook_fn in mod._backward_pre_hooks.values():
             new_mod.register_full_backward_pre_hook(pre_hook_fn)
+        # Preserve module's backward hooks. They'll be called on input gradients to residual
         for hook_fn in mod._backward_hooks.values():
             new_mod.register_full_backward_hook(hook_fn)
 
