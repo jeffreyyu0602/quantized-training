@@ -714,7 +714,10 @@ def gen_compute_graph(model, output_file="compute_graph"):
                 ])
         else:
             label = str(node.target)
-        label = f"{{{node}}}" if label == "" else f"{{{node}|{label}}}"
+        node_str = node.name
+        if hasattr(node, "shape"):
+            node_str += f"&#92;n{str(tuple(node.shape))}"
+        label = f"{{{node_str}}}" if label == "" else f"{{{node_str}|{label}}}"
         label = label.replace("<", "\<").replace(">", "\>")
 
         nodes[node.name] = {
