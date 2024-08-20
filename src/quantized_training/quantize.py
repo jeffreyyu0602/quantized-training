@@ -17,9 +17,9 @@ from quantized_training.modules import (
 )
 from quantized_training.qconfig import get_qconfig
 from quantized_training.quantization_mappings import (
-    QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
     DEFAULT_QAT_MODULE_MAPPINGS,
-    HF_TRANSFORMER_MODULE_MAPPINGS,
+    QCONFIG_PROPAGATE_MODULE_CLASS_LIST,
+    TRANSFORMER_MODULE_MAPPINGS,
 )
 
 __all__ = [
@@ -33,8 +33,13 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-RESIDUAL_LAYERS = [
-    "query", "key", "value", "intermediate", "bottleneck.input", "bottleneck.attention",
+RESIDUAL_LAYERS_BWD = [
+    "attention.self.query",
+    "attention.self.key",
+    "attention.self.value",
+    "intermediate.dense",
+    "bottleneck.input.dense",
+    "bottleneck.attention.dense",
 ]
 
 def propagate_config(module, name, qconfig):
@@ -58,7 +63,7 @@ def quantize(model, args, inplace=True):
         hasattr(model, 'config') and isinstance(model.config, PretrainedConfig)
     ):
         propagate_config(model, 'config', model.config)
-        convert(model, inplace=True, custom_module_class_mapping=HF_TRANSFORMER_MODULE_MAPPINGS)
+        convert(model, inplace=True, custom_module_class_mapping=TRANSFORMER_MODULE_MAPPINGS)
 
     if hasattr(model, 'hf_device_map'):
         dispatch_model(model, device_map=model.hf_device_map)
@@ -123,6 +128,11 @@ def _register_module_hook(module, hook_name, name):
     obs_or_fq_dict = nn.ModuleDict()
     module.add_module(hook_name, obs_or_fq_dict)
 
+    obs_or_fq_ctr = (
+        module.qconfig.activation if hook_name == 'activation_pre_process'
+        else module.qconfig.error
+    )
+
     # TODO statically create all fake quant modules depends on the type of the
     # input module. Only MatmulFunctional, AddFunctional, and MulFunctional have
     # two inputs
@@ -133,12 +143,7 @@ def _register_module_hook(module, hook_name, name):
                 new_inputs.append(input)
                 continue
 
-            obs_or_fq_name = str(i)
-            if obs_or_fq_name not in obs_or_fq_dict:
-                if hook_name == 'activation_pre_process':
-                    obs_or_fq_ctr = self.qconfig.activation
-                else:
-                    obs_or_fq_ctr = self.qconfig.error
+            if (obs_or_fq_name := str(i)) not in obs_or_fq_dict:
                 obs_or_fq = obs_or_fq_ctr(device=input.device)
                 obs_or_fq.name = f"{name}.{obs_or_fq_name}"
                 obs_or_fq_dict[obs_or_fq_name] = obs_or_fq
@@ -158,7 +163,7 @@ def _register_module_hook(module, hook_name, name):
 def _add_observer_(
         module, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
         bwd_residual, op_fusion, prefix):
-    def _insert_obs_or_fq(m, name):
+    def insert_obs_or_fq(m, name):
         if not hasattr(m, 'qconfig') or m.qconfig is None:
             return
         if op_fusion is not None and any(layer in name for layer in op_fusion):
@@ -167,24 +172,22 @@ def _add_observer_(
             _register_module_hook(m, 'activation_pre_process', name)
         if isinstance(m, bwd_pre_hook_module_list):
             _register_module_hook(m, 'error_pre_process', name)
-        is_residual = (
-            isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["gemm"]))
-            and any(layer in name for layer in RESIDUAL_LAYERS)
-            or isinstance(m, tuple(QCONFIG_PROPAGATE_MODULE_CLASS_LIST["residual"]))
-        )
-        if bwd_residual and is_residual:
+        if bwd_residual and (
+            any(layer in name for layer in RESIDUAL_LAYERS_BWD)
+            or isinstance(m, _parse_ops("residual"))
+        ):
             _register_module_hook(m, 'error_post_process', name)
 
     named_modules = dict(module.named_children())
     for name, child in named_modules.items():
         module_prefix = prefix + '.' + name if prefix else name
         if isinstance(child, nni._FusedModule):
-            _insert_obs_or_fq(child, module_prefix)
+            insert_obs_or_fq(child, module_prefix)
         else:
             _add_observer_(
                 child, fwd_pre_hook_module_list, bwd_pre_hook_module_list,
                 bwd_residual, op_fusion, module_prefix)
-    _insert_obs_or_fq(module, prefix)
+    insert_obs_or_fq(module, prefix)
 
 def prepare(
         model, inplace=False, fwd_quantized_ops=None, bwd_quantized_ops=None,

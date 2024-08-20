@@ -24,7 +24,7 @@ DEFAULT_QAT_MODULE_MAPPINGS: Dict[Callable, Any] = {
     nni.ConvBn3d: nnqat.ConvBn3d,
 }
 
-HF_TRANSFORMER_MODULE_MAPPINGS: Dict[Callable, Any] = {
+TRANSFORMER_MODULE_MAPPINGS: Dict[Callable, Any] = {
     bert.modeling_bert.BertSelfAttention: quantizable.BertSelfAttention,
     bert.modeling_bert.BertSelfOutput: quantizable.BertSelfOutput,
     bert.modeling_bert.BertOutput: quantizable.BertOutput,
