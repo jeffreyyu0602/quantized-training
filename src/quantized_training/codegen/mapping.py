@@ -699,7 +699,7 @@ def gen_compute_graph(model, output_file="compute_graph"):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        if node.op == "get_attr" and "qvalues" in node.name:
+        if node.op == "get_attr" and "code" in node.name:
             continue
 
         if node.op in ["placeholder", "get_attr"]:
