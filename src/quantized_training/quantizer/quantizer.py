@@ -35,6 +35,9 @@ def get_default_qmax(dtype):
     if dtype == "posit8_1":
         return 64
 
+    if (match := re.fullmatch(r'nf(\d+)', dtype)):
+        return 1
+
     if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
         return 2 ** (nbits - 1) - 1

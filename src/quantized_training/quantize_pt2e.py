@@ -71,21 +71,27 @@ def _get_obs_or_fq_map(
     return obs_or_fq_map
 
 
+def _set_ch_axis(qspec: Optional[QuantizationSpec], ch_axis: int):
+    if qspec is None:
+        return None
+    return replace(qspec, ch_axis=ch_axis)
+
+
 def get_microscaling_quantizer(
     activation: Optional[QuantizationSpec],
     weight: Optional[QuantizationSpec],
 ):
     # Microscaling performs quantization along the reduction dimension
-    act_qspec = replace(activation, ch_axis=1)
-    weight_qspec = replace(weight, ch_axis=1)
+    act_qspec = _set_ch_axis(activation, 1)
+    weight_qspec = _set_ch_axis(weight, 1)
     qconfig_conv2d = QuantizationConfig(act_qspec, None, weight_qspec, None)
 
-    act_qspec = replace(activation, ch_axis=-1)
-    weight_qspec = replace(weight, ch_axis=-1)
+    act_qspec = _set_ch_axis(activation, -1)
+    weight_qspec = _set_ch_axis(weight, -1)
     qconfig_linear = QuantizationConfig(act_qspec, None, weight_qspec, None)
 
-    act0_qspec = replace(activation, ch_axis=-1)
-    act1_qspec = replace(activation, ch_axis=-2)
+    act0_qspec = _set_ch_axis(activation, -1)
+    act1_qspec = _set_ch_axis(activation, -2)
     qconfig_matmul = QuantizationConfig(act0_qspec, None, act1_qspec, None)
 
     return (XNNPACKQuantizer()
@@ -244,12 +250,11 @@ QUANTIZATION_DTYPES = {
 }
 
 def _get_quantization_map(dtype, device):
-    quant_map = torch.arange(2 ** 16, dtype=torch.int16, device=device)
-    quant_map = quant_map.view(torch.bfloat16)
+    values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
     if dtype is not None:
         fq_fn = get_fake_quant_fn(dtype)
-        quant_map = fq_fn(quant_map)
-    return quant_map
+        values = fq_fn(values)
+    return values.to(device)
 
 
 def _replace_observer_with_quantize_dequantize_node_decomposed(

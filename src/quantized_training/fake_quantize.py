@@ -17,6 +17,7 @@ from quantized_training.mx_utils import (
     _shared_exponents,
     _undo_reshape_to_blocks,
 )
+from quantized_training.normal_float import quantize_to_nf
 from quantized_training.posit import quantize_to_posit
 
 
@@ -53,6 +54,10 @@ def get_fake_quant_fn(dtype: str):
         nbits = int(match.group(1))
         quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
         return lambda x: torch.clamp(torch.round(x), quant_min, quant_max)
+
+    if (match := re.fullmatch(r'nf(\d+)', dtype)):
+        nbits = int(match.group(1))
+        return lambda x: quantize_to_nf(x, nbits)
 
     raise ValueError(f"Unrecognized dtype: {dtype}")
 
@@ -97,16 +102,21 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
         shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
-        # Get shared exponents
-        shared_exp = _shared_exponents(
-            input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
-        )
+        # TODO we are abusing shared_exp_method here to handle NormalFloat
+        if shared_exp_method == "max":
+            # Get shared exponents
+            shared_exp = _shared_exponents(
+                input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
+            )
 
-        # Offset the max exponent by the largest representable exponent
-        # in the element data format
-        shared_exp = shared_exp - math.floor(math.log2(quant_max))
+            # Offset the max exponent by the largest representable exponent
+            # in the element data format
+            shared_exp = shared_exp - math.floor(math.log2(quant_max))
 
-        scale = (2 ** shared_exp).to(input.dtype)
+            scale = (2 ** shared_exp).to(input.dtype)
+        else:
+            # NormalFloat requires dividing by the exact absmax value
+            scale = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
         input = _quantize(input / scale, quant_map) * scale
 
         # Undo tile reshaping
@@ -136,9 +146,9 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         scale: torch.Tensor,
         amax_history_len: int,
         quant_max: float,
-        ch_axis: int,
-        per_row_fake_quant: bool,
-        force_scale_power_of_two: bool,
+        ch_axis: Optional[int] = None,
+        per_row_fake_quant=False,
+        force_scale_power_of_two=False,
     ) -> torch.Tensor:
         if observer_enabled[0] == 1:
             if per_row_fake_quant:
@@ -213,6 +223,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.ch_axis = ch_axis
         self.block_size = block_size
         self.force_scale_power_of_two = force_scale_power_of_two
+        self.shared_exp_method = None if dtype.startswith("nf") else "max"
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
         input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
@@ -252,8 +263,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        devices = {p.device for p in self.parameters()} | \
-            {p.device for p in self.buffers()}
+        # TODO this is a workaround when input is not on the same device as the module
+        devices = {p.device for p in self.buffers()}
         device = next(iter(devices)) if len(devices) > 0 else None
         if len(devices) > 1 or X.device != device:
             self.to(X.device)
@@ -268,7 +279,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.fake_quant_enabled,
                 self.quant_map,
                 self.quant_max,
-                "max",
+                self.shared_exp_method,
                 self.ch_axis,
                 self.block_size,
             )

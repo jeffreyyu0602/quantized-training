@@ -3,6 +3,7 @@ import logging
 import os
 
 import torch
+from accelerate.utils import get_max_memory
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -16,6 +17,8 @@ from quantized_training import (
     plot_layer_range,
     setup_logging,
 )
+from quantized_training.pt2e_utils import dispatch_model, get_device_map
+from quantized_training.quantize_pt2e import convert_pt2e
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
-        device_map=args.gpu if args.gpu is not None else "auto",
+        # device_map=args.gpu if args.gpu is not None else "auto",
         attn_implementation="eager", # flash attention is not supported
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
@@ -61,7 +64,7 @@ def main(args):
         args.activation,
         args.weight,
         args.record_histogram,
-        args.force_scale_power_of_two
+        args.force_scale_power_of_two,
     )
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
@@ -71,20 +74,28 @@ def main(args):
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
     model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
+    max_memory = get_max_memory()
+    if args.gpu is not None:
+        assert args.gpu in max_memory
+        max_memory = {args.gpu: max_memory[args.gpu]}
+    else:
+        max_memory = {k: v for k, v in max_memory.items() if isinstance(k, int)}
+        max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))
+    device_map = get_device_map(model, max_memory=max_memory)
+    dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
+
     def calibrate(model):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         encodings = tokenizer("\n\n".join(validation["text"]), return_tensors="pt")
         seq_len = encodings.input_ids.size(1)
-        steps = 0
-        for begin_loc in tqdm(range(0, seq_len - args.max_length, args.stride)):
+        for i, begin_loc in enumerate(tqdm(range(0, seq_len - args.max_length, args.stride))):
             end_loc = min(begin_loc + args.max_length, seq_len)
             input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
             target_ids = input_ids.clone()
             with torch.no_grad():
                 model(input_ids, labels=target_ids)
 
-            steps += 1
-            if steps == args.calibration_steps:
+            if i == args.calibration_steps - 1:
                 break
 
     if args.calibration_steps > 0:
@@ -92,6 +103,8 @@ def main(args):
         for module in model.modules():
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
+
+    # model = convert_pt2e(model)
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
