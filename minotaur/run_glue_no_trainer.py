@@ -426,9 +426,9 @@ def main(args):
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
-    # Turn off cuda when dumping data for verification
-    if torch.cuda.is_available() and args.output_dir is None:
-        device = torch.device("cuda" if args.gpu is None else f"cuda:{args.gpu}")
+    # Use CPU for dumping data
+    if torch.cuda.is_available() and args.gpu is not None:
+        device = torch.device(f"cuda:{args.gpu}")
     else:
         logger.warning("CUDA acceleration not available. Running on CPU could be slow.")
         device = torch.device("cpu")
@@ -536,6 +536,40 @@ def main(args):
 
         return eval_metric
 
+    def reset_histogram():
+        for name, module in model.named_modules():
+            if "error_pre_process" in name and hasattr(module, "histogram"):
+                module.histogram.fill_(0)
+
+    def plot_gradient_histogram(prefix=""):
+        histogram = None
+        for name, module in model.named_modules():
+            if "error_pre_process" in name and hasattr(module, "histogram"):
+                if histogram is None:
+                    histogram = module.histogram.clone()
+                else:
+                    histogram += module.histogram
+        torch.save(histogram.float().cpu(), os.path.join(args.output_dir, prefix, "histogram.pt"))
+
+        # nonzero_indices = torch.nonzero(histogram).squeeze()
+        # min_bin = nonzero_indices.min().item()
+        # max_bin = nonzero_indices.max().item()
+
+        # Plot exponent values from -40 to 10
+        min_bin, max_bin = 86, 136
+
+        bins = torch.arange(-126 + min_bin, -126 + max_bin + 1).float().cpu().numpy()
+        histogram = histogram[min_bin:max_bin + 1].float().cpu().numpy()
+
+        import matplotlib.pyplot as plt
+        plt.bar(bins, histogram, width=0.8, color='blue')
+        plt.title('Activation Gradient Histogram')
+        plt.xlabel('Bins')
+        plt.ylabel('Frequency')
+
+        filename = os.path.join(args.output_dir, prefix, "gradient.png")
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+
     if not args.do_train:
         run_eval()
         return
@@ -557,6 +591,7 @@ def main(args):
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         total_loss = 0
+        reset_histogram()
         for step, batch in enumerate(train_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
@@ -565,10 +600,12 @@ def main(args):
             loss = loss / args.gradient_accumulation_steps * args.grad_scale
             loss.backward()
 
-            if args.output_dir is not None and step % checkpointing_steps == 0:
+            if (
+                args.output_dir is not None
+                and isinstance(checkpointing_steps, int)
+                and step % checkpointing_steps == 0
+            ):
                 output_dir = os.path.join(args.output_dir, f"step_{step}")
-                print(f"step: {step}")
-                print(f"outputs: {outputs}")
                 save_weights_and_grads(model, output_dir)
                 save_activations(activations, batch, output_dir)
                 save_errors(errors, output_dir)
@@ -587,10 +624,17 @@ def main(args):
             if completed_steps >= args.max_train_steps:
                 break
 
+        if args.output_dir is not None and args.checkpointing_steps == "epoch":
+            output_dir = os.path.join(args.output_dir, f"epoch_{epoch}")
+            save_weights_and_grads(model, output_dir)
+            save_activations(activations, batch, output_dir)
+            save_errors(errors, output_dir)
+            plot_gradient_histogram(f"epoch_{epoch}")
+
         lr_scheduler.step()
 
         train_loss = total_loss.item() / len(train_dataloader)
-        logger.info(f"loss: {train_loss:>8f}\t[{epoch}/{args.num_train_epochs}]")
+        logger.info(f"Epoch {epoch}: {train_loss:>8f}\t[{epoch}/{args.num_train_epochs}]")
 
         eval_metric = run_eval()
         if best_metric is None or eval_metric["accuracy"] > best_metric["accuracy"]:
