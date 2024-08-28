@@ -34,18 +34,6 @@ from .param_pb2 import (
 )
 from .shape_prop import ShapeProp
 
-
-OPERATOR_MAPPINGS = {
-    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
-    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
-    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
-    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
-    "exp": [torch.exp],
-    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
-    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
-    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul],
-}
-
 DEFAULT_MEMORY_SIZE = 1024 ** 4
 
 
@@ -288,9 +276,9 @@ def _make_node_partition(node: Node) -> SourcePartition:
     return make_partition([node], module_type)
 
 
-def fuse_operator(model: GraphModule, vector_stages=None):
-    if vector_stages is None:
-        vector_stages = {}
+def fuse_operator(model: GraphModule, pipeline=None):
+    if pipeline is None:
+        pipeline = {}
 
     split_multi_head_attention(model)
 
@@ -301,9 +289,7 @@ def fuse_operator(model: GraphModule, vector_stages=None):
     fused_nodes: Dict[Node, None] = {}
 
     fused_partitions = []
-    for stage, ops in vector_stages.items():
-        # If there is no corresponding mapping, we directly append the op string
-        wanted_sources = [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
+    for wanted_sources in pipeline.values():
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
 
@@ -318,27 +304,31 @@ def fuse_operator(model: GraphModule, vector_stages=None):
         for fp in fused_partitions:
             if isinstance(fp, SourcePartition) and fp.output_nodes[0] in fused_nodes:
                 continue
-            # There could be some nop nodes between the two partitions. We need to
-            # manually insert them into the fusion candidates.
-            last_node = fp[-1] if isinstance(fp, list) else fp
-            last_node = last_node.output_nodes[0]
+
+            # If the last node has multiple users, we cannot fuse it with the next partition
+            last_node = fp[-1].output_nodes[0] if isinstance(fp, list) else fp.output_nodes[0]
+            if len(last_node.users) > 1:
+                fusion_candidates.append(fp)
+                continue
+
+            # There might be NOP nodes between the two partitions. We need to manually
+            # include these nodes in the fusion candidates.
+            nops = []
             node_iter = next(iter(last_node.users))
-            nop_nodes = []
             while _is_nop(node_iter.target) and len(node_iter.users) == 1:
-                nop_nodes.append(_make_node_partition(node_iter))
+                nops.append(_make_node_partition(node_iter))
                 node_iter = next(iter(node_iter.users))
 
             matched = False
             for p in partitions:
                 if p.output_nodes[0] in fused_nodes:
                     continue
-                candidate = [*fp, *nop_nodes, p] if isinstance(fp, list) else [fp, *nop_nodes, p]
+                candidate = [*fp, *nops, p] if isinstance(fp, list) else [fp, *nops, p]
                 if _partitions_sequential(candidate, node_order):
-                    fusion_candidates.append(candidate)
-                    fused_nodes[p.output_nodes[0]] = None
-                    if isinstance(fp, SourcePartition):
-                        fused_nodes[fp.output_nodes[0]] = None
                     matched = True
+                    fusion_candidates.append(candidate)
+                    for par in candidate:
+                        fused_nodes[par.output_nodes[0]] = None
                     break
             if not matched:
                 fusion_candidates.append(fp)
@@ -559,7 +549,7 @@ def allocate_weights(model: GraphModule, manager: MemoryManager = None):
         manager = MemoryManager(DEFAULT_MEMORY_SIZE)
 
     for node in model.graph.nodes:
-        if node.op == "get_attr":
+        if node.op == "get_attr" and "quant_map" not in node.name:
             node.meta["memory"] = manager.allocate_memory(node)
 
 

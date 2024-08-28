@@ -50,29 +50,27 @@ def _set_tensor_field(field, node, output_dir):
     def _normalize_name(name):
         return name.replace("[", "_").replace("]", "").replace(".", "_")
 
-    module_name = node.name
+    module_name = None
     if node.op == "get_attr":
         module_name = _normalize_name(node.target)
-        print(f"{node.name} -> {module_name}")
     elif node.op == "placeholder":
         if (
             (source_node := node.meta.get("source_node", None)) is not None
             and source_node.op == "get_attr"
         ):
             module_name = _normalize_name(source_node.target)
-            print(f"{node.name} -> {module_name}")
     elif node.op == "call_function":
         module_names = _get_module_name(node)
         if len(module_names) > 0:
             module_name = _normalize_name(module_names[-1])
-            print(f"{node.name} -> {module_name}")
     elif node.op == "call_module":
         if (gm := node.meta.get("source_module", None)) is not None:
             first_node = next(n for n in gm.graph.nodes if n.op == "call_function")
             module_names = _get_module_name(first_node)
             if len(module_names) > 0:
-                module_name = _normalize_name(module_names[-1])
-                print(f"{node.name} -> {module_name}_fused")
+                module_name = _normalize_name(module_names[-1]) + "_fused"
+    if module_name is not None:
+        print(f"{node.name} -> {module_name}")
 
     tensor = node.value
     if output_dir is not None:
@@ -252,8 +250,8 @@ def _is_elementwise_op(op: Callable) -> bool:
         torch.ops.aten.sub.Tensor,
         torch.ops.aten.sub_.Tensor,
         torch.ops.aten.tanh.default,
-        torch.ops.quantized_ops.dequantize_symmetric.default,
-        torch.ops.quantized_ops.quantize_symmetric.default,
+        torch.ops.quantized_ops.dequantize_symmetric,
+        torch.ops.quantized_ops.quantize_symmetric,
 
     ]
 

@@ -1,5 +1,6 @@
 import argparse
 import copy
+import operator
 import os
 
 import torch
@@ -26,6 +27,20 @@ from quantized_training.codegen import (
     gen_compute_graph,
 )
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
+
+
+OPERATOR_MAPPINGS = {
+    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
+    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
+    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
+    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
+    "exp": [torch.exp],
+    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
+    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
+    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul],
+    "quantize": [torch.ops.quantized_ops.quantize_symmetric],
+    "dequantize": [torch.ops.quantized_ops.dequantize_symmetric],
+}
 
 
 def replace_interpolate():
@@ -103,15 +118,23 @@ def transform(
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
         _convert_scalars_to_attrs(gm)
 
-    vector_stages = {
+    pipeline = {
         0: ["gemm"],
-        1: ["add", "sub", "mul", "div"],
-        2: ["exp"],
-        3: ["add", "mul", "div"],
-        4: ["relu", "gelu"],
+        1: ["dequantize"],
+        2: ["add", "sub", "mul", "div"],
+        3: ["exp"],
+        4: ["add", "mul", "div"],
+        5: ["relu"],
+        6: ["quantize"],
     }
 
-    gm = fuse_operator(gm, vector_stages)
+    # If there is no corresponding mapping, we directly append the op string
+    pipeline = {
+        stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
+        for stage, ops in pipeline.items()
+    }
+
+    gm = fuse_operator(gm, pipeline)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)

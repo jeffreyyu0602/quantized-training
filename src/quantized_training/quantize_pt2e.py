@@ -258,9 +258,9 @@ def _get_quantization_map(dtype, device):
 
 
 def _replace_observer_with_quantize_dequantize_node_decomposed(
-        model: torch.fx.GraphModule,
-        node: Node,
-        modules: Dict[str, torch.nn.Module],
+    model: torch.fx.GraphModule,
+    node: Node,
+    modules: Dict[str, torch.nn.Module],
 ):
     graph = model.graph
     assert modules is not None
@@ -307,16 +307,22 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model, graph, next(iter(node.users)).name + "_scale_", scale)
             # TODO quantization map node can be shared among multiple quantize nodes
             quant_map_node = create_getattr_from_value(
-                model, graph, "code_", activation_post_process.quant_map)
+                model, graph, "quant_map_", activation_post_process.quant_map)
             quantize_op_inputs = [node.args[0], qparam_node, input_dtype, quant_map_node]
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize_symmetric,
                 tuple(quantize_op_inputs),
                 {}
             )
-        node.replace_all_uses_with(quantized_node)
+
+        # source_fn_stack is used by get_source_partitions to find nodes with a given op
+        source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
+        source_fn_st.append((quantized_node.name, quantized_node.target))
+
         # Annotate input dtype
         quantized_node.meta["dtype"] = input_dtype
+
+        node.replace_all_uses_with(quantized_node)
     graph.erase_node(node)
 
     # Insert a dequantize node after each user
@@ -329,15 +335,20 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         ):
             quant_map = _get_quantization_map(output_dtype, device)
             with graph.inserting_before(maybe_dq_node):
-                output_qparam_node = create_getattr_from_value(
+                qparam_node = create_getattr_from_value(
                     model, graph, user_node.name + "_scale_", scale)
-                quant_map_node = create_getattr_from_value(model, graph, "code_", quant_map)
-                dq_inputs = [user_node, output_qparam_node, output_dtype, quant_map_node]
+                quant_map_node = create_getattr_from_value(model, graph, "quant_map_", quant_map)
+                dq_inputs = [user_node, qparam_node, output_dtype, quant_map_node]
                 dequantized_node = graph.call_function(
                     torch.ops.quantized_ops.dequantize_symmetric,
                     tuple(dq_inputs),
                     {}
                 )
+
+            # source_fn_stack is used by get_source_partitions to find nodes with a given op
+            source_fn_st = dequantized_node.meta.setdefault("source_fn_stack", [])
+            source_fn_st.append((dequantized_node.name, dequantized_node.target))
+
             # We need to save orig users before updating uses because
             # the list of users will change as we update uses
             orig_users = list(user_node.users.keys())
@@ -347,9 +358,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 user.replace_input_with(user_node, dequantized_node)
         else:
             # Update the scale if a dequantize node already exists
-            output_qparam_node = maybe_dq_node.args[1]
-            scale.mul_(model.get_buffer(output_qparam_node.target))
-            model.register_buffer(output_qparam_node.target, scale)
+            qparam_node = maybe_dq_node.args[1]
+            buffer = model.get_buffer(qparam_node.target)
+            model.register_buffer(qparam_node.target, scale.mul_(buffer))
 
         if user_node.op != 'call_function' or user_node.target not in [
             torch.ops.aten.conv2d.default,
@@ -532,9 +543,9 @@ def _replace_mx_observer_node(
 
 
 def _replace_observer_with_quantize_mx_node_decomposed(
-        model: torch.fx.GraphModule,
-        node: Node,
-        modules: Dict[str, torch.nn.Module],
+    model: torch.fx.GraphModule,
+    node: Node,
+    modules: Dict[str, torch.nn.Module],
 ):
     graph = model.graph
     assert modules is not None
