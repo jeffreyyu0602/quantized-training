@@ -618,6 +618,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # Propagate memory metadata for the inputs of submodules. Since reshape
         # operations are fused within each submodule, we propagate memory metadata
         # for these nodes as well.
+        # TODO we can get memory metadata from the source node now
         if node.op == "call_module" and isinstance(named_modules[node.target], GraphModule):
             gm = named_modules[node.target]
             node_args = iter(node.args)

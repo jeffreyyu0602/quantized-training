@@ -345,7 +345,8 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                     {}
                 )
 
-            # source_fn_stack is used by get_source_partitions to find nodes with a given op
+            # source_fn_stack is used by get_source_partitions to find nodes
+            # associated with a given op
             source_fn_st = dequantized_node.meta.setdefault("source_fn_stack", [])
             source_fn_st.append((dequantized_node.name, dequantized_node.target))
 
@@ -368,21 +369,22 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         ]:
             continue
 
+        if (bias_node := user_node.args[2]) is None:
+            continue
+
         # Quantize bias using the product of input activation scale and weight scale.
-        bias_node = user_node.args[2]
-        if bias_node is not None:
-            bias_node.meta["dtype"] = bias_dtype
+        # Save the original bias value because we may need to update it twice with
+        # both the input scale and the weight scale.
+        param = param_dict[bias_node.target]
+        if (bias_value := bias_node.meta.get("param_data")) is None:
+            bias_value = param.data.clone()
+            bias_node.meta["param_data"] = bias_value
 
-            # Save the original bias value because we may need to update it twice
-            # with both the input scale and the weight scale.
-            param = param_dict[bias_node.target]
-            if (bias_value := bias_node.meta.get("param_data")) is None:
-                bias_value = param.data.clone()
-                bias_node.meta["param_data"] = bias_value
+        quant_map = _get_quantization_map(bias_dtype, device)
+        param.data = torch.ops.quantized_ops.quantize_symmetric(
+            bias_value, scale.flatten(), bias_dtype, quant_map)
 
-            quant_map = _get_quantization_map(bias_dtype, device)
-            param.data = torch.ops.quantized_ops.quantize_symmetric(
-                bias_value, scale.flatten(), bias_dtype, quant_map)
+        bias_node.meta["dtype"] = bias_dtype
 
 
 def _fuse_dequantize_quantize(model: GraphModule):

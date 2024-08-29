@@ -79,6 +79,11 @@ def _set_tensor_field(field, node, output_dir):
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
         field.dtype = dtype
+    elif (
+        (source_node := node.meta.get("source_node", None))
+        and (dtype := source_node.meta.get("dtype", None)) is not None
+    ):
+        field.dtype = dtype
     else:
         field.dtype = str(tensor.dtype).split(".")[1]
 
@@ -92,17 +97,17 @@ def _set_tensor_field(field, node, output_dir):
         field.memory.offset = memory.start
 
     if (reshape := node.meta.get("reshape", None)) is not None:
-        input_node = reshape.args[0]
+        arg = reshape.args[0]
         if output_dir is not None:
-            _write_tensor_to_file(
-                input_node.value,
-                os.path.join(output_dir, f"{input_node.name}.bin")
-            )
-        field.permutation.node = input_node.name
-        field.permutation.shape.extend(input_node.shape)
+            _write_tensor_to_file(arg.value, os.path.join(output_dir, f"{arg.name}.bin"))
+        field.permutation.node = arg.name
+        field.permutation.shape.extend(arg.shape)
         field.permutation.opcode = reshape.target.__name__.split(".")[0]
-        is_permute = reshape.target == torch.ops.aten.permute.default
-        field.permutation.dims.extend(reshape.args[1] if is_permute else reshape.args[1:])
+        field.permutation.dims.extend(
+            reshape.args[1]
+            if reshape.target == torch.ops.aten.permute.default
+            else reshape.args[1:]
+        )
 
 
 def _set_repeated_field(field, value):
