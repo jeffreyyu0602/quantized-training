@@ -369,7 +369,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         ]:
             continue
 
-        if (bias_node := user_node.args[2]) is None:
+        if (bias_node := user_node.args[2]) is None or bias_dtype is None:
             continue
 
         # Quantize bias using the product of input activation scale and weight scale.

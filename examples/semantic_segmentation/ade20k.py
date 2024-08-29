@@ -138,7 +138,7 @@ def main(args):
         args.activation,
         args.weight,
         args.record_histogram,
-        args.force_scale_power_of_two
+        args.force_scale_power_of_two,
     )
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = prepare_pt2e(model, quantizer, example_args)

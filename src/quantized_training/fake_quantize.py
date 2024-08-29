@@ -226,9 +226,9 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.shared_exp_method = None if dtype.startswith("nf") else "max"
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
-        input = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-        self.fake_quant_fn = get_fake_quant_fn(dtype)
-        self.register_buffer("quant_map", self.fake_quant_fn(input), persistent=False)
+        values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
+        fake_quant_fn = get_fake_quant_fn(dtype)
+        self.register_buffer("quant_map", fake_quant_fn(values), persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))

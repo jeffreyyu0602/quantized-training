@@ -50,18 +50,17 @@ def quantize_symmetric(
 
     if block_size is not None:
         scale = _broadcast_shapes(scale, input, block_size)
-    output = _quantize(input / scale, quant_map)
-    return torch.nan_to_num(output)
+    return _quantize(input / scale, quant_map)
 
 quantized_decomposed_lib.define(
-    "dequantize_symmetric(Tensor input, Tensor scale, str dtype, Tensor quant_map) -> Tensor")
+    "dequantize_symmetric(Tensor input, Tensor scale, str? dtype, Tensor quant_map) -> Tensor")
 
 @impl(quantized_decomposed_lib, "dequantize_symmetric", "CompositeExplicitAutograd")
 def dequantize_symmetric(
-        input: torch.Tensor,
-        scale: torch.Tensor,
-        dtype: str,
-        quant_map: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    dtype: Optional[str],
+    quant_map: torch.Tensor,
 ) -> torch.Tensor:
     """ Dequantization for the Tensor using the same quantization parameters to map
     from floating point to quantized values
@@ -77,7 +76,9 @@ def dequantize_symmetric(
        are not stored in the Tensor, we are storing them in function arguments instead
     """
 
-    return _quantize(input, quant_map) * scale
+    if dtype is not None:
+        return _quantize(input, quant_map) * scale
+    return input * scale
 
 quantized_decomposed_lib.define(
     "conv2d_mx(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1, Tensor? scale_inp=None, Tensor? scale_wt=None, SymInt? block_size=None) -> Tensor")
