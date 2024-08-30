@@ -42,11 +42,7 @@ def _get_module_name(n: Node):
     return names
 
 
-def _set_tensor_field(field, node, output_dir):
-    assert isinstance(node, Node) and hasattr(node, 'value'), (
-        f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
-    )
-
+def _get_node_name(node: Node):
     def _normalize_name(name):
         return name.replace("[", "_").replace("]", "").replace(".", "_")
 
@@ -71,10 +67,16 @@ def _set_tensor_field(field, node, output_dir):
                 module_name = _normalize_name(module_names[-1]) + "_fused"
     if module_name is not None:
         print(f"{node.name} -> {module_name}")
+    return module_name
 
-    tensor = node.value
+
+def _set_tensor_field(field, node, output_dir):
+    assert isinstance(node, Node) and hasattr(node, 'value'), (
+        f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
+    )
+
     if output_dir is not None:
-        _write_tensor_to_file(tensor, os.path.join(output_dir, f"{node.name}.bin"))
+        _write_tensor_to_file(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
@@ -85,7 +87,7 @@ def _set_tensor_field(field, node, output_dir):
     ):
         field.dtype = dtype
     else:
-        field.dtype = str(tensor.dtype).split(".")[1]
+        field.dtype = str(node.value.dtype).split(".")[1]
 
     if len(node.shape) > 0:
         field.shape.extend(list(node.shape))
