@@ -198,7 +198,8 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         # Accelerator only supports 2x2 maxpool
-        model.maxpool.kernel_size = (2, 2)
+        model.maxpool.kernel_size = 2
+        model.maxpool.stride = 2
         model.maxpool.padding = 0
 
         example_args = (torch.randn(1, 3, 224, 224),)

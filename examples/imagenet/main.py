@@ -209,11 +209,9 @@ def main_worker(gpu, ngpus_per_node, args):
         device = torch.device("cpu")
 
     if args.max_pool2x2:
-        for module in model.modules():
-            if isinstance(module, nn.MaxPool2d):
-                module.kernel_size = 2
-                module.stride = 2
-                module.padding = 0
+        model.maxpool.kernel_size = 2
+        model.maxpool.stride = 2
+        model.maxpool.padding = 0
 
     if args.bn_folding:
         from utils import _pair_conv_bn
