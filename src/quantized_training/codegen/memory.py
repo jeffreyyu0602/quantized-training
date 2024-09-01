@@ -58,6 +58,10 @@ class MemoryManager:
             tensor_size *= 2
             print(f"Node {node} is an attention mask")
 
+        if node.op == "placeholder" and len(node.shape) == 4:
+            tensor_size *= 2
+            print(f"Node {node} requires more space because of replication.")
+
         if next(iter(node.users)).target == torch.ops.aten.softmax.int:
             tensor_size *= 2
             print(f"Node {node} is an input to softmax")
