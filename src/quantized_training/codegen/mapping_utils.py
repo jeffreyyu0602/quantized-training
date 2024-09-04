@@ -97,6 +97,8 @@ def _set_tensor_field(field, node, output_dir):
     if (memory := node.meta.get("memory", None)) is not None:
         field.memory.partition = memory.partition_id
         field.memory.offset = memory.start
+    else:
+        print(f"Node {node.name} does not have memory attribute")
 
     if (reshape := node.meta.get("reshape", None)) is not None:
         arg = reshape.args[0]
@@ -297,11 +299,12 @@ def map_elementwise(node, output_dir):
         else:
             param.other_scalar = node.args[1]
 
-    # TODO: do not overload opcode. Add a new field called dtype for quantize/dequantize operations
-    if node.target == torch.ops.quantized_ops.quantize_symmetric:
-        param.opcode += "_to_" + node.args[2]
-    elif node.target == torch.ops.quantized_ops.dequantize_symmetric:
-        param.opcode += "_from_" + node.args[2]
+    # TODO: Add a new field called dtype for quantize/dequantize operations
+    if len(node.args) > 2 and node.args[2] is not None:
+        if node.target == torch.ops.quantized_ops.quantize_symmetric:
+            param.opcode += "_to_" + node.args[2]
+        elif node.target == torch.ops.quantized_ops.dequantize_symmetric:
+            param.opcode += "_from_" + node.args[2]
     return param
 
 

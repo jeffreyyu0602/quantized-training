@@ -1,9 +1,11 @@
 import copy
+import itertools
 import math
 from dataclasses import asdict, replace
 from typing import Dict, Tuple, Union, Any, Optional, Callable
 
 import torch
+from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
 from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
@@ -12,12 +14,12 @@ from torch.ao.quantization.quantizer import (
     SharedQuantizationSpec,
     QuantizationSpecBase,
 )
-from torch._export import capture_pre_autograd_graph
 from torch.fx import (
     GraphModule,
     Graph,
     Node,
 )
+from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 import quantized_training as qt
 from quantized_training.codegen.mapping import _decompose_node
@@ -249,6 +251,7 @@ QUANTIZATION_DTYPES = {
     }
 }
 
+
 def _get_quantization_map(dtype, device):
     values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
     if dtype is not None:
@@ -385,22 +388,6 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
             bias_value, scale.flatten(), bias_dtype, quant_map)
 
         bias_node.meta["dtype"] = bias_dtype
-
-
-def _fuse_dequantize_quantize(model: GraphModule):
-    # TODO combine dequantize and quantize into a single quantize node
-    dequantize_quantize_pattern = [
-        torch.ops.quantized_ops.dequantize_symmetric,
-        torch.ops.quantized_ops.quantize_symmetric,
-    ]
-    partitions = find_sequential_partitions(
-        model, dequantize_quantize_pattern, filter_fn=None
-    )
-    for partition in partitions:
-        dq_partition, q_partition = partition
-        print(dq_partition.output_nodes[0])
-        print(q_partition.output_nodes[0])
-    return model
 
 
 QUANT_OP_MAPPINGS = {
@@ -620,6 +607,49 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             graph.erase_node(user_node)
         elif user_node.target in QUANT_OP_MAPPINGS.values():
             user_node.kwargs = new_kwargs
+
+
+def _fuse_dequantize_quantize(model: GraphModule):
+    partitions = get_source_partitions(
+        model.graph, [torch.ops.quantized_ops.dequantize_symmetric]
+    )
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        dequantize_node = partition.output_nodes[0]
+        if (
+            dequantize_node.op != "call_function"
+            or dequantize_node.target != torch.ops.quantized_ops.dequantize_symmetric
+        ):
+            continue
+
+        # TODO combine dequantize and quantize into a single quantize node
+
+        scale_node = dequantize_node.args[1]
+        scale = model.get_buffer(scale_node.target)
+        if torch.any(scale != 1):
+            continue
+
+        dtype = dequantize_node.args[2]
+        if dtype is not None:
+            continue
+
+        dequantize_node.replace_all_uses_with(dequantize_node.args[0])
+        model.graph.erase_node(dequantize_node)
+
+
+def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor]):
+    from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+    from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
+    with FakeTensorMode(allow_non_fake_inputs=True) as fake_tensor_mode:
+        def to_fake_tensor(x):
+            if isinstance(x, torch.Tensor) and not isinstance(x, FakeTensor):
+                return fake_tensor_mode.from_tensor(x)
+            return x
+        example_inputs = tuple(map(to_fake_tensor, example_inputs))
+        FakeTensorProp(model, fake_tensor_mode).propagate(*example_inputs)
+    for node in model.graph.nodes:
+        if 'val' not in node.meta:
+            print(f"Node {node} does not have a val attribute")
 
 
 def convert_pt2e(model: GraphModule):

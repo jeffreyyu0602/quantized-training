@@ -3,6 +3,8 @@ from functools import reduce
 
 import torch
 
+from ..pt2e_utils import dtype_byte_size
+
 
 class Partition:
     def __init__(self, start, end, partition_id=None):
@@ -45,26 +47,19 @@ class MemoryManager:
             return None
 
         tensor_size = size or self.calculate_tensor_size(node.shape)
-
-        # TODO: this should be removed for proper double precision handling
-        # On Minotaur, biases are hardcoded to double precision. Attention masks
-        # are implemented as biases. Therefore, they need to be in double
-        # precision as well. Softmax inputs use double precision for better accuracy.
-        if node.op == "get_attr" and len(node.shape) == 1:
+        # TODO: The user might be a submodule, in which case we need to look into the submodule's graph
+        if (
+            any(n.target == torch.ops.aten.conv2d.default for n in node.users)
+            and 'val' in node.meta
+            and node.meta['val'].ndim == 4
+            and node.meta['val'].shape[1] < 16
+        ):
+            print(f"Node {node} is using replication.")
             tensor_size *= 2
-            print(f"Node {node} is a bias tensor")
-
-        if node.op == "placeholder" and len([d for d in node.shape if d > 1]) == 1:
-            tensor_size *= 2
-            print(f"Node {node} is an attention mask")
-
-        if node.op == "placeholder" and len(node.shape) == 4:
-            tensor_size *= 2
-            print(f"Node {node} requires more space because of replication.")
-
-        if next(iter(node.users)).target == torch.ops.aten.softmax.int:
-            tensor_size *= 2
-            print(f"Node {node} is an input to softmax")
+        elif node.meta.get('dtype', None) is not None:
+            tensor_size *= dtype_byte_size(node.meta['dtype'])
+        else:
+            tensor_size *= dtype_byte_size(node.value.dtype)
 
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:

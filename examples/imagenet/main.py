@@ -220,7 +220,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # TODO there are two cases here: 1. Evaluate a QAT model trained with batch
         # norm folded. 2. Evaluate a pretrained model and fold batch norm. We need
         # to fuse models differently in these two cases.
-        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)          
+        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
 
     # If we are doing QAT or inference with batch norm folded, we need to swap
     # the intrinsic modules with their quantized counterparts.

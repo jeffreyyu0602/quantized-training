@@ -52,7 +52,10 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
             value_remap[node] = new_node
 
             if node.op == "get_attr":
-                model.register_buffer(new_node.target, gm.get_buffer(node.target))
+                if node.target in model._buffers:
+                    model.register_buffer(new_node.target, gm.get_buffer(node.target))
+                elif node.target in model._parameters:
+                    model.register_parameter(new_node.target, gm.get_parameter(node.target))
 
             # Update the node name in the source_fn_stack, which is used in get_source_partitions
             if (source_fn_st := new_node.meta.get('source_fn_stack', None)) is not None:
@@ -244,43 +247,40 @@ def _partitions_sequential(partitions: List[SourcePartition], node_order: Dict[N
     return True
 
 
-def _make_node_partition(node: Node) -> SourcePartition:
-    module_type = None
-    if (source_fn_st := node.meta.get("source_fn_stack", None)) is not None:
-        module_type = source_fn_st[-1][1]
+def make_partition(nodes: List[Node], module_type: Type = None) -> SourcePartition:
+    if isinstance(nodes, Node):
+        nodes = [nodes]
+        source_fn_st = nodes[0].meta.get("source_fn_stack", None)
+        if module_type is None and source_fn_st is not None:
+            module_type = source_fn_st[-1][1]
 
-    def make_partition(nodes: List[Node], module_type: Type) -> SourcePartition:
-        input_nodes = set()
-        output_nodes = set()
-        params = set()
-        for node in nodes:
-            for arg in node.args:
-                if isinstance(arg, Node) and arg not in nodes:
-                    input_nodes.add(arg)
+    input_nodes = set()
+    output_nodes = set()
+    params = set()
+    for node in nodes:
+        for arg in node.args:
+            if isinstance(arg, Node) and arg not in nodes:
+                input_nodes.add(arg)
 
-            if node.op == "get_attr":
-                params.add(node)
+        if node.op == "get_attr":
+            params.add(node)
 
-            for user in node.users.keys():
-                if user not in nodes:
-                    output_nodes.add(node)
+        for user in node.users.keys():
+            if user not in nodes:
+                output_nodes.add(node)
 
-        return SourcePartition(
-            nodes,
-            module_type,
-            list(input_nodes),
-            list(output_nodes),
-            list(params),  # type: ignore[arg-type]
-        )
-
-    return make_partition([node], module_type)
+    return SourcePartition(
+        nodes,
+        module_type,
+        list(input_nodes),
+        list(output_nodes),
+        list(params),  # type: ignore[arg-type]
+    )
 
 
 def fuse_operator(model: GraphModule, pipeline=None):
     if pipeline is None:
         pipeline = {}
-
-    split_multi_head_attention(model)
 
     graph = model.graph
 
@@ -316,7 +316,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
             nops = []
             node_iter = next(iter(last_node.users))
             while _is_nop(node_iter.target) and len(node_iter.users) == 1:
-                nops.append(_make_node_partition(node_iter))
+                nops.append(make_partition(node_iter))
                 node_iter = next(iter(node_iter.users))
 
             matched = False
@@ -435,7 +435,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 input_node = output_node.args[0]
                 split_nodes_on_path(graph, reshape_nodes)
                 for new_user in input_node.users:
-                    partitions.insert(0, _make_node_partition(new_user))
+                    partitions.insert(0, make_partition(new_user))
                 break
 
             user = next(iter(user.users))
@@ -505,7 +505,8 @@ def fuse_operator(model: GraphModule, pipeline=None):
 
     graph.lint()
     graph.eliminate_dead_code()
-    return GraphModule(model, graph)
+    model.recompile()
+    return model
 
 
 def _map_operation(node: Node, output_dir: str):

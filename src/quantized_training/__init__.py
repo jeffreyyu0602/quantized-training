@@ -2,6 +2,7 @@ from .decomposed import *
 from .fake_quantize import *
 from .fp8 import *
 from .posit import *
+from .pt2e_utils import *
 from .qconfig import *
 from .quantize import *
 from .quantize_pt2e import *
@@ -16,6 +17,9 @@ __all__ = [
     "QuantizationSpec",
     "add_qspec_args",
     "convert",
+    "dispatch_model",
+    "dtype_byte_size",
+    "get_device_map",
     "get_qconfig",
     "get_quantized_model",
     "get_quantizer",
@@ -24,6 +28,7 @@ __all__ = [
     "prepare",
     "prepare_pt2e",
     "propagate_config",
+    "propagate_fake_tensor",
     "quantize",
     "quantize_to_fp8_e4m3",
     "quantize_to_fp8_e5m2",

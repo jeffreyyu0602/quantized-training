@@ -16,7 +16,13 @@ from transformers import (
 )
 from tqdm import tqdm
 
-from quantized_training import add_qspec_args, convert_pt2e, get_quantizer, prepare_pt2e
+from quantized_training import (
+    add_qspec_args,
+    convert_pt2e,
+    get_quantizer,
+    prepare_pt2e,
+    propagate_fake_tensor,
+)
 from quantized_training.codegen import (
     MemoryManager,
     ShapeProp,
@@ -25,6 +31,7 @@ from quantized_training.codegen import (
     fuse_operator,
     gen_code,
     gen_compute_graph,
+    split_multi_head_attention,
 )
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -134,7 +141,9 @@ def transform(
         for stage, ops in pipeline.items()
     }
 
-    gm = fuse_operator(gm, pipeline)
+    propagate_fake_tensor(gm, example_args)
+    split_multi_head_attention(gm)
+    fuse_operator(gm, pipeline)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
@@ -286,6 +295,9 @@ if __name__ == "__main__":
         position_ids = torch.ones((1, 128), dtype=torch.long)
         head_mask = None
 
+        if args.bf16:
+            model.bfloat16()
+
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = model.mobilebert.get_extended_attention_mask(attention_mask, input_shape)
@@ -316,8 +328,14 @@ if __name__ == "__main__":
                 output = self.classifier(first_token_tensor)
                 return output
 
+        mobilebert = MobileBertNoEmbed()
+
+        quantizer = get_quantizer(args.activation, args.weight)
+        mobilebert = prepare_pt2e(mobilebert, quantizer, example_args)
+        convert_pt2e(mobilebert)
+
         pt_out, gm_out = transform(
-            MobileBertNoEmbed(),
+            mobilebert,
             example_args,
             output_file="mobilebert",
             output_dir=args.output_dir,

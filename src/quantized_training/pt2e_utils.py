@@ -7,6 +7,13 @@ from accelerate.big_modeling import infer_auto_device_map
 from accelerate.utils import get_max_memory
 
 
+__all__ = [
+    "dispatch_model",
+    "dtype_byte_size",
+    "get_device_map",
+]
+
+
 def dtype_byte_size(dtype: torch.dtype):
     """
     Returns the size (in bytes) occupied by one parameter of type `dtype`.
@@ -20,11 +27,7 @@ def dtype_byte_size(dtype: torch.dtype):
     """
     if dtype == torch.bool:
         return 1 / 8
-    # elif dtype == CustomDtype.INT4:
-    #     return 1 / 2
-    # elif dtype == CustomDtype.FP8:
-    #     return 1
-    bit_search = re.search(r"[^\d](\d+)$", str(dtype))
+    bit_search = re.search(r"[^\d](\d+)(_.*)?$", str(dtype))
     if bit_search is None:
         raise ValueError(f"`dtype` is not a valid dtype: {dtype}.")
     bit_size = int(bit_search.groups()[0])
