@@ -88,6 +88,7 @@ class QuantizationSpec(QuantizationSpecBase):
         return QuantizationSpec(**params)
 
     def __post_init__(self):
+        # TODO the error message is not printed out
         if self.quant_max is None and self.qscheme is not None:
             raise ValueError("quant_max is required for quantization.")
 

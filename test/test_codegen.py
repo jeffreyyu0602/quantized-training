@@ -45,7 +45,14 @@ OPERATOR_MAPPINGS = {
     "exp": [torch.exp],
     "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
     "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
-    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul],
+    "gemm": [
+        torch.nn.Conv2d,
+        torch.nn.Linear,
+        torch.matmul,
+        torch.ops.quantized_ops.conv2d_mx.default,
+        torch.ops.quantized_ops.linear_mx.default,
+        torch.ops.quantized_ops.matmul_mx.default,
+    ],
     "quantize": [torch.ops.quantized_ops.quantize_symmetric],
     "dequantize": [torch.ops.quantized_ops.dequantize_symmetric],
 }
@@ -261,6 +268,11 @@ if __name__ == "__main__":
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 512, 672),)
+
+        quantizer = get_quantizer(args.activation, args.weight)
+        model = prepare_pt2e(model, quantizer, example_args)
+        convert_pt2e(model)
+
         pt_out, gm_out = transform(
             model,
             example_args,
@@ -365,6 +377,11 @@ if __name__ == "__main__":
             token_type_ids=token_type_ids,
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
+
+        # TODO calibration
+        quantizer = get_quantizer(args.activation, args.weight)
+        mobilebert = prepare_pt2e(mobilebert, quantizer, example_args)
+        convert_pt2e(mobilebert)
 
         pt_out, gm_out = transform(
             BertNoEmbed(),

@@ -138,7 +138,7 @@ def map_conv2d(node, output_dir):
     """
     if node.op != "call_function" or node.target not in [
         torch.ops.aten.conv2d.default,
-        torch.ops.quantized_ops.conv2d_mx,
+        torch.ops.quantized_ops.conv2d_mx.default,
     ]:
         return None
     args = [None, None, None, 1, 0, 1, 1]
@@ -169,7 +169,7 @@ def map_linear(node, output_dir):
     """
     if node.op != "call_function" or node.target not in [
         torch.ops.aten.linear.default,
-        torch.ops.quantized_ops.linear_mx,
+        torch.ops.quantized_ops.linear_mx.default,
     ]:
         return None
     param = MatrixParam()
@@ -194,7 +194,7 @@ def map_matmul(node, output_dir):
     """
     if node.op != "call_function" or node.target not in [
         torch.ops.aten.matmul.default,
-        torch.ops.quantized_ops.matmul_mx,
+        torch.ops.quantized_ops.matmul_mx.default,
     ]:
         return None
     param = MatrixParam()
@@ -232,6 +232,9 @@ def _is_gemm_op(node: Node) -> bool:
         torch.ops.aten.conv2d.default,
         torch.ops.aten.linear.default,
         torch.ops.aten.matmul.default,
+        torch.ops.quantized_ops.conv2d_mx.default,
+        torch.ops.quantized_ops.linear_mx.default,
+        torch.ops.quantized_ops.matmul_mx.default,
     ]
 
 
@@ -263,7 +266,9 @@ def _is_elementwise_op(node: Node) -> bool:
         torch.ops.aten.tanh.default,
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
-
+        # TODO MX ops call the default Overloads of quantization operators.
+        torch.ops.quantized_ops.dequantize_symmetric.default,
+        torch.ops.quantized_ops.quantize_symmetric.default,
     ]
 
 
@@ -424,6 +429,7 @@ def _is_nop(node: Node) -> bool:
         torch.ops.aten.dropout.default,
         torch.ops.aten.expand.default,
         torch.ops.aten.flatten.using_ints,
+        torch.ops.aten.reshape.default,
         torch.ops.aten.unsqueeze.default,
         torch.ops.aten.view.default,
         operator.getitem,

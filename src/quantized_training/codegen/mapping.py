@@ -1,6 +1,5 @@
 import copy
 import itertools
-import operator
 import os
 from typing import List, Dict, Type
 
@@ -48,23 +47,24 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
             orig_node.replace_all_uses_with(value_remap[node.args[0][0]])
         else:
             with model.graph.inserting_before(orig_node):
-                new_node = model.graph.node_copy(node, lambda n : value_remap[n])
+                new_node = model.graph.node_copy(node, lambda n: value_remap[n])
             value_remap[node] = new_node
 
-            if node.op == "get_attr":
-                if node.target in model._buffers:
-                    model.register_buffer(new_node.target, gm.get_buffer(node.target))
-                elif node.target in model._parameters:
-                    model.register_parameter(new_node.target, gm.get_parameter(node.target))
+            source_fn_st = new_node.meta.setdefault('source_fn_stack', [])
+            source_fn = source_fn_st[-1][1] if len(source_fn_st) > 0 else new_node.target
+            source_fn_st.append((new_node.name, source_fn))
 
-            # Update the node name in the source_fn_stack, which is used in get_source_partitions
-            if (source_fn_st := new_node.meta.get('source_fn_stack', None)) is not None:
-                source_fn = source_fn_st[-1]
-                source_fn_st[-1] = (new_node.name, source_fn[1])
-
-            # TODO copy other metadata?
             if (nn_module_stack := orig_node.meta.get('nn_module_stack', None)) is not None:
-                new_node.meta.setdefault('nn_module_stack', copy.deepcopy(nn_module_stack))
+                new_node.meta.setdefault('nn_module_stack', nn_module_stack)
+
+            if node.op != "get_attr":
+                continue
+
+            # TODO: might have duplicate target names
+            if node.target in gm._buffers:
+                model.register_buffer(new_node.target, gm.get_buffer(node.target))
+            if node.target in gm._parameters:
+                model.register_parameter(new_node.target, gm.get_parameter(node.target))
 
     output_node = list(gm.graph.nodes)[-1]
     return [value_remap[n] for n in output_node.args[0]]
@@ -174,22 +174,28 @@ def split_multi_head_attention(model: GraphModule):
     graph.lint()
 
 
+def get_input_nodes(nodes):
+    input_nodes = []
+    for n in nodes:
+        if isinstance(n, Node):
+            input_nodes.append(n)
+        elif isinstance(n, (list, tuple)):
+            input_nodes.extend(get_input_nodes(n))
+    return input_nodes
+
+
 def _create_subgraph(nodes: List[Node]):
     new_args = []
     new_graph = torch.fx.Graph()
     value_remap = {}
 
-    def process_arg(arg):
-        if isinstance(arg, Node) and arg not in value_remap:
-            value_remap[arg] = new_graph.placeholder(arg.name)
-            new_args.append(arg)
-            value_remap[arg].meta['source_node'] = arg
-        elif isinstance(arg, (list, tuple)):
-            for n in arg:
-                process_arg(n)
-
     for node in nodes:
-        process_arg(node.args)
+        input_nodes = get_input_nodes(node.args + tuple(node.kwargs.values()))
+        for n in input_nodes:
+            if n not in value_remap:
+                value_remap[n] = new_graph.placeholder(n.name)
+                new_args.append(n)
+                value_remap[n].meta['source_node'] = n
         value_remap[node] = new_graph.node_copy(node, lambda n : value_remap[n])
 
     new_graph.output(value_remap[nodes[-1]])
@@ -350,15 +356,6 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 return g
         return None
 
-    def get_input_nodes(args):
-        input_nodes = []
-        for arg in args:
-            if isinstance(arg, Node):
-                input_nodes.append(arg)
-            elif isinstance(arg, (list, tuple)):
-                input_nodes.extend(get_input_nodes(arg))
-        return input_nodes
-
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
@@ -434,10 +431,9 @@ def fuse_operator(model: GraphModule, pipeline=None):
             # and perform fusion on each branch
             if len(user.users) > 1:
                 has_reshape_or_multiple_users = True
-                input_node = output_node.args[0]
-                split_nodes_on_path(graph, reshape_nodes)
-                for new_user in input_node.users:
-                    partitions.insert(0, make_partition(new_user))
+                groups = split_nodes_on_path(graph, reshape_nodes)
+                for g in groups:
+                    partitions.insert(0, make_partition(g[0]))
                 break
 
             user = next(iter(user.users))

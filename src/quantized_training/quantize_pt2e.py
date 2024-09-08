@@ -30,6 +30,7 @@ from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .codegen.mapping_utils import _is_nop
+from .codegen.mapping import get_input_nodes
 from .decomposed import quantized_decomposed_lib
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
@@ -395,9 +396,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
 
 
 QUANT_OP_MAPPINGS = {
-    torch.ops.aten.conv2d.default: torch.ops.quantized_ops.conv2d_mx,
-    torch.ops.aten.linear.default: torch.ops.quantized_ops.linear_mx,
-    torch.ops.aten.matmul.default: torch.ops.quantized_ops.matmul_mx,
+    torch.ops.aten.conv2d.default: torch.ops.quantized_ops.conv2d_mx.default,
+    torch.ops.aten.linear.default: torch.ops.quantized_ops.linear_mx.default,
+    torch.ops.aten.matmul.default: torch.ops.quantized_ops.matmul_mx.default,
 }
 
 
@@ -512,10 +513,6 @@ def _replace_mx_observer_node(
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
     emax = math.floor(math.log2(activation_post_process.quant_max))
 
-    @torch._dynamo.assume_constant_result
-    def get_quantization_map():
-        return activation_post_process.quant_map
-
     class QuantizeMX(torch.nn.Module):
         def forward(self, input: torch.Tensor) -> torch.Tensor: 
             reshaped = input.view(orig_shape)
@@ -525,9 +522,12 @@ def _replace_mx_observer_node(
             amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
             shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
             scale = 2 ** shared_exp
-            quant_map = get_quantization_map()
             input = torch.ops.quantized_ops.quantize_symmetric(
-                input, scale, activation_post_process.dtype, quant_map, block_size
+                input,
+                scale,
+                activation_post_process.dtype,
+                activation_post_process.quant_map,
+                block_size,
             )
             return (input, scale)
 
@@ -609,6 +609,8 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 )
             user_node.replace_all_uses_with(new_node)
             graph.erase_node(user_node)
+            source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
+            source_fn_st.append((new_node.name, new_node.target))
         elif user_node.target in QUANT_OP_MAPPINGS.values():
             user_node.kwargs = new_kwargs
 
@@ -637,17 +639,6 @@ def _eliminated_dequantize_with_no_effect(model: GraphModule):
 
         dequantize_node.replace_all_uses_with(dequantize_node.args[0])
         model.graph.erase_node(dequantize_node)
-
-
-def get_input_nodes(nodes):
-    if isinstance(nodes, Node):
-        return [nodes]
-    elif isinstance(nodes, (list, tuple)):
-        input_nodes = []
-        for n in nodes:
-            input_nodes.extend(get_input_nodes(n))
-        return input_nodes
-    return []
 
 
 def _fuse_quantize_with_previous_nodes(model: GraphModule):

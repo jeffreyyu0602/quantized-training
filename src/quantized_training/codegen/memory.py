@@ -50,8 +50,6 @@ class MemoryManager:
         # TODO: The user might be a submodule, in which case we need to look into the submodule's graph
         if (
             any(n.target == torch.ops.aten.conv2d.default for n in node.users)
-            and 'val' in node.meta
-            and node.meta['val'].ndim == 4
             and node.meta['val'].shape[1] < 16
         ):
             print(f"Node {node} is using replication.")
@@ -60,6 +58,9 @@ class MemoryManager:
             tensor_size *= dtype_byte_size(node.meta['dtype'])
         else:
             tensor_size *= dtype_byte_size(node.value.dtype)
+
+        # torch.bool has 1/8 byte. Round total size to the nearest byte.
+        tensor_size = int(tensor_size)
 
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
