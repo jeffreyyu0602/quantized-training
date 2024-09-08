@@ -29,6 +29,7 @@ from quantized_training.quantizer.quantizer import QuantizationSpec
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
+from .codegen.mapping_utils import _is_nop
 from .decomposed import quantized_decomposed_lib
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
@@ -331,7 +332,10 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     # Insert a dequantize node after each user
     for user_node in orig_fq_users:
         user_node.meta["dtype"] = output_dtype
-        maybe_dq_node = next(iter(user_node.users))
+        # Find the node that appear the earlist in the graph and insert dequantize node before it
+        node_index_map = {n: i for i, n in enumerate(graph.nodes)}
+        all_user_nodes = sorted(user_node.users.keys(), key=lambda n: node_index_map.get(n, float('inf')))
+        maybe_dq_node = all_user_nodes[0]
         if (
             maybe_dq_node.op != "call_function"
             or maybe_dq_node.target != torch.ops.quantized_ops.dequantize_symmetric
@@ -609,7 +613,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             user_node.kwargs = new_kwargs
 
 
-def _fuse_dequantize_quantize(model: GraphModule):
+def _eliminated_dequantize_with_no_effect(model: GraphModule):
     partitions = get_source_partitions(
         model.graph, [torch.ops.quantized_ops.dequantize_symmetric]
     )
@@ -622,8 +626,6 @@ def _fuse_dequantize_quantize(model: GraphModule):
         ):
             continue
 
-        # TODO combine dequantize and quantize into a single quantize node
-
         scale_node = dequantize_node.args[1]
         scale = model.get_buffer(scale_node.target)
         if torch.any(scale != 1):
@@ -635,6 +637,90 @@ def _fuse_dequantize_quantize(model: GraphModule):
 
         dequantize_node.replace_all_uses_with(dequantize_node.args[0])
         model.graph.erase_node(dequantize_node)
+
+
+def get_input_nodes(nodes):
+    if isinstance(nodes, Node):
+        return [nodes]
+    elif isinstance(nodes, (list, tuple)):
+        input_nodes = []
+        for n in nodes:
+            input_nodes.extend(get_input_nodes(n))
+        return input_nodes
+    return []
+
+
+def _fuse_quantize_with_previous_nodes(model: GraphModule):
+    graph = model.graph
+    partitions = get_source_partitions(
+        model.graph, [torch.ops.quantized_ops.quantize_symmetric]
+    )
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        quantize_node = partition.output_nodes[0]
+        if (
+            quantize_node.op != "call_function"
+            or quantize_node.target != torch.ops.quantized_ops.quantize_symmetric
+        ):
+            continue
+
+        orig_args = list(quantize_node.args)
+
+        def find_source_node_and_insert_quantize(node):
+            quantized_nodes = []
+            prev_node = node
+            while len(prev_node.users) == 1:
+                if _is_nop(prev_node) or prev_node.target in [
+                    torch.ops.aten.permute.default, torch.ops.aten.transpose.int,
+                ]:
+                    quantized_nodes.append(prev_node)
+                    prev_node = prev_node.args[0]
+                elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+                    # If there is a split, trace each branch separately
+                    nodes = get_input_nodes(prev_node.args)
+                    for arg in nodes:
+                        quantized_nodes.extend(find_source_node_and_insert_quantize(arg))
+                    return quantized_nodes
+                elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
+                    # TODO: combine dequantize and quantize into a single quantize node
+                    pass
+                else:
+                    break
+
+            if id(prev_node) == id(quantize_node.args[0]):
+                return quantized_nodes
+
+            user = next(iter(prev_node.users))
+            with model.graph.inserting_before(user):
+                qparam_node = graph.node_copy(orig_args[1])
+                quant_map_node = graph.node_copy(orig_args[3])
+                quantize_op_inputs = [prev_node, qparam_node, quantize_node.args[2], quant_map_node]
+                new_node = graph.call_function(
+                    torch.ops.quantized_ops.quantize_symmetric,
+                    tuple(quantize_op_inputs),
+                    {}
+                )
+
+            user.replace_input_with(prev_node, new_node)
+
+            model.register_buffer(qparam_node.target, model.get_buffer(qparam_node.target))
+            model.register_buffer(quant_map_node.target, model.get_buffer(quant_map_node.target))
+
+            source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
+            source_fn_st.append((new_node.name, new_node.target))
+
+            return quantized_nodes
+
+        quantized_nodes = find_source_node_and_insert_quantize(quantize_node.args[0])
+
+        for n in quantized_nodes:
+            n.meta["dtype"] = orig_args[2]
+
+        if len(quantized_nodes) > 0:
+            quantize_node.replace_all_uses_with(orig_args[0])
+            graph.erase_node(quantize_node)
+            graph.erase_node(orig_args[1])
+            graph.erase_node(orig_args[3])
 
 
 def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor]):
@@ -665,7 +751,8 @@ def convert_pt2e(model: GraphModule):
                 else:
                     _replace_observer_with_quantize_dequantize_node_decomposed(model, node, modules)
 
-    _fuse_dequantize_quantize(model)
+    _eliminated_dequantize_with_no_effect(model)
+    _fuse_quantize_with_previous_nodes(model)
 
     model.graph.lint()
     model.recompile()

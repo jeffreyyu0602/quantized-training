@@ -8,7 +8,7 @@ from datasets import load_dataset
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToJson
 from torch._export import capture_pre_autograd_graph
-from torchvision.models import resnet18, resnet50, ResNet18_Weights, ResNet50_Weights
+from torchvision import models
 from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForSemanticSegmentation,
@@ -33,6 +33,7 @@ from quantized_training.codegen import (
     gen_compute_graph,
     split_multi_head_attention,
 )
+from quantized_training.quantize_pt2e import _fuse_quantize_with_previous_nodes
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 
@@ -143,6 +144,10 @@ def transform(
 
     propagate_fake_tensor(gm, example_args)
     split_multi_head_attention(gm)
+
+    # We need to swap the order of quantize op again after splitting multi-head attention
+    _fuse_quantize_with_previous_nodes(gm)
+
     fuse_operator(gm, pipeline)
     gm.graph.print_tabular()
 
@@ -189,6 +194,13 @@ def transform(
     return pt_out, gm_out
 
 
+TORCHVISION_MODELS = {
+    "resnet18": models.resnet18,
+    "resnet50": models.resnet50,
+    "mobilenet": models.mobilenet_v2,
+}
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     torch.set_printoptions(precision=10)
@@ -199,40 +211,27 @@ if __name__ == "__main__":
     add_qspec_args(parser)
     args = parser.parse_args()
 
-    if args.model == "resnet18":
-        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
+    if args.model in TORCHVISION_MODELS:
+        model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
+
+        if args.bf16:
+            model.bfloat16()
+        torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
         module_names = [name for name, _ in model.named_modules()]
         modules_to_fuse = _pair_conv_bn(module_names)
-        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
+        if len(modules_to_fuse) > 0:
+            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         # Accelerator only supports 2x2 maxpool
-        model.maxpool.kernel_size = 2
-        model.maxpool.stride = 2
-        model.maxpool.padding = 0
-
-        example_args = (torch.randn(1, 3, 224, 224),)
-        pt_out, gm_out = transform(
-            model,
-            example_args,
-            output_file="resnet18",
-            output_dir=args.output_dir,
-        )
-
-    if args.model == "qresnet18":
-        model = resnet18(weights=ResNet18_Weights.DEFAULT).eval()
-        model.bfloat16()
-
-        module_names = [name for name, _ in model.named_modules()]
-        modules_to_fuse = _pair_conv_bn(module_names)
-        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
-
-        # Accelerator only supports 2x2 maxpool
-        model.maxpool.kernel_size = (2, 2)
-        model.maxpool.padding = 0
+        for module in model.modules():
+            if isinstance(module, torch.nn.MaxPool2d):
+                module.kernel_size = 2
+                module.stride = 2
+                module.padding = 0
 
         quantizer = get_quantizer(args.activation, args.weight)
-        example_args = (torch.randn(1, 3, 224, 224, dtype=torch.bfloat16),)
+        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         model = prepare_pt2e(model, quantizer, example_args)
 
         dataset = load_dataset("zh-plus/tiny-imagenet")
@@ -242,29 +241,15 @@ if __name__ == "__main__":
         for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
             with torch.no_grad():
-                model(inputs.pixel_values.bfloat16())
+                model(inputs.pixel_values.to(torch_dtype))
 
         convert_pt2e(model)
 
+        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         pt_out, gm_out = transform(
             model,
             example_args,
-            output_file="qresnet18",
-            output_dir=args.output_dir,
-        )
-
-    if args.model == "resnet50":
-        model = resnet50(weights=ResNet50_Weights.DEFAULT).eval()
-
-        module_names = [name for name, _ in model.named_modules()]
-        modules_to_fuse = _pair_conv_bn(module_names)
-        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
-
-        example_args = (torch.randn(1, 3, 224, 224),)
-        pt_out, gm_out = transform(
-            model,
-            example_args,
-            output_file="resnet50",
+            output_file=args.model,
             output_dir=args.output_dir,
         )
 

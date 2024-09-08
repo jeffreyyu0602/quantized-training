@@ -227,16 +227,16 @@ def map_layer_norm(node, output_dir):
     return param
 
 
-def _is_gemm_op(op: Callable) -> bool:
-    return op in [
+def _is_gemm_op(node: Node) -> bool:
+    return node.target in [
         torch.ops.aten.conv2d.default,
         torch.ops.aten.linear.default,
         torch.ops.aten.matmul.default,
     ]
 
 
-def _is_elementwise_op(op: Callable) -> bool:
-    return op in [
+def _is_elementwise_op(node: Node) -> bool:
+    return node.target in [
         torch.ops.aten.abs.default,
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add_.Tensor,
@@ -247,6 +247,8 @@ def _is_elementwise_op(op: Callable) -> bool:
         torch.ops.aten.floor.default,
         torch.ops.aten.gelu.default,
         torch.ops.aten.gelu_.default,
+        torch.ops.aten.hardtanh.default,
+        torch.ops.aten.hardtanh_.default,
         torch.ops.aten.log.default,
         torch.ops.aten.log2.default,
         torch.ops.aten.mul.Tensor,
@@ -281,7 +283,7 @@ def map_elementwise(node, output_dir):
     relu(Tensor self) -> Tensor
     gelu(Tensor self, *, str approximate='none') -> Tensor
     """
-    if node.op != "call_function" or not _is_elementwise_op(node.target):
+    if node.op != "call_function" or not _is_elementwise_op(node):
         return None
     param = VectorParam()
     param.name = node.name
@@ -414,8 +416,8 @@ def map_transpose(node, output_dir):
     return param
 
 
-def _is_nop(op: Callable) -> bool:
-    return op in [
+def _is_nop(node: Node) -> bool:
+    return node.target in [
         torch.ops.aten.clone.default,
         torch.ops.aten.contiguous.default,
         # TODO: remove?

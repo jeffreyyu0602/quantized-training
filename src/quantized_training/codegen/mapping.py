@@ -215,6 +215,8 @@ def _create_and_insert_subgraph(
     for node in reversed(nodes):
         model.graph.erase_node(node)
     new_node.meta['source_module'] = submodule
+    if (dtype := nodes[-1].meta.get('dtype', None)) is not None:
+        new_node.meta['dtype'] = dtype
     return new_node
 
 
@@ -315,7 +317,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
             # include these nodes in the fusion candidates.
             nops = []
             node_iter = next(iter(last_node.users))
-            while _is_nop(node_iter.target) and len(node_iter.users) == 1:
+            while _is_nop(node_iter) and len(node_iter.users) == 1:
                 nops.append(make_partition(node_iter))
                 node_iter = next(iter(node_iter.users))
 
@@ -373,7 +375,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
         reshape_nodes = []
         prev_node = output_node
         has_reshape_or_multiple_inputs = False
-        while not _is_gemm_op(prev_node.target) and not _is_elementwise_op(prev_node.target):
+        while not _is_gemm_op(prev_node) and not _is_elementwise_op(prev_node):
             reshape_nodes.insert(0, prev_node)
 
             # right now we don't support fusing more than one reshape operation.
@@ -417,7 +419,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
         user = output_node
         reshape_nodes = []
         has_reshape_or_multiple_users = False
-        while not _is_gemm_op(user.target) and not _is_elementwise_op(user.target):
+        while not _is_gemm_op(user) and not _is_elementwise_op(user):
             reshape_nodes.append(user)
 
             # we cannot fuse multiple reshape operations together
@@ -498,7 +500,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 node.meta['reshape'] = n
             else:
                 input_node = n
-                while not _is_gemm_op(user.target) and not _is_elementwise_op(user.target):
+                while not _is_gemm_op(user) and not _is_elementwise_op(user):
                     input_node = user
                     user = next(iter(user.users))
                 input_node.meta['reshape'] = n
@@ -573,7 +575,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # Propagate memory metadata for nop nodes
         # TODO: slice op and non-zero select op should be handled separately
         if (
-            _is_nop(node.target)
+            _is_nop(node)
             or node.target == torch.ops.aten.slice.Tensor
             or node.target == torch.ops.aten.select.int and node.args[1] != 0
         ):
@@ -626,7 +628,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             for n in gm.graph.nodes:
                 if n.op == 'placeholder':
                     n.meta['memory'] = next(node_args).meta.get('memory', None)
-                elif _is_nop(n.target) or n.target in [
+                elif _is_nop(n) or n.target in [
                     torch.ops.aten.permute.default,
                     torch.ops.aten.transpose.int,
                 ]:
@@ -635,7 +637,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # We treat cat, select, slice, and stack operations as nops. Therefore,
         # we need to find if their immediate users have been visited.
         def _node_visited(n):
-            if _is_nop(n.target) or n.target in [
+            if _is_nop(n) or n.target in [
                 torch.ops.aten.cat.default,
                 torch.ops.aten.select.int,
                 torch.ops.aten.slice.Tensor,
