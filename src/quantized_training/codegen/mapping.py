@@ -62,6 +62,8 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
 
             # TODO: might have duplicate target names
             if node.target in gm._buffers:
+                if new_node.target in model._buffers:
+                    print("WARNING: duplicate buffer name", new_node.target)
                 model.register_buffer(new_node.target, gm.get_buffer(node.target))
             if node.target in gm._parameters:
                 model.register_parameter(new_node.target, gm.get_parameter(node.target))

@@ -98,10 +98,10 @@ def conv2d_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * scale_inp
+        input = input * (2 ** scale_inp)
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * scale_wt
+        weight = weight * (2 ** scale_wt)
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 quantized_decomposed_lib.define(
@@ -118,10 +118,10 @@ def linear_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * scale_inp
+        input = input * (2 ** scale_inp)
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * scale_wt
+        weight = weight * (2 ** scale_wt)
     return F.linear(input, weight, bias)
 
 quantized_decomposed_lib.define(
@@ -137,8 +137,8 @@ def matmul_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * scale_inp
+        input = input * (2 ** scale_inp)
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * scale_wt
+        weight = weight * (2 ** scale_wt)
     return torch.matmul(input, weight)

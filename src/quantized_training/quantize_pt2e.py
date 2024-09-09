@@ -412,10 +412,9 @@ def _calculate_mx_qparam(
     axes = [x + input.ndim if x < 0 else x for x in axes]
 
     # Perform tiling to the hardware vector size
-    if block_size > 0:
-        reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(
-            input, axes, block_size
-        )
+    reshaped, axes, _, _ = _reshape_to_blocks(
+        input, axes, block_size
+    )
 
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
@@ -432,7 +431,7 @@ def _calculate_mx_qparam(
         # Remove extra dimension
         shared_exp = torch.squeeze(shared_exp, dim=axis + 1)
 
-    return (2 ** shared_exp).to(input.dtype)
+    return shared_exp.to(input.dtype)
 
 
 def _calculate_mx_padding(A, axes, block_size):
@@ -521,15 +520,14 @@ def _replace_mx_observer_node(
 
             amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
             shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
-            scale = 2 ** shared_exp
             input = torch.ops.quantized_ops.quantize_symmetric(
                 input,
-                scale,
+                2 ** shared_exp,
                 activation_post_process.dtype,
                 activation_post_process.quant_map,
                 block_size,
             )
-            return (input, scale)
+            return (input, shared_exp)
 
     gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
     return _decompose_node(model, gm, node)
@@ -556,7 +554,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     if input_node.op == 'get_attr':
         # quantize model parameter and remove fq module
         param = param_dict[input_node.target]
-        scale = _calculate_mx_qparam(
+        shared_exp = _calculate_mx_qparam(
             param.data,
             activation_post_process.quant_max,
             activation_post_process.ch_axis,
@@ -564,11 +562,11 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         )
         with graph.inserting_before(node):
             qparam_node_wt = create_getattr_from_value(
-                model, graph, next(iter(node.users)).name + "_scale_", scale)
+                model, graph, input_node.name + "_scale_", shared_exp)
 
         param.data = torch.ops.quantized_ops.quantize_symmetric(
             param.data,
-            scale,
+            2 ** shared_exp,
             input_dtype,
             activation_post_process.quant_map,
             activation_post_process.block_size,
@@ -577,6 +575,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
         # annotate weight node dtype
         input_node.meta["dtype"] = input_dtype
+        qparam_node_wt.meta["dtype"] = "e8m0"
     else:
         quantized_node, qparam_node_inp = _replace_mx_observer_node(
             model,
@@ -585,6 +584,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             activation_post_process,
         )
         quantized_node.meta["dtype"] = input_dtype
+        qparam_node_inp.meta["dtype"] = "e8m0"
     graph.erase_node(node)
 
     for user_node in orig_fq_users:
