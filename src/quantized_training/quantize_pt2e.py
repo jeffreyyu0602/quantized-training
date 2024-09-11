@@ -681,6 +681,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
             if id(prev_node) == id(quantize_node.args[0]):
                 return quantized_nodes
 
+            # TODO is there a way we only move the node around and does not make a copy of the node?
             user = next(iter(prev_node.users))
             with model.graph.inserting_before(user):
                 qparam_node = graph.node_copy(orig_args[1])
@@ -693,10 +694,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
                 )
 
             user.replace_input_with(prev_node, new_node)
-
-            model.register_buffer(qparam_node.target, model.get_buffer(qparam_node.target))
-            model.register_buffer(quant_map_node.target, model.get_buffer(quant_map_node.target))
-
+            new_node.meta = quantize_node.meta
             source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
             source_fn_st.append((new_node.name, new_node.target))
 
