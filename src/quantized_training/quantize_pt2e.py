@@ -575,7 +575,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
         # annotate weight node dtype
         input_node.meta["dtype"] = input_dtype
-        qparam_node_wt.meta["dtype"] = "e8m0"
+        qparam_node_wt.meta["dtype"] = "int8"
     else:
         quantized_node, qparam_node_inp = _replace_mx_observer_node(
             model,
@@ -584,7 +584,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             activation_post_process,
         )
         quantized_node.meta["dtype"] = input_dtype
-        qparam_node_inp.meta["dtype"] = "e8m0"
+        qparam_node_inp.meta["dtype"] = "int8"
     graph.erase_node(node)
 
     for user_node in orig_fq_users:
