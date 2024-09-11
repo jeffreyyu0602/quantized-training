@@ -47,17 +47,27 @@ class MemoryManager:
             return None
 
         tensor_size = size or self.calculate_tensor_size(node.shape)
-        # TODO: The user might be a submodule, in which case we need to look into the submodule's graph
-        if (
-            any(n.target == torch.ops.aten.conv2d.default for n in node.users)
-            and node.meta['val'].shape[1] < 16
-        ):
-            print(f"Node {node} is using replication.")
-            tensor_size *= 2
-        elif node.meta.get('dtype', None) is not None:
+        if node.meta.get('dtype', None) is not None:
             tensor_size *= dtype_byte_size(node.meta['dtype'])
         else:
             tensor_size *= dtype_byte_size(node.value.dtype)
+
+        def is_conv2d_input(n):
+            if n.op == 'get_attr':
+                return False
+            for user in n.users:
+                if user.target == torch.ops.aten.conv2d.default:
+                    return True
+                elif user.op == 'call_module':
+                    submodule = user.meta['source_module']
+                    for sn in submodule.graph.nodes:
+                        if sn.op == 'placeholder' and sn.name == n.name:
+                            return is_conv2d_input(sn)
+            return False
+
+        if is_conv2d_input(node) and node.value.shape[1] < 16:
+            print(f"Node {node} requires replication. Increase memory size.")
+            tensor_size *= 2
 
         # torch.bool has 1/8 byte. Round total size to the nearest byte.
         tensor_size = int(tensor_size)
