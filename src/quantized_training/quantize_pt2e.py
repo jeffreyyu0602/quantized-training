@@ -672,14 +672,15 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
                     for arg in nodes:
                         quantized_nodes.extend(find_source_node_and_insert_quantize(arg))
                     return quantized_nodes
-                elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
-                    # TODO: combine dequantize and quantize into a single quantize node
-                    pass
                 else:
                     break
 
             if id(prev_node) == id(quantize_node.args[0]):
                 return quantized_nodes
+
+            # TODO: combine dequantize and quantize into a single quantize node
+            if prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
+                pass
 
             # TODO is there a way we only move the node around and does not make a copy of the node?
             user = next(iter(prev_node.users))
