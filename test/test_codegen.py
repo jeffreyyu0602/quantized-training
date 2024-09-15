@@ -238,6 +238,9 @@ if __name__ == "__main__":
                 module.padding = 0
 
         quantizer = get_quantizer(args.activation, args.weight)
+
+        quantizer.set_module_name("fc", None)
+
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         model = prepare_pt2e(model, quantizer, example_args)
 
