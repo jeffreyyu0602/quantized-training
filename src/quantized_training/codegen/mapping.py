@@ -110,13 +110,10 @@ def split_nodes_on_path(graph: Graph, nodes: List[Node]):
             user.replace_input_with(node, new_node)
             node_groups[i].insert(0, new_node)
 
-            # The node_copy function performs a shallow copy of the metadata dictionary.
-            # As a result, modifying the source_fn metadata could affect other nodes. To
-            # prevent these side effects, we perform a deep copy of the source_fn_stack.
-            source_fn_st = copy.deepcopy(node.meta['source_fn_stack'])
-            source_fn = source_fn_st[-1]
-            source_fn_st[-1] = (new_node.name, source_fn[1])
-            new_node.meta['source_fn_stack'] = source_fn_st
+            # Copy and update the source_fn_stack
+            if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
+                source_fn = source_fn_st[-1]
+                new_node.meta['source_fn_stack'] = source_fn_st + [(new_node.name, source_fn[1])]
         graph.erase_node(node)
     return node_groups
 
@@ -128,7 +125,7 @@ def split_multi_head_attention(model: GraphModule):
     count = 0
     for partition in partitions:
         # we group matmul into pairs. This logic assumes that torch.matmul
-        # is only used in multi-head attention. This logic should be improved.
+        # is only used in multi-head attention.
         count += 1
         if count % 2 == 0:
             continue
@@ -141,36 +138,59 @@ def split_multi_head_attention(model: GraphModule):
             user_node = next(iter(user_node.users))
             fused_nodes.append(user_node)
 
+        query = output_node.args[0]
+        key = output_node.args[1]
+        value = user_node.args[1]
+
         output_1 = _decompose_bmm(model, fused_nodes[0])
         output_2 = _decompose_bmm(model, fused_nodes[-1])
-        if output_1 is None and output_2 is None:
+        if output_1 is None:
             continue
 
+        # Before splitting the nodes:
+        # select -> matmul \                          / select_1 -> select_2
+        #       ...
+        # select -> matmul -> stack -> view -> group -> select_1 -> select_2
+        # select -> matmul /                          \ select_1 -> select_2
         node_groups = split_nodes_on_path(graph, fused_nodes[1:-1])
 
-        # match the select index of inputs to first matmul and second matmul
-        matmul_1 = output_1.args[0].args[0]
-        for node in matmul_1:
+        # After splitting the nodes:
+        # select -> matmul \                 / group 1 -> select_1 -> select_2
+        #       ...
+        # select -> matmul -> stack -> view -> group N-1 -> select_1 -> select_2
+        # select -> matmul /                 \ group N -> select_1 -> select_2
+        # We can match the decomposed matmul nodes with a specific path and remove
+        # the stack and view nodes. Each group perform a single head attention.
+        # Final graph:
+        # select -> matmul -> group 1 -> matmul
+        #       ...
+        # select -> matmul -> group N-1 -> matmul
+        # select -> matmul -> group N -> matmul
+        matmul_nodes = output_1.args[0].args[0]
+        for node in matmul_nodes:
             select = node.args[0]
             for group in node_groups:
-                last_node = group[-1]
-                select_2 = next(iter(last_node.users))
-                select_2 = next(iter(select_2.users))
-                if select_2.args[1:] != select.args[1:]:
-                    continue
-                group[0].replace_input_with(group[0].args[0], node)
-                select_2.replace_all_uses_with(group[-1])
+                select_1 = next(iter(group[-1].users))
+                select_2 = next(iter(select_1.users))
+                if select_2.args[1:] == select.args[1:]:
+                    group[0].replace_input_with(group[0].args[0], node)
+                    select_2.replace_all_uses_with(group[-1])
+                    break
 
-        from torch.fx.experimental import proxy_tensor
+        def propagate_dtype(node):
+            if (dtype := node.meta.get('dtype', None)) is None:
+                return
+            select_nodes = list(node.users)
+            while len(select_nodes) > 0:
+                select = select_nodes.pop(0)
+                select.meta['dtype'] = dtype
+                select_nodes.extend([
+                    n for n in select.users if n.target != torch.ops.aten.matmul.default
+                ])
 
-        # Update tensor metadata of each node
-        for group in node_groups:
-            for node in group:
-                args = torch.fx.node.map_aggregate(
-                    node.args, lambda n: n.meta['val'] if isinstance(n, Node) else n
-                )
-                out = node.target(*args)
-                node.meta['val'] = proxy_tensor.extract_val(out)
+        propagate_dtype(query)
+        propagate_dtype(key)
+        propagate_dtype(value)
 
     graph.eliminate_dead_code()
     graph.lint()
@@ -455,6 +475,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 fused_nodes[n] = None
 
         # switch order of transpose and select ops
+        # TODO this logic should be improved
         if group[0].target == torch.ops.aten.transpose.int:
             transpose_node = group.pop(0)
             num_nodes = 0

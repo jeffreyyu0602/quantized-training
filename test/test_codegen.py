@@ -133,6 +133,11 @@ def transform(
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
         _convert_scalars_to_attrs(gm)
 
+    uplifted_args = flatten_args(list(example_args)) + list(example_kwargs.values())
+    ShapeProp(gm).propagate(*uplifted_args)
+    split_multi_head_attention(gm)
+    ShapeProp(gm).propagate(*uplifted_args)
+
     pipeline = {
         0: ["gemm"],
         1: ["dequantize"],
@@ -149,19 +154,11 @@ def transform(
         for stage, ops in pipeline.items()
     }
 
-    propagate_fake_tensor(gm, example_args)
-    split_multi_head_attention(gm)
-
-    # We need to swap the order of quantize op again after splitting multi-head attention
-    _fuse_quantize_with_previous_nodes(gm)
-
     fuse_operator(gm, pipeline)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
     gm_out = gm(*example_args, *list(example_kwargs.values()))
-
-    uplifted_args = flatten_args(list(example_args)) + list(example_kwargs.values())
 
     ShapeProp(gm).propagate(*uplifted_args)
 
@@ -328,14 +325,14 @@ if __name__ == "__main__":
                 output = self.classifier(first_token_tensor)
                 return output
 
-        mobilebert = MobileBertNoEmbed()
-
         quantizer = get_quantizer(args.activation, args.weight)
-        mobilebert = prepare_pt2e(mobilebert, quantizer, example_args)
-        convert_pt2e(mobilebert)
+        gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
+
+        # TODO calibration
+        convert_pt2e(gm)
 
         pt_out, gm_out = transform(
-            mobilebert,
+            gm,
             example_args,
             output_file="mobilebert",
             output_dir=args.output_dir,
@@ -381,13 +378,12 @@ if __name__ == "__main__":
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
 
-        # TODO calibration
         quantizer = get_quantizer(args.activation, args.weight)
-        mobilebert = prepare_pt2e(mobilebert, quantizer, example_args)
-        convert_pt2e(mobilebert)
+        gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
+        convert_pt2e(gm)
 
         pt_out, gm_out = transform(
-            BertNoEmbed(),
+            gm,
             example_args,
             output_file="bert",
             output_dir=args.output_dir,

@@ -1,8 +1,8 @@
 import torch
 import torch.fx
 from torch.fx.node import Node
+from torch._subclasses.fake_tensor import FakeTensorMode
 
-import copy
 from typing import Dict
 
 
@@ -21,6 +21,7 @@ class ShapeProp:
         self.mod = mod
         self.graph = mod.graph
         self.modules = dict(self.mod.named_modules())
+        self.fake_mode = FakeTensorMode()
 
     def propagate(self, *args):
         args_iter = iter(args)
@@ -57,7 +58,8 @@ class ShapeProp:
             # a generic GraphModule interpreter.
             if isinstance(result, torch.Tensor):
                 node.shape = result.shape
-                node.value = result.clone()
+                node.value = result.cpu().clone()
+                node.meta['val'] = self.fake_mode.from_tensor(result)
 
             env[node.name] = result
 
