@@ -106,20 +106,22 @@ def get_microscaling_quantizer(
 
 
 def get_per_channel_act_quantizer(
-    activation: Optional[QuantizationSpec],
+    input_activation: Optional[QuantizationSpec],
+    output_activation: Optional[QuantizationSpec],
     weight: Optional[QuantizationSpec],
+    bias: Optional[QuantizationSpec],
 ):
     # Convolution layer only support per-tensor activation quantization
-    act_qspec = replace(activation, qscheme=qt.per_tensor_symmetric)
-    qconfig_conv2d = QuantizationConfig(act_qspec, None, weight, None)
+    act_qspec = replace(input_activation, qscheme=qt.per_tensor_symmetric)
+    qconfig_conv2d = QuantizationConfig(act_qspec, output_activation, weight, bias)
 
     # Perform quantization along the outer dimension
-    act_qspec = replace(activation, ch_axis=-2)
-    qconfig_linear = QuantizationConfig(act_qspec, None, weight, None)
+    act_qspec = replace(input_activation, ch_axis=-2)
+    qconfig_linear = QuantizationConfig(act_qspec, output_activation, weight, bias)
 
-    act0_qspec = replace(activation, ch_axis=-2)
-    act1_qspec = replace(activation, ch_axis=-1)
-    qconfig_matmul = QuantizationConfig(act0_qspec, None, act1_qspec, None)
+    act0_qspec = replace(input_activation, ch_axis=-2)
+    act1_qspec = replace(input_activation, ch_axis=-1)
+    qconfig_matmul = QuantizationConfig(act0_qspec, output_activation, act1_qspec, None)
 
     return (XNNPACKQuantizer()
         .set_module_type(torch.nn.Conv2d, qconfig_conv2d)
@@ -128,9 +130,11 @@ def get_per_channel_act_quantizer(
     )
 
 
-def get_quantizer(
-    activation: Optional[QuantizationSpec],
+def get_default_quantizer(
+    input_activation: Optional[QuantizationSpec],
+    output_activation: Optional[QuantizationSpec],
     weight: Optional[QuantizationSpec],
+    bias: Optional[QuantizationSpec],
     record_histogram: bool = False,
     force_scale_power_of_two: bool = False
 ) -> XNNPACKQuantizer:
@@ -153,9 +157,9 @@ def get_quantizer(
     )
 
     qschemes = []
-    if activation is not None:
-        qschemes.append(activation.qscheme)
-        activation.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
+    if input_activation is not None:
+        qschemes.append(input_activation.qscheme)
+        input_activation.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
     if weight is not None:
         qschemes.append(weight.qscheme)
         weight.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
@@ -164,7 +168,7 @@ def get_quantizer(
         assert len(set(qschemes)) == 1, (
             f"Quantization scheme {qschemes[0]} does not work with {qschemes[1]}"
         )
-        return get_microscaling_quantizer(activation, weight)
+        return get_microscaling_quantizer(input_activation, weight)
 
     if weight is not None and weight.qscheme == qt.per_channel_symmetric:
         assert weight.ch_axis == 0, (
@@ -172,11 +176,11 @@ def get_quantizer(
             "channel dimension (dim=0)."
         )
 
-    if activation is not None and activation.qscheme == qt.per_channel_symmetric:
-        return get_per_channel_act_quantizer(activation, weight)
+    if input_activation is not None and input_activation.qscheme == qt.per_channel_symmetric:
+        return get_per_channel_act_quantizer(input_activation, weight)
 
-    qconfig = QuantizationConfig(activation, None, weight, None)
-    qconfig_matmul = QuantizationConfig(activation, None, activation, None)
+    qconfig = QuantizationConfig(input_activation, output_activation, weight, bias)
+    qconfig_matmul = QuantizationConfig(input_activation, output_activation, input_activation, None)
     return XNNPACKQuantizer().set_global(qconfig) \
         .set_operator_type(torch.ops.aten.matmul.default, qconfig_matmul)
 

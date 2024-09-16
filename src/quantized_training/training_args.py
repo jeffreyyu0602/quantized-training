@@ -330,9 +330,16 @@ def add_qspec_args(parser=None):
         default=None,
         type=QuantizationSpec.from_str,
         help=(
-            "Activation quantization data type and configurations. "
-            "Comma-separated key=value pairs using abbreviations or full names. "
-            "See below for details:\n" + qconfig_help_string
+            "Activation quantization specification. Comma-separated key=value pairs "
+            "using abbreviations or full names. See below for details:\n" + qconfig_help_string
+        ),
+    )
+    parser.add_argument(
+        "--output_activation",
+        default=None,
+        type=QuantizationSpec.from_str,
+        help=(
+            "Output activation quantization specification. Format same as activation."
         ),
     )
     parser.add_argument(
@@ -340,7 +347,15 @@ def add_qspec_args(parser=None):
         default=None,
         type=QuantizationSpec.from_str,
         help=(
-            "Weight quantization data type and configurations. Format same as activation."
+            "Weight quantization specification. Format same as activation."
+        ),
+    )
+    parser.add_argument(
+        "--bias",
+        default=None,
+        type=QuantizationSpec.from_str,
+        help=(
+            "Bias quantization specification. Format same as activation."
         ),
     )
     parser.add_argument(

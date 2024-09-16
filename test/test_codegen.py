@@ -19,7 +19,7 @@ from tqdm import tqdm
 from quantized_training import (
     add_qspec_args,
     convert_pt2e,
-    get_quantizer,
+    get_default_quantizer,
     prepare_pt2e,
     propagate_fake_tensor,
 )
@@ -35,6 +35,7 @@ from quantized_training.codegen import (
 )
 from quantized_training.quantize_pt2e import _fuse_quantize_with_previous_nodes
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
+from quantized_training.codegen.dtype_utils import annotate_dtype
 
 
 OPERATOR_MAPPINGS = {
@@ -134,6 +135,7 @@ def transform(
         _convert_scalars_to_attrs(gm)
 
     uplifted_args = flatten_args(list(example_args)) + list(example_kwargs.values())
+
     ShapeProp(gm).propagate(*uplifted_args)
     split_multi_head_attention(gm)
     ShapeProp(gm).propagate(*uplifted_args)
@@ -210,13 +212,30 @@ if __name__ == "__main__":
     torch.set_printoptions(precision=10)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="resnet50")
-    parser.add_argument("--output_dir", required=True, help="Output directory for generated tensor files")
+    parser.add_argument("model", default="resnet50")
+    parser.add_argument(
+        "--model_name_or_path",
+        default=None,
+        help="Path to pretrained model or model identifier from huggingface.co/models."
+    )
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        help="Output directory for generated tensor files"
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
+    quantizer = get_default_quantizer(
+        args.activation, args.output_activation, args.weight, args.bias
+    )
+
     if args.model in TORCHVISION_MODELS:
         model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
+
+        if args.model_name_or_path:
+            checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
+            model.load_state_dict(checkpoint['model_state_dict'])
 
         if args.bf16:
             model.bfloat16()
@@ -233,8 +252,6 @@ if __name__ == "__main__":
                 module.kernel_size = 2
                 module.stride = 2
                 module.padding = 0
-
-        quantizer = get_quantizer(args.activation, args.weight)
 
         quantizer.set_module_name("fc", None)
 
@@ -259,17 +276,19 @@ if __name__ == "__main__":
             output_file=args.model,
             output_dir=args.output_dir,
         )
-
-    if args.model == "segformer":
+    elif args.model == "segformer":
         replace_interpolate()
-        model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512").eval()
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "nvidia/segformer-b0-finetuned-ade-512-512"
+
+        model = AutoModelForSemanticSegmentation.from_pretrained(args.model_name_or_path).eval()
 
         modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 512, 672),)
 
-        quantizer = get_quantizer(args.activation, args.weight)
         model = prepare_pt2e(model, quantizer, example_args)
         convert_pt2e(model)
 
@@ -281,9 +300,10 @@ if __name__ == "__main__":
         )
         pt_out = pt_out.logits
         gm_out = gm_out.logits
-
-    if args.model == "mobilebert":
-        model = AutoModelForSequenceClassification.from_pretrained("google/mobilebert-uncased")
+    elif args.model == "mobilebert":
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "google/mobilebert-uncased"
+        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
         input_shape = input_ids.size()
@@ -325,7 +345,6 @@ if __name__ == "__main__":
                 output = self.classifier(first_token_tensor)
                 return output
 
-        quantizer = get_quantizer(args.activation, args.weight)
         gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
 
         # TODO calibration
@@ -337,9 +356,38 @@ if __name__ == "__main__":
             output_file="mobilebert",
             output_dir=args.output_dir,
         )
+    elif args.model == "mobilebert_encoder":
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "google/mobilebert-uncased"
+        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
-    if args.model == "bert":
-        model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
+        if args.bf16:
+            model.bfloat16()
+        torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
+
+        example_args = (
+            torch.randn(1, 128, 512, dtype=torch_dtype),
+            torch.ones(1, 128, 128, dtype=torch_dtype),
+            None,
+        )
+
+        gm = prepare_pt2e(model.mobilebert.encoder.layer[0], quantizer, example_args)
+
+        convert_pt2e(gm)
+
+        pt_out, gm_out = transform(
+            gm,
+            example_args,
+            output_file="mobilebert",
+            output_dir=args.output_dir,
+        )
+
+        pt_out = pt_out[0]
+        gm_out = gm_out[0]
+    elif args.model == "bert":
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "bert-base-uncased"
+        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
         input_shape = input_ids.size()
@@ -378,7 +426,6 @@ if __name__ == "__main__":
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
 
-        quantizer = get_quantizer(args.activation, args.weight)
         gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
         convert_pt2e(gm)
 
@@ -388,6 +435,8 @@ if __name__ == "__main__":
             output_file="bert",
             output_dir=args.output_dir,
         )
+    else:
+        raise ValueError(f"Model {args.model} not supported")
 
     try:
         assert torch.all(pt_out == gm_out)

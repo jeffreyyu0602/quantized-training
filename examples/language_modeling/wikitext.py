@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantized_training import (
     add_qspec_args,
-    get_quantizer,
+    get_default_quantizer,
     prepare_pt2e,
     quantize,
     plot_histogram,
@@ -60,11 +60,11 @@ def main(args):
 
     # quantize(model, args)
 
-    quantizer = get_quantizer(
-        args.activation,
-        args.weight,
-        args.record_histogram,
-        args.force_scale_power_of_two,
+    quantizer = get_default_quantizer(
+        input_activation=args.activation,
+        weight=args.weight,
+        record_histogram=args.record_histogram,
+        force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)

@@ -17,7 +17,7 @@ from metrics import eval_metrics
 from quantized_training import (
     add_qspec_args,
     convert_pt2e,
-    get_quantizer,
+    get_default_quantizer,
     prepare_pt2e,
     setup_logging,
 )
@@ -134,11 +134,11 @@ def main(args):
     modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
     model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse).to(device)
 
-    quantizer = get_quantizer(
-        args.activation,
-        args.weight,
-        args.record_histogram,
-        args.force_scale_power_of_two,
+    quantizer = get_default_quantizer(
+        input_activation=args.activation,
+        weight=args.weight,
+        record_histogram=args.record_histogram,
+        force_scale_power_of_two=args.force_scale_power_of_two,
     )
     example_args = (dataset[0]["pixel_values"].to(device),)
     model = prepare_pt2e(model, quantizer, example_args)

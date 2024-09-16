@@ -21,7 +21,7 @@ from transformers import set_seed
 from honk_model import SpeechResModel, configs
 from quantized_training import (
     add_qspec_args,
-    get_quantizer,
+    get_default_quantizer,
     prepare_pt2e,
     quantize,
     setup_logging,
@@ -300,11 +300,11 @@ def main(args):
         modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
         model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse)
 
-        quantizer = get_quantizer(
-            args.activation,
-            args.weight,
-            args.record_histogram,
-            args.force_scale_power_of_two
+        quantizer = get_default_quantizer(
+            input_activation=args.activation,
+            weight=args.weight,
+            record_histogram=args.record_histogram,
+            force_scale_power_of_two=args.force_scale_power_of_two,
         )
         batch = next(iter(train_dataloader))
         example_args = ({k: v.to(device) for k, v in batch.items()},)

@@ -22,7 +22,7 @@ __all__ = [
     "get_device_map",
     "get_qconfig",
     "get_quantized_model",
-    "get_quantizer",
+    "get_default_quantizer",
     "plot_histogram",
     "plot_layer_range",
     "prepare",
