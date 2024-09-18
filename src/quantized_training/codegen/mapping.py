@@ -130,21 +130,22 @@ def split_multi_head_attention(model: GraphModule):
         if count % 2 == 0:
             continue
 
-        # Fine the path between two matmul operations
+        # Find the path between two matmul operations
         output_node = partition.output_nodes[0]
-        user_node = next(iter(output_node.users))
-        fused_nodes = [output_node, user_node]
-        while user_node.target != torch.ops.aten.matmul.default:
-            user_node = next(iter(user_node.users))
-            fused_nodes.append(user_node)
+        next_node = next(iter(output_node.users))
+        nodes_in_path = []
+        while len(next_node.users) == 1 and next_node.target != torch.ops.aten.matmul.default:
+            nodes_in_path.append(next_node)
+            next_node = next(iter(next_node.users))
 
         query = output_node.args[0]
         key = output_node.args[1]
-        value = user_node.args[1]
+        value = next_node.args[1]
 
-        output_1 = _decompose_bmm(model, fused_nodes[0])
-        output_2 = _decompose_bmm(model, fused_nodes[-1])
-        if output_1 is None:
+        output_1 = _decompose_bmm(model, output_node)
+        output_2 = _decompose_bmm(model, next_node)
+
+        if output_1 is None or output_2 is None:
             continue
 
         # Before splitting the nodes:
@@ -152,7 +153,7 @@ def split_multi_head_attention(model: GraphModule):
         #       ...
         # select -> matmul -> stack -> view -> group -> select_1 -> select_2
         # select -> matmul /                          \ select_1 -> select_2
-        node_groups = split_nodes_on_path(graph, fused_nodes[1:-1])
+        node_groups = split_nodes_on_path(graph, nodes_in_path)
 
         # After splitting the nodes:
         # select -> matmul \                 / group 1 -> select_1 -> select_2
@@ -191,6 +192,15 @@ def split_multi_head_attention(model: GraphModule):
         propagate_dtype(query)
         propagate_dtype(key)
         propagate_dtype(value)
+
+        if (dtype := output_node.meta.get('dtype', None)) is not None:
+            for node in matmul_nodes:
+                node.meta['dtype'] = dtype
+
+        if (dtype := next_node.meta.get('dtype', None)) is not None:
+            user_nodes = [output_2, output_2.args[0]] + output_2.args[0].args[0]
+            for node in user_nodes:
+                node.meta['dtype'] = dtype
 
     graph.eliminate_dead_code()
     graph.lint()
