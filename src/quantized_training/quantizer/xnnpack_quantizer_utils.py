@@ -1,6 +1,6 @@
 import itertools
 import operator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional
 
 import torch
@@ -22,7 +22,7 @@ from torch.fx.passes.utils.matcher_with_name_node_map_utils import (
 )
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from quantized_training.quantizer.quantizer import QuantizationSpec
+from .quantizer import QuantizationSpec, DerivedQuantizationSpec
 
 
 # In the absence of better name, just winging it with QuantizationConfig
@@ -104,6 +104,18 @@ def _annotate_linear(
         if len(node.args) > 2:
             bias_node = node.args[2]
 
+        if isinstance(quantization_config.bias, DerivedQuantizationSpec):
+            bias_qspec = replace(
+                quantization_config.bias,
+                derived_from=[(act_node, node), (weight_node, node)],
+            )
+
+        if isinstance(quantization_config.output_activation, DerivedQuantizationSpec):
+            output_act_qspec = replace(
+                quantization_config.output_activation,
+                derived_from=[(act_node, node), (weight_node, node)],
+            )
+
         if _is_annotated([node]) is False:  # type: ignore[list-item]
             _annotate_input_qspec_map(
                 node,
@@ -157,9 +169,23 @@ def _annotate_conv(
         # adding weight node to the partition as well
         partition = [conv_node, conv_node.args[1]]
 
+        bias_qspec = quantization_config.bias
+        if isinstance(bias_qspec, DerivedQuantizationSpec):
+            bias_qspec = replace(
+                quantization_config.bias,
+                derived_from=[(input_act, n), (weight, n)],
+            )
+
+        output_act_qspec = quantization_config.output_activation
+        if isinstance(output_act_qspec, DerivedQuantizationSpec):
+            output_act_qspec = replace(
+                quantization_config.output_activation,
+                derived_from=[(input_act, n), (weight, n)],
+            )
+
         bias = conv_node.args[2] if len(conv_node.args) > 2 else None
         if isinstance(bias, Node):
-            input_qspec_map[bias] = quantization_config.bias
+            input_qspec_map[bias] = bias_qspec
             partition.append(bias)
 
         if _is_annotated(partition):
@@ -170,7 +196,7 @@ def _annotate_conv(
 
         conv_node.meta["quantization_annotation"] = QuantizationAnnotation(
             input_qspec_map=input_qspec_map,
-            output_qspec=quantization_config.output_activation,
+            output_qspec=output_act_qspec,
             _annotated=True,
         )
         _mark_nodes_as_annotated(partition)
@@ -206,6 +232,12 @@ def _annotate_matmul(
         input_act1 = node.args[1]
         if isinstance(input_act1, Node):
             input_qspec_map[input_act1] = weight_qspec
+
+        if isinstance(quantization_config.output_activation, DerivedQuantizationSpec):
+            output_act_qspec = replace(
+                quantization_config.output_activation,
+                derived_from=[(input_act0, node), (input_act1, node)],
+            )
 
         node.meta["quantization_annotation"] = QuantizationAnnotation(
             input_qspec_map=input_qspec_map,

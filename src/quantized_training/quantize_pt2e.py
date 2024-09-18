@@ -2,9 +2,10 @@ import copy
 import itertools
 import math
 from dataclasses import asdict, replace
-from typing import Dict, Tuple, Union, Any, Optional, Callable
+from typing import Dict, Tuple, Union, Any, Optional, Callable, List
 
 import torch
+from torch import Tensor
 from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
@@ -22,15 +23,18 @@ from torch.fx import (
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 import quantized_training as qt
-from quantized_training.codegen.mapping import _decompose_node
 from quantized_training.export_utils import _allow_exported_model_train_eval
-from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize, get_fake_quant_fn
-from quantized_training.quantizer.quantizer import QuantizationSpec
+from quantized_training.fake_quantize import (
+    _DerivedObserverOrFakeQuantize,
+    FusedAmaxObsFakeQuantize,
+    get_fake_quant_fn,
+)
+from quantized_training.quantizer.quantizer import QuantizationSpec, DerivedQuantizationSpec
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .codegen.mapping_utils import _is_nop
-from .codegen.mapping import get_input_nodes
+from .codegen.mapping import _decompose_node, get_input_nodes
 from .decomposed import quantized_decomposed_lib
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
@@ -45,6 +49,15 @@ def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
     """
     if quantization_spec is None:
         return None
+    if isinstance(quantization_spec, DerivedQuantizationSpec):
+        kwargs = {
+            "dtype": quantization_spec.dtype,
+            "derive_qparams_fn": quantization_spec.derive_qparams_fn,
+        }
+        edge_or_nodes = quantization_spec.derived_from
+        obs_or_fqs = [obs_or_fq_map[k] for k in edge_or_nodes]
+        kwargs["obs_or_fqs"] = obs_or_fqs
+        return _DerivedObserverOrFakeQuantize.with_args(**kwargs)()
 
     assert isinstance(quantization_spec, QuantizationSpec)
     observer_or_fake_quant_ctr = quantization_spec.observer_or_fake_quant_ctr
@@ -130,11 +143,35 @@ def get_per_channel_act_quantizer(
     )
 
 
+def derive_bias_qparams_fn(obs_or_fqs: List[ObserverOrFakeQuantize]) -> Tuple[Tensor, Tensor]:
+    assert len(obs_or_fqs) == 2, \
+        "Expecting two obs/fqs, one for activation and one for weight, got: {}".format(len(obs_or_fqs))
+    act_obs_or_fq = obs_or_fqs[0]
+    weight_obs_or_fq = obs_or_fqs[1]
+    act_scale = act_obs_or_fq.calculate_qparams()
+    weight_scale = weight_obs_or_fq.calculate_qparams()
+    return act_scale * weight_scale.flatten()
+
+
+def derive_output_qparams_fn(obs_or_fqs: List[ObserverOrFakeQuantize]) -> Tuple[Tensor, Tensor]:
+    assert len(obs_or_fqs) == 2, \
+        "Expecting two obs/fqs, one for activation and one for weight, got: {}".format(len(obs_or_fqs))
+    act_obs_or_fq = obs_or_fqs[0]
+    weight_obs_or_fq = obs_or_fqs[1]
+    act_scale = act_obs_or_fq.calculate_qparams()
+    weight_scale = weight_obs_or_fq.calculate_qparams()
+    if weight_scale.ndim == 4:
+        weight_scale = weight_scale.view(-1, 1, 1)
+    elif weight_scale.ndim == 2:
+        weight_scale = weight_scale.view(-1)
+    return act_scale * weight_scale
+
+
 def get_default_quantizer(
     input_activation: Optional[QuantizationSpec],
-    output_activation: Optional[QuantizationSpec],
-    weight: Optional[QuantizationSpec],
-    bias: Optional[QuantizationSpec],
+    output_activation: Optional[QuantizationSpec] = None,
+    weight: Optional[QuantizationSpec] = None,
+    bias: Optional[QuantizationSpec] = None,
     record_histogram: bool = False,
     force_scale_power_of_two: bool = False
 ) -> XNNPACKQuantizer:
@@ -158,11 +195,28 @@ def get_default_quantizer(
 
     qschemes = []
     if input_activation is not None:
-        qschemes.append(input_activation.qscheme)
+        input_activation = QuantizationSpec.from_str(input_activation)
         input_activation.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
+        qschemes.append(input_activation.qscheme)
+
     if weight is not None:
-        qschemes.append(weight.qscheme)
+        weight = QuantizationSpec.from_str(weight)
         weight.observer_or_fake_quant_ctr = observer_or_fake_quant_ctr
+        qschemes.append(weight.qscheme)
+
+    # We will specify derived_from later in the quantizer
+    if bias is not None:
+        bias = DerivedQuantizationSpec(
+            derived_from=None,
+            derive_qparams_fn=derive_bias_qparams_fn,
+            dtype=bias,
+        )
+    if output_activation is not None:
+        output_activation = DerivedQuantizationSpec(
+            derived_from=None,
+            derive_qparams_fn=derive_output_qparams_fn,
+            dtype=output_activation,
+        )
 
     if qt.microscaling in qschemes:
         assert len(set(qschemes)) == 1, (
@@ -177,7 +231,7 @@ def get_default_quantizer(
         )
 
     if input_activation is not None and input_activation.qscheme == qt.per_channel_symmetric:
-        return get_per_channel_act_quantizer(input_activation, weight)
+        return get_per_channel_act_quantizer(input_activation, output_activation, weight, bias)
 
     qconfig = QuantizationConfig(input_activation, output_activation, weight, bias)
     qconfig_matmul = QuantizationConfig(input_activation, output_activation, input_activation, None)
@@ -661,7 +715,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
 
         orig_args = list(quantize_node.args)
 
-        def find_source_node_and_insert_quantize(node):
+        def find_source_node_and_insert_quantize(node, scale=None):
             quantized_nodes = []
             prev_node = node
             while len(prev_node.users) == 1:
@@ -670,11 +724,19 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
                 ]:
                     quantized_nodes.append(prev_node)
                     prev_node = prev_node.args[0]
+                elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
+                    # Update scale
+                    scale = model.get_buffer(prev_node.args[1].target)
+                    node_to_remove = prev_node
+                    prev_node = prev_node.args[0]
+                    # Remove dequantize node since it has no effect
+                    node_to_remove.replace_all_uses_with(prev_node)
+                    graph.erase_node(node_to_remove)
                 elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                     # If there is a split, trace each branch separately
                     nodes = get_input_nodes(prev_node.args)
                     for arg in nodes:
-                        quantized_nodes.extend(find_source_node_and_insert_quantize(arg))
+                        quantized_nodes.extend(find_source_node_and_insert_quantize(arg, scale))
                     return quantized_nodes
                 else:
                     break
@@ -682,14 +744,13 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
             if id(prev_node) == id(quantize_node.args[0]):
                 return quantized_nodes
 
-            # TODO: combine dequantize and quantize into a single quantize node
-            if prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
-                pass
-
-            # TODO is there a way we only move the node around and does not make a copy of the node?
             user = next(iter(prev_node.users))
             with model.graph.inserting_before(user):
-                qparam_node = graph.node_copy(orig_args[1])
+                q_scale = model.get_buffer(orig_args[1].target)
+                if scale is not None:
+                    q_scale = q_scale / scale
+                qparam_node = create_getattr_from_value(
+                    model, graph, orig_args[1].name.rsplit('_', 1)[0] + '_', q_scale)
                 quant_map_node = graph.node_copy(orig_args[3])
                 quantize_op_inputs = [prev_node, qparam_node, quantize_node.args[2], quant_map_node]
                 new_node = graph.call_function(
@@ -699,7 +760,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
                 )
 
             user.replace_input_with(prev_node, new_node)
-            new_node.meta = quantize_node.meta
+            new_node.meta = {k: copy.deepcopy(v) for k, v in quantize_node.meta.items() if k != 'val'}
             source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
             source_fn_st.append((new_node.name, new_node.target))
 
@@ -707,14 +768,14 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
 
         quantized_nodes = find_source_node_and_insert_quantize(quantize_node.args[0])
 
-        for n in quantized_nodes:
-            n.meta["dtype"] = orig_args[2]
-
         if len(quantized_nodes) > 0:
+            for n in quantized_nodes:
+                n.meta["dtype"] = orig_args[2]
             quantize_node.replace_all_uses_with(orig_args[0])
             graph.erase_node(quantize_node)
             graph.erase_node(orig_args[1])
             graph.erase_node(orig_args[3])
+            # TODO remove buffer
 
 
 def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor]):

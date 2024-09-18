@@ -1,10 +1,11 @@
 import logging
 import math
 import re
-from typing import Optional
+from typing import Optional, List, Callable, Tuple
 
 import torch
-from torch.ao.quantization import FakeQuantizeBase
+from torch import Tensor
+from torch.ao.quantization import FakeQuantizeBase, ObserverOrFakeQuantize
 
 import quantized_training as qt
 from quantized_training.fp8 import (
@@ -23,6 +24,7 @@ from quantized_training.posit import quantize_to_posit
 
 __all__ = [
     "FusedAmaxObsFakeQuantize",
+    "_DerivedObserverOrFakeQuantize",
 ]
 
 
@@ -60,6 +62,14 @@ def get_fake_quant_fn(dtype: str):
         return lambda x: quantize_to_nf(x, nbits)
 
     raise ValueError(f"Unrecognized dtype: {dtype}")
+
+
+def _get_quantization_map(dtype, device=None):
+    values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
+    if dtype is not None:
+        fq_fn = get_fake_quant_fn(dtype)
+        values = fq_fn(values)
+    return values.to(device)
 
 
 def _quantize(input, quant_map):
@@ -328,3 +338,41 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 missing_keys.append(key)
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
                                       missing_keys, unexpected_keys, error_msgs)
+
+
+class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
+    r"""This observer is used to describe an observer whose quantization parameters
+    are derived from other observers
+    """
+
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        obs_or_fqs: List[ObserverOrFakeQuantize],
+        derive_qparams_fn: Callable[[List[ObserverOrFakeQuantize]], Tuple[Tensor, Tensor]],
+    ):
+        super().__init__()
+        self.obs_or_fqs = obs_or_fqs
+        self.derive_qparams_fn = derive_qparams_fn
+        self.register_buffer("quant_map", _get_quantization_map(dtype), persistent=False)
+        self.observer_enabled[0] = 0
+
+    def forward(self, x: Tensor) -> Tensor:
+        devices = {p.device for p in self.buffers()}
+        device = next(iter(devices)) if len(devices) > 0 else None
+        if len(devices) > 1 or x.device != device:
+            self.to(x.device)
+
+        return FusedAmaxObsFakeQuantFunction.apply(
+            x,
+            self.observer_enabled,
+            self.fake_quant_enabled,
+            self.quant_map,
+            None,
+            self.calculate_qparams(),
+            None,
+            None,
+        )
+
+    def calculate_qparams(self):
+        return self.derive_qparams_fn(self.obs_or_fqs)

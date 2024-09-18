@@ -1,10 +1,13 @@
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Callable, List, Optional, Union, Tuple
 
+from torch import Tensor
+from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
 from torch.ao.quantization.quantizer.quantizer import QuantizationSpecBase
+from torch.fx import Node
 
 __all__ = [
     "QuantizationSpec",
@@ -52,7 +55,7 @@ def get_default_qmax(dtype):
 
     return None
 
-@dataclass
+@dataclass(eq=True)
 class QuantizationSpec(QuantizationSpecBase):
     """Quantization spec for common operators that allows user to specify how to
     quantize a Tensor, this includes dtype, qscheme, quant_max etc.
@@ -88,9 +91,21 @@ class QuantizationSpec(QuantizationSpecBase):
         return QuantizationSpec(**params)
 
     def __post_init__(self):
-        # TODO the error message is not printed out
-        if self.quant_max is None and self.qscheme is not None:
+        if self.qscheme is not None and self.quant_max is None:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.block_size is None and self.qscheme== QScheme.MICROSCALING:
+        if self.qscheme== QScheme.MICROSCALING and self.block_size is None:
             raise ValueError("block_size is required for microscaling.")
+
+EdgeOrNode = Union[Tuple[Node, Node], Node]
+
+@dataclass(eq=True)
+class DerivedQuantizationSpec(QuantizationSpecBase):
+    """ quantization spec for the Tensors whose quantization parameters are derived from other Tensors
+    """
+    derived_from: List[EdgeOrNode]
+    derive_qparams_fn: Callable[[List[ObserverOrFakeQuantize]], Tuple[Tensor, Tensor]]
+    dtype: str
+    quant_min: Optional[int] = None
+    quant_max: Optional[int] = None
+    qscheme: Optional[QScheme] = None
