@@ -32,6 +32,7 @@ from .param_pb2 import (
     ReshapeParam,
 )
 from .shape_prop import ShapeProp
+from ..pt2e_utils import dtype_byte_size
 
 DEFAULT_MEMORY_SIZE = 1024 ** 4
 
@@ -601,11 +602,17 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             continue
 
+        def get_node_byte_size(n):
+            if n.meta.get('dtype', None) is not None:
+                return dtype_byte_size(n.meta['dtype'])
+            return dtype_byte_size(n.value.dtype)
+
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
         if node.target == torch.ops.aten.select.int:
             assert node.args[1] == 0, "Only support select on the first dimension"
             size = manager.calculate_tensor_size(node.shape)
+            size *= get_node_byte_size(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
@@ -622,16 +629,16 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = maybe_stack_node.args[0][0]
             if (memory := first_node.meta.get("memory", None)) is None:
-                size = sum(manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0])
+                size = sum(manager.calculate_tensor_size(n.shape) * get_node_byte_size(n) for n in maybe_stack_node.args[0])
                 memory = manager.allocate_memory(first_node, size)
                 first_node.meta["memory"] = memory
 
             index = maybe_stack_node.args[0].index(node)
             if index > 0:
                 start_offset = memory.start + sum(
-                    manager.calculate_tensor_size(n.shape) for n in maybe_stack_node.args[0][:index]
+                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n) for n in maybe_stack_node.args[0][:index]
                 )
-                size = manager.calculate_tensor_size(node.shape)
+                size = manager.calculate_tensor_size(node.shape) * get_node_byte_size(node)
                 node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
