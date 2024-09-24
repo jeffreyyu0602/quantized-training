@@ -9,7 +9,6 @@ from torch import Tensor
 from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
-from torch.ao.quantization.pt2e.graph_utils import find_sequential_partitions
 from torch.ao.quantization.quantizer import (
     EdgeOrNode,
     SharedQuantizationSpec,
@@ -724,14 +723,15 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
                 ]:
                     quantized_nodes.append(prev_node)
                     prev_node = prev_node.args[0]
-                elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
-                    # Update scale
-                    scale = model.get_buffer(prev_node.args[1].target)
-                    node_to_remove = prev_node
-                    prev_node = prev_node.args[0]
-                    # Remove dequantize node since it has no effect
-                    node_to_remove.replace_all_uses_with(prev_node)
-                    graph.erase_node(node_to_remove)
+                # Our accelerator doesn't support fusing quantize with dequantize
+                # elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
+                #     # Update scale
+                #     scale = model.get_buffer(prev_node.args[1].target)
+                #     node_to_remove = prev_node
+                #     prev_node = prev_node.args[0]
+                #     # Remove dequantize node since it has no effect
+                #     node_to_remove.replace_all_uses_with(prev_node)
+                #     graph.erase_node(node_to_remove)
                 elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                     # If there is a split, trace each branch separately
                     nodes = get_input_nodes(prev_node.args)
