@@ -65,6 +65,7 @@ def main(args):
         weight=args.weight,
         record_histogram=args.record_histogram,
         force_scale_power_of_two=args.force_scale_power_of_two,
+        outlier_threshold=args.outlier_threshold,
     )
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
@@ -79,7 +80,12 @@ def main(args):
         assert args.gpu in max_memory
         max_memory = {args.gpu: max_memory[args.gpu]}
     else:
-        max_memory = {k: v for k, v in max_memory.items() if isinstance(k, int)}
+        # Reserve 2GB for activation
+        reserved = 4 * 1024 ** 3
+        max_memory = {
+            k: v - reserved
+            for k, v in max_memory.items() if isinstance(k, int) and v > reserved
+        }
         max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))
     device_map = get_device_map(model, max_memory=max_memory)
     dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
@@ -104,7 +110,8 @@ def main(args):
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
 
-    # model = convert_pt2e(model)
+    if args.convert_model:
+        model = convert_pt2e(model)
 
     test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")

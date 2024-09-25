@@ -384,6 +384,12 @@ def add_qspec_args(parser=None):
         help='Whether to force the scaling factor to be a power of two.',
     )
     parser.add_argument(
+        '--outlier_threshold',
+        type=float,
+        default=None,
+        help='Threshold for outlier detection.',
+    )
+    parser.add_argument(
         '--calibration_steps',
         type=int,
         default=0,

@@ -65,6 +65,7 @@ def get_device_map(model: GraphModule, max_memory=None, verbose=False):
                     f"{current_max_size-current_memory_used}, module size {module_size})."
                 )
             current_device += 1
+            assert current_device < len(devices), "Not enough devices to store the model."
             nodes_to_treat = [node] + nodes_to_treat
             current_memory_used = 0
         else:

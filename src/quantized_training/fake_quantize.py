@@ -97,6 +97,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
         shared_exp_method="max",
         axes=None,
         block_size=0,
+        force_scale_power_of_two=False,
     ):
         if fake_quant_enabled[0] == 0:
             return input
@@ -112,8 +113,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
         shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
-        # TODO we are abusing shared_exp_method here to handle NormalFloat
-        if shared_exp_method == "max":
+        if force_scale_power_of_two:
             # Get shared exponents
             shared_exp = _shared_exponents(
                 input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
@@ -125,8 +125,12 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
             scale = (2 ** shared_exp).to(input.dtype)
         else:
-            # NormalFloat requires dividing by the exact absmax value
-            scale = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
+            # Use absolute maximum value for scaling
+            amax = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
+            scale = amax / quant_max
+            scale = torch.where(amax > 0.0, scale, 1.0)
+            scale = torch.where(torch.isfinite(amax), scale, 1.0)
+
         input = _quantize(input / scale, quant_map) * scale
 
         # Undo tile reshaping
@@ -137,7 +141,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None, None, None, None, None
+        return grad_output, None, None, None, None, None, None, None
 
 
 class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
@@ -218,7 +222,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         dtype: str,
         qscheme: Optional[str] = None,
         quant_max: Optional[float] = None,
-        amax_history_len: int = 50,
+        amax_history_len: int = None,
         ch_axis: Optional[int] = None,
         block_size: Optional[int] = None,
         record_histogram: bool = False,
@@ -233,7 +237,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.ch_axis = ch_axis
         self.block_size = block_size
         self.force_scale_power_of_two = force_scale_power_of_two
-        self.shared_exp_method = None if dtype.startswith("nf") else "max"
+        self.shared_exp_method = kwargs.get("shared_exp_method", "max")
+        self.outlier_threshold = kwargs.get("outlier_threshold", None)
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
         values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
@@ -275,16 +280,34 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         # TODO this is a workaround when input is not on the same device as the module
         devices = {p.device for p in self.buffers()}
-        device = next(iter(devices)) if len(devices) > 0 else None
-        if len(devices) > 1 or X.device != device:
+        if len(devices) != 1 or next(iter(devices)) != X.device:
             self.to(X.device)
 
         if self.record_histogram:
             exp = torch.floor(torch.log2(torch.abs(X.detach().float())))
             self.histogram += torch.histc(exp, 254, min=-126, max=127)
 
+        # Remove outliers from the activation. This needs to be inside
+        # torch.autograd.Function for training.
+        if self.outlier_threshold is not None:
+            X = X.clone()
+            outliers = X.abs() > self.outlier_threshold
+            outliers_magnitude = X[outliers]
+            X[outliers] = 0.0
+
+            # outlier_pct = outliers.sum().item() / input.numel()
+            # if hasattr(self, "name"):
+            #     print(f"Layer: {self.name}")
+            # print(f"Outlier percentage: {outlier_pct:.2%}")
+            # print(input.shape)
+            # if outlier_pct > 0.0:
+            #     dims = tuple(range(input.ndim - 1))
+            #     outlier_per_channel = torch.sum(outliers, dim=dims)
+            #     print(outlier_per_channel[outlier_per_channel > 0])
+            # print("\n")
+
         if self.qscheme == qt.microscaling:
-            return MXFakeQuantFunction.apply(
+            X = MXFakeQuantFunction.apply(
                 X,
                 self.fake_quant_enabled,
                 self.quant_map,
@@ -292,21 +315,28 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.shared_exp_method,
                 self.ch_axis,
                 self.block_size,
+                self.force_scale_power_of_two,
+            )
+        else:
+            X = FusedAmaxObsFakeQuantFunction.apply(
+                X,
+                self.observer_enabled,
+                self.fake_quant_enabled,
+                self.quant_map,
+                self.amax_history,
+                self.scale,
+                self.amax_history_len,
+                self.quant_max,
+                self.ch_axis,
+                self.is_per_channel,
+                self.force_scale_power_of_two,
             )
 
-        return FusedAmaxObsFakeQuantFunction.apply(
-            X,
-            self.observer_enabled,
-            self.fake_quant_enabled,
-            self.quant_map,
-            self.amax_history,
-            self.scale,
-            self.amax_history_len,
-            self.quant_max,
-            self.ch_axis,
-            self.is_per_channel,
-            self.force_scale_power_of_two,
-        )
+        # Restore outliers
+        if self.outlier_threshold is not None:
+            X[outliers] = outliers_magnitude
+
+        return X
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -359,8 +389,7 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
 
     def forward(self, x: Tensor) -> Tensor:
         devices = {p.device for p in self.buffers()}
-        device = next(iter(devices)) if len(devices) > 0 else None
-        if len(devices) > 1 or x.device != device:
+        if len(devices) != 1 or next(iter(devices)) != x.device:
             self.to(x.device)
 
         return FusedAmaxObsFakeQuantFunction.apply(
