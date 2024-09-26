@@ -8,11 +8,15 @@ from datasets import load_dataset
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToJson
 from torch._export import capture_pre_autograd_graph
+import torch.ao.quantization
+from torch.utils.data import DataLoader
 from torchvision import models
 from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForSemanticSegmentation,
     AutoImageProcessor,
+    AutoTokenizer,
+    default_data_collator,
 )
 from tqdm import tqdm
 
@@ -36,6 +40,18 @@ from quantized_training.codegen import (
 from quantized_training.quantize_pt2e import _fuse_quantize_with_previous_nodes
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
+
+task_to_keys = {
+    "cola": ("sentence", None),
+    "mnli": ("premise", "hypothesis"),
+    "mrpc": ("sentence1", "sentence2"),
+    "qnli": ("question", "sentence"),
+    "qqp": ("question1", "question2"),
+    "rte": ("sentence1", "sentence2"),
+    "sst2": ("sentence", None),
+    "stsb": ("sentence1", "sentence2"),
+    "wnli": ("sentence1", "sentence2"),
+}
 
 OPERATOR_MAPPINGS = {
     "add": ["add", "add_", operator.add, torch.add, operator.iadd],
@@ -220,6 +236,11 @@ if __name__ == "__main__":
         help="Path to pretrained model or model identifier from huggingface.co/models."
     )
     parser.add_argument(
+        "--task_name",
+        default="sst2",
+        help="Name of the task to load the dataset"
+    )
+    parser.add_argument(
         "--output_dir",
         required=True,
         help="Output directory for generated tensor files"
@@ -348,7 +369,44 @@ if __name__ == "__main__":
 
         gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
 
-        # TODO calibration
+        # calibration
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        raw_datasets = load_dataset("glue", args.task_name)
+
+        sentence1_key, sentence2_key = task_to_keys[args.task_name]
+
+        def preprocess_function(examples):
+            # Tokenize the texts
+            texts = (
+                (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
+            )
+            result = tokenizer(*texts, padding="max_length", max_length=128, truncation=True)
+            result["labels"] = examples["label"]
+            return result
+
+        processed_datasets = raw_datasets.map(
+            preprocess_function,
+            batched=True,
+            remove_columns=raw_datasets["train"].column_names,
+            desc="Running tokenizer on dataset",
+        )
+
+        train_dataset = processed_datasets["train"]
+
+        train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
+
+        for step, batch in enumerate(tqdm(train_dataloader)):
+            embedding_output = model.mobilebert.embeddings(
+                input_ids=batch["input_ids"],
+                token_type_ids=batch["token_type_ids"]
+            )
+            extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
+            gm(embedding_output, extended_attention_mask, head_mask)
+
+            # Use 20 calibration steps
+            if step == 19:
+                break
+
         convert_pt2e(gm)
 
         pt_out, gm_out = transform(
