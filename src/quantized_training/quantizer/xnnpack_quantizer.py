@@ -124,6 +124,7 @@ class XNNPACKQuantizer(Quantizer):
         "linear",
         "conv",
         "matmul",
+        "residual",
     ]
 
     def __init__(self):

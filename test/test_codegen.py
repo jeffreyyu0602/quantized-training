@@ -430,7 +430,15 @@ if __name__ == "__main__":
             None,
         )
 
-        gm = prepare_pt2e(model.mobilebert.encoder.layer[0], quantizer, example_args)
+        class MobileBertEncoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, *args, **kwargs):
+                output = model.mobilebert.encoder.layer[0](*args, **kwargs)
+                return output[0][0]
+
+        gm = prepare_pt2e(MobileBertEncoder(), quantizer, example_args)
 
         convert_pt2e(gm)
 

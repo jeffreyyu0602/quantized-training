@@ -194,3 +194,14 @@ sweep_configurations["mobilebert_tiny_squad_bf16"] = {
         "learning_rate": {"max": 5, "min": 1}
     },
 }
+
+sweep_configurations["bert_base_squad_posit8"] = {
+    "method": "grid",
+    "name": "squad_sweep",
+    "metric": {"goal": "maximize", "name": "accuracy"},
+    "parameters": {
+        "per_device_train_batch_size": {"value": 16},
+        "num_train_epochs": {"max": 7, "min": 3},
+        "learning_rate": {"max": 9, "min": 5}
+    },
+}

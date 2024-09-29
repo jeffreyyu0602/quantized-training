@@ -110,12 +110,6 @@ def _annotate_linear(
                 derived_from=[(act_node, node), (weight_node, node)],
             )
 
-        if isinstance(quantization_config.output_activation, DerivedQuantizationSpec):
-            output_act_qspec = replace(
-                quantization_config.output_activation,
-                derived_from=[(act_node, node), (weight_node, node)],
-            )
-
         if _is_annotated([node]) is False:  # type: ignore[list-item]
             _annotate_input_qspec_map(
                 node,
@@ -176,13 +170,6 @@ def _annotate_conv(
                 derived_from=[(input_act, n), (weight, n)],
             )
 
-        output_act_qspec = quantization_config.output_activation
-        if isinstance(output_act_qspec, DerivedQuantizationSpec):
-            output_act_qspec = replace(
-                quantization_config.output_activation,
-                derived_from=[(input_act, n), (weight, n)],
-            )
-
         bias = conv_node.args[2] if len(conv_node.args) > 2 else None
         if isinstance(bias, Node):
             input_qspec_map[bias] = bias_qspec
@@ -196,7 +183,7 @@ def _annotate_conv(
 
         conv_node.meta["quantization_annotation"] = QuantizationAnnotation(
             input_qspec_map=input_qspec_map,
-            output_qspec=output_act_qspec,
+            output_qspec=quantization_config.output_activation,
             _annotated=True,
         )
         _mark_nodes_as_annotated(partition)
@@ -233,18 +220,55 @@ def _annotate_matmul(
         if isinstance(input_act1, Node):
             input_qspec_map[input_act1] = weight_qspec
 
-        if isinstance(quantization_config.output_activation, DerivedQuantizationSpec):
-            output_act_qspec = replace(
-                quantization_config.output_activation,
-                derived_from=[(input_act0, node), (input_act1, node)],
-            )
-
         node.meta["quantization_annotation"] = QuantizationAnnotation(
             input_qspec_map=input_qspec_map,
             output_qspec=output_act_qspec,
             _annotated=True,
         )
         annotated_partitions.append(node)
+    return annotated_partitions
+
+
+@register_annotator("residual")
+def _annotate_residual(
+    gm: torch.fx.GraphModule,
+    quantization_config: Optional[QuantizationConfig],
+    filter_fn: Optional[Callable[[Node], bool]] = None,
+) -> Optional[List[List[Node]]]:
+    node_order = {node: i for i, node in enumerate(gm.graph.nodes)}
+    add_partitions = get_source_partitions(
+        gm.graph, [operator.add, torch.add, operator.iadd], filter_fn
+    )
+    add_partitions = list(itertools.chain.from_iterable(add_partitions.values()))
+    annotated_partitions = []
+    for add_partition in add_partitions:
+        annotated_partitions.append(add_partition.nodes)
+        add_node = add_partition.output_nodes[0]
+        if _is_annotated([add_node]):
+            continue
+
+        input_act_qspec = quantization_config.input_activation
+        output_act_qspec = quantization_config.output_activation
+
+        input_act0 = add_node.args[0]
+        input_act1 = add_node.args[1]
+
+        if (
+            not isinstance(input_act0, Node)
+            or not isinstance(input_act1, Node)
+            or input_act0.op != "call_function"
+            or input_act1.op != "call_function"
+        ):
+            continue
+
+        node_to_quantize = input_act0 if node_order[input_act0] < node_order[input_act1] else input_act1
+        input_qspec_map = {node_to_quantize: input_act_qspec}
+
+        add_node.meta["quantization_annotation"] = QuantizationAnnotation(
+            input_qspec_map=input_qspec_map,
+            output_qspec=output_act_qspec,
+            _annotated=True,
+        )
     return annotated_partitions
 
 

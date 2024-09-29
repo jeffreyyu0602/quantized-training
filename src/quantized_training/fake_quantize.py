@@ -295,16 +295,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             outliers_magnitude = X[outliers]
             X[outliers] = 0.0
 
-            # outlier_pct = outliers.sum().item() / input.numel()
-            # if hasattr(self, "name"):
-            #     print(f"Layer: {self.name}")
-            # print(f"Outlier percentage: {outlier_pct:.2%}")
-            # print(input.shape)
-            # if outlier_pct > 0.0:
-            #     dims = tuple(range(input.ndim - 1))
-            #     outlier_per_channel = torch.sum(outliers, dim=dims)
-            #     print(outlier_per_channel[outlier_per_channel > 0])
-            # print("\n")
+            outlier_pct = outliers.sum().item() / X.numel()
+            self.max_outlier_pct = max(outlier_pct, getattr(self, "max_outlier_pct", 0.0))
 
         if self.qscheme == qt.microscaling:
             X = MXFakeQuantFunction.apply(
@@ -386,6 +378,8 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
         self.derive_qparams_fn = derive_qparams_fn
         self.register_buffer("quant_map", _get_quantization_map(dtype), persistent=False)
         self.observer_enabled[0] = 0
+        self.dtype = dtype
+        self.qscheme = obs_or_fqs[1].qscheme
 
     def forward(self, x: Tensor) -> Tensor:
         devices = {p.device for p in self.buffers()}
