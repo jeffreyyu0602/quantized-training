@@ -440,6 +440,11 @@ if __name__ == "__main__":
 
         gm = prepare_pt2e(MobileBertEncoder(), quantizer, example_args)
 
+        # Generate a random scale, otherwise a scale of 1 will be optimized away.
+        for name, module in gm.named_modules():
+            if hasattr(module, "scale"):
+                module.scale = torch.randn_like(module.scale)
+
         convert_pt2e(gm)
 
         pt_out, gm_out = transform(

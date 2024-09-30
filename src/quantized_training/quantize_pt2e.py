@@ -38,13 +38,6 @@ from .decomposed import quantized_decomposed_lib
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
 
-def _get_accumulation_dtype(dtype):
-    import re
-    if (match := re.fullmatch(r'int(\d+)', dtype)):
-        return 'int32'
-    return None
-
-
 def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
     """ Create observer or fake quantize objects based on quantization spec
 
@@ -303,6 +296,13 @@ def create_getattr_from_value(module: torch.nn.Module, graph: Graph, prefix: str
     return attr_node
 
 
+def get_accumulation_dtype(dtype):
+    import re
+    if re.fullmatch(r'int(\d+)', dtype):
+        return 'int32'
+    return None
+
+
 def _replace_observer_with_quantize_dequantize_node_decomposed(
     model: torch.fx.GraphModule,
     node: Node,
@@ -317,6 +317,20 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     torch_dtype = next(iter(model.parameters())).dtype
     scale = activation_post_process.calculate_qparams().to(torch_dtype)
     input_dtype = activation_post_process.dtype
+
+    # HACK this logic needs to be improved. Accumulation and output data types are set
+    # to match the bias data type. We loop through all nodes, locate any conv2d or linear
+    # nodes, and extract their bias data type.
+    output_dtype = None
+    for n in model.graph.nodes:
+        if n.target not in [torch.ops.aten.conv2d.default, torch.ops.aten.linear.default]:
+            continue
+        bias_n = n.args[2]
+        if bias_n.op == 'get_attr':
+            output_dtype = bias_n.meta.get("dtype", None)
+        elif bias_n.op == 'call_module':
+            output_dtype = modules[bias_n.target].dtype
+        break
 
     param_dict = dict(model.named_parameters())
     orig_fq_users = list(node.users.keys())
@@ -376,7 +390,8 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
             # Insert a dequantize node after the gemm operation
-            output_dtype = _get_accumulation_dtype(input_dtype)
+            if output_dtype is None:
+                output_dtype = get_accumulation_dtype(input_dtype)
             user_node.meta["dtype"] = output_dtype
 
             # Insert dequantize node before the node that appear the earlist in the graph
