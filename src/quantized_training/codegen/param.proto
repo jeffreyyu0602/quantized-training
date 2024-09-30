@@ -8,17 +8,19 @@ message Memory {
 }
 
 message Permutation {
-  string opcode = 1;
-  repeated int32 dims = 2;
+  string node = 1;
+  string opcode = 2;
+  repeated int32 dims = 3;
+  repeated int32 output_shape = 4;
 }
 
 message Tensor {
   string node = 1;
   string dtype = 2;
   repeated int32 shape = 3;
-  Memory memory = 4;
-  Permutation permutation = 5;
-  float scale = 6;
+  float scale = 4;
+  Memory memory = 5;
+  Permutation permutation = 6;
 }
 
 message MXTensor {

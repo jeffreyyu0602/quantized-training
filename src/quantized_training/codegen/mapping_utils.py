@@ -77,12 +77,16 @@ def _set_tensor_field(field, node, output_dir):
 
     # If there is a reshape operation, we take the input from the reshape args
     if (reshape := node.meta.get("reshape", None)) is not None:
+        field.permutation.node = reshape.name
         field.permutation.opcode = reshape.target.__name__.split(".")[0]
         field.permutation.dims.extend(
             reshape.args[1]
             if reshape.target == torch.ops.aten.permute.default
             else reshape.args[1:]
         )
+        field.permutation.output_shape.extend(node.shape)
+        if output_dir is not None:
+            _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
         node = reshape.args[0]
 
     # The reshape op can be further fused with a dequantize op. We should verify if
@@ -98,7 +102,7 @@ def _set_tensor_field(field, node, output_dir):
     if (dtype := node.meta.get("dtype", None)) is not None:
         field.dtype = dtype
     elif (
-        (source_node := node.meta.get("source_node", None))
+        (source_node := node.meta.get("source_node", None)) is not None
         and (dtype := source_node.meta.get("dtype", None)) is not None
     ):
         field.dtype = dtype
