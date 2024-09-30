@@ -33,7 +33,7 @@ from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .codegen.mapping_utils import _is_nop, _is_gemm_op
-from .codegen.mapping import _decompose_node, get_input_nodes
+from .codegen.mapping import _decompose_node
 from .decomposed import quantized_decomposed_lib
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
@@ -707,8 +707,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
             #     graph.erase_node(node_to_remove)
             elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                 # If there is a split, trace each branch separately
-                nodes = get_input_nodes(prev_node.args)
-                for arg in nodes:
+                for arg in prev_node.all_input_nodes:
                     quantized_nodes.extend(find_source_node_and_insert_quantize(node, arg, scale))
                 return quantized_nodes
             else:

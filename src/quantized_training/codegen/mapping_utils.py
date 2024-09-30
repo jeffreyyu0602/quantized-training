@@ -15,7 +15,7 @@ from .param_pb2 import (
 )
 
 
-def _write_tensor_to_file(tensor, filename):
+def _save_tensor(tensor, filename):
     tensor = tensor.float().flatten()
     packed_data = struct.pack(f'{tensor.numel()}f', *tensor.tolist())
     with open(filename, 'wb') as f:
@@ -75,8 +75,24 @@ def _set_tensor_field(field, node, output_dir):
         f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
     )
 
+    # If there is a reshape operation, we take the input from the reshape args
+    if (reshape := node.meta.get("reshape", None)) is not None:
+        field.permutation.opcode = reshape.target.__name__.split(".")[0]
+        field.permutation.dims.extend(
+            reshape.args[1]
+            if reshape.target == torch.ops.aten.permute.default
+            else reshape.args[1:]
+        )
+        node = reshape.args[0]
+
+    # The reshape op can be further fused with a dequantize op. We should verify if
+    # a dequantize op can appear after a reshape op.
+    if (dq_scale := node.meta.get("dq_scale", None)) is not None:
+        field.scale = dq_scale
+        node = node.args[0]
+
     if output_dir is not None:
-        _write_tensor_to_file(node.value, os.path.join(output_dir, f"{node.name}.bin"))
+        _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
@@ -99,19 +115,6 @@ def _set_tensor_field(field, node, output_dir):
         field.memory.offset = memory.start
     else:
         print(f"Node {node.name} does not have memory attribute")
-
-    if (reshape := node.meta.get("reshape", None)) is not None:
-        arg = reshape.args[0]
-        if output_dir is not None:
-            _write_tensor_to_file(arg.value, os.path.join(output_dir, f"{arg.name}.bin"))
-        field.permutation.node = arg.name
-        field.permutation.shape.extend(arg.shape)
-        field.permutation.opcode = reshape.target.__name__.split(".")[0]
-        field.permutation.dims.extend(
-            reshape.args[1]
-            if reshape.target == torch.ops.aten.permute.default
-            else reshape.args[1:]
-        )
 
 
 def _set_repeated_field(field, value):

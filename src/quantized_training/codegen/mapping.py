@@ -1,5 +1,6 @@
 import copy
 import itertools
+import logging
 import os
 from typing import List, Dict, Type
 
@@ -34,6 +35,8 @@ from .param_pb2 import (
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MEMORY_SIZE = 1024 ** 4
 
 
@@ -64,9 +67,11 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
             # TODO: might have duplicate target names
             if node.target in gm._buffers:
                 if new_node.target in model._buffers:
-                    print("WARNING: duplicate buffer name", new_node.target)
+                    logger.warning(f"Duplicate buffer name: {new_node.target}")
                 model.register_buffer(new_node.target, gm.get_buffer(node.target))
             if node.target in gm._parameters:
+                if new_node.target in model._parameters:
+                    logger.warning(f"Duplicate parameter name: {new_node.target}")
                 model.register_parameter(new_node.target, gm.get_parameter(node.target))
 
     output_node = list(gm.graph.nodes)[-1]
@@ -207,24 +212,13 @@ def split_multi_head_attention(model: GraphModule):
     graph.lint()
 
 
-def get_input_nodes(nodes):
-    input_nodes = []
-    for n in nodes:
-        if isinstance(n, Node):
-            input_nodes.append(n)
-        elif isinstance(n, (list, tuple)):
-            input_nodes.extend(get_input_nodes(n))
-    return input_nodes
-
-
 def _create_subgraph(nodes: List[Node]):
     new_args = []
     new_graph = torch.fx.Graph()
     value_remap = {}
 
     for node in nodes:
-        input_nodes = get_input_nodes(node.args + tuple(node.kwargs.values()))
-        for n in input_nodes:
+        for n in node.all_input_nodes:
             if n not in value_remap:
                 value_remap[n] = new_graph.placeholder(n.name)
                 new_args.append(n)
@@ -383,7 +377,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
         [p.output_nodes[0] for p in fp] for fp in fused_partitions if isinstance(fp, list)
     ]
 
-    def _search_group(node):
+    def search_group(node):
         for g in fused_partitions:
             if node in g:
                 return g
@@ -423,16 +417,15 @@ def fuse_operator(model: GraphModule, pipeline=None):
 
             # Lastly, if a node has multiple input nodes, the reshape op cannot
             # be fused with any single branch.
-            input_nodes = get_input_nodes(prev_node.args)
-            if len(input_nodes) != 1:
+            if len(prev_node.all_input_nodes) != 1:
                 fused = False
                 break
 
-            prev_node = input_nodes[0]
+            prev_node = prev_node.all_input_nodes[0]
 
         if fused:
             if prev_node in fused_nodes:
-                group = _search_group(prev_node)
+                group = search_group(prev_node)
                 group.extend(reshape_nodes)
             else:
                 reshape_nodes.insert(0, prev_node)
@@ -474,7 +467,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
             continue
 
         if next_node in fused_nodes:
-            group = _search_group(next_node)
+            group = search_group(next_node)
             for n in reversed(reshape_nodes):
                 group.insert(0, n)
         else:
@@ -504,6 +497,22 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 for n in unfuse_nodes:
                     group.remove(n)
                 group.insert(0, new_node)
+
+    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize_symmetric])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for p in partitions:
+        group = search_group(p.output_nodes[0])
+        if group is not None:
+            continue
+        node = p.output_nodes[0]
+        assert len(node.users) == 1, "dequantize_symmetric should only have one user"
+        user_node = next(iter(node.users))
+        group = search_group(user_node)
+        if group is None:
+            group = [node, user_node]
+            fused_partitions.append(group)
+        else:
+            group.insert(group.index(user_node), node)
 
     for partition in fused_partitions:
         node = _create_and_insert_subgraph(partition, model, named_modules)
@@ -690,6 +699,7 @@ def gen_code(model, args, output_dir=None):
         os.makedirs(output_dir, exist_ok=True)
 
     named_modules = dict(model.named_modules(remove_duplicate=False))
+    buffers = dict(model.named_buffers())
 
     ShapeProp(model).propagate(*args)
     model_params = ModelParams()
@@ -703,6 +713,14 @@ def gen_code(model, args, output_dir=None):
                 )
                 ShapeProp(gm).propagate(*n_args)
                 for n in gm.graph.nodes:
+                    # We don't generate params for dequantize nodes fused with input.
+                    # This logic should be handled during fusion.
+                    if n.target == torch.ops.quantized_ops.dequantize_symmetric:
+                        quantize_node = n.args[0]
+                        if quantize_node.op == 'placeholder':
+                            qparam_n = n.args[1]
+                            n.meta['dq_scale'] = buffers[qparam_n.target]
+                            continue
                     param = _map_operation(n, output_dir)
                     if isinstance(param, (MatrixParam, VectorParam)):
                         params.append(param)
