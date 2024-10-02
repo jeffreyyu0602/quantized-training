@@ -1,3 +1,4 @@
+import math
 from typing import Tuple, Union, Optional
 
 import torch
@@ -5,6 +6,7 @@ import torch.nn.functional as F
 from torch.library import Library, impl
 
 from .fake_quantize import _quantize
+from .mx_utils import _shared_exponents
 
 
 def _broadcast_shapes(input, target, block_size=32):
@@ -142,3 +144,26 @@ def matmul_mx(
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
         weight = weight * (2 ** scale_wt)
     return torch.matmul(input, weight)
+
+quantized_decomposed_lib.define(
+    "get_mx_scale(Tensor self, float qmax, int[] axis, bool force_scale_power_of_two=True) -> Tensor")
+
+@impl(quantized_decomposed_lib, "get_mx_scale", "CompositeExplicitAutograd")
+def get_mx_scale(
+    input: torch.Tensor,
+    qmax: float,
+    axis: int,
+    force_scale_power_of_two: bool = True,
+) -> torch.Tensor:
+    if force_scale_power_of_two:
+        shared_exp = _shared_exponents(input, method="max", axes=axis, ebits=0)
+        shared_exp = shared_exp.squeeze(dim=axis)
+        shared_exp = shared_exp - math.floor(math.log2(qmax))
+        return shared_exp
+
+    # Use absolute maximum value for scaling
+    amax = torch.amax(torch.abs(input), dim=axis)
+    scale = amax / qmax
+    scale = torch.where(amax > 0.0, scale, 1.0)
+    scale = torch.where(torch.isfinite(amax), scale, 1.0)
+    return torch.log2(scale)

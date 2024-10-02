@@ -55,8 +55,7 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
             value_remap[node] = new_node
 
             source_fn_st = new_node.meta.setdefault('source_fn_stack', [])
-            source_fn = source_fn_st[-1][1] if len(source_fn_st) > 0 else new_node.target
-            source_fn_st.append((new_node.name, source_fn))
+            source_fn_st.append((new_node.name, new_node.target))
 
             if (nn_module_stack := orig_node.meta.get('nn_module_stack', None)) is not None:
                 new_node.meta.setdefault('nn_module_stack', nn_module_stack)
@@ -473,6 +472,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
         else:
             reshape_nodes.append(next_node)
             fused_partitions.append(reshape_nodes)
+            group = reshape_nodes
 
         for n in reshape_nodes:
             fused_nodes[n] = None

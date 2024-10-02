@@ -558,6 +558,7 @@ def _replace_mx_observer_node(
     node: Node,
     input: torch.Tensor,
     activation_post_process: torch.nn.Module,
+    decompose_mx_node: bool = False,
 ) -> torch.Tensor:
     axes = activation_post_process.ch_axis
     axes = [axes] if type(axes) == int else axes
@@ -570,25 +571,47 @@ def _replace_mx_observer_node(
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
     emax = math.floor(math.log2(activation_post_process.quant_max))
 
-    class QuantizeMX(torch.nn.Module):
-        def forward(self, input: torch.Tensor) -> torch.Tensor: 
-            reshaped = input.view(orig_shape)
-            reshaped = torch.nn.functional.pad(reshaped, pad, mode="constant")
-            reshaped = reshaped.view(padded_shape)
+    if decompose_mx_node:
+        class QuantizeMX(torch.nn.Module):
+            def forward(self, input: torch.Tensor) -> torch.Tensor:
+                reshaped = input.view(orig_shape)
+                reshaped = torch.nn.functional.pad(reshaped, pad, mode="constant")
+                reshaped = reshaped.view(padded_shape)
 
-            amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
-            shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
-            input = torch.ops.quantized_ops.quantize_symmetric(
-                input,
-                2 ** shared_exp,
-                activation_post_process.dtype,
-                activation_post_process.quant_map,
-                block_size,
-            )
-            return (input, shared_exp)
+                amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
+                shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
+                input = torch.ops.quantized_ops.quantize_symmetric(
+                    input,
+                    2 ** shared_exp,
+                    activation_post_process.dtype,
+                    activation_post_process.quant_map,
+                    block_size,
+                )
+                return (input, shared_exp)
 
-    gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
-    return _decompose_node(model, gm, node)
+        gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
+        return _decompose_node(model, gm, node)
+
+    aten = torch.ops.aten
+    with model.graph.inserting_before(node):
+        if any(p > 0 for p in pad):
+            view_1 = model.graph.call_function(aten.view.default, (node.args[0], orig_shape))
+            pad_1 = model.graph.call_function(aten.pad.default, (view_1, pad))
+        else:
+            pad_1 = node.args[0]
+        view_2 = model.graph.call_function(aten.view.default, (pad_1, padded_shape))
+        qparam_node = model.graph.call_function(
+            torch.ops.quantized_ops.get_mx_scale,
+            (view_2, activation_post_process.quant_max, shared_exp_axes),
+        )
+        code = create_getattr_from_value(model, model.graph, "code_", activation_post_process.quant_map)
+        quantize_node = model.graph.call_function(
+            torch.ops.quantized_ops.quantize_symmetric,
+            (node.args[0], qparam_node, activation_post_process.dtype, code, block_size),
+        )
+
+    node.replace_all_uses_with(quantize_node)
+    return quantize_node, qparam_node
 
 
 def _replace_observer_with_quantize_mx_node_decomposed(

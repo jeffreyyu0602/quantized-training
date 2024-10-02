@@ -276,6 +276,7 @@ def _is_elementwise_op(node: Node) -> bool:
         # TODO MX ops call the default Overloads of quantization operators.
         torch.ops.quantized_ops.dequantize_symmetric.default,
         torch.ops.quantized_ops.quantize_symmetric.default,
+        torch.ops.quantized_ops.get_mx_scale,
     ]
 
 
@@ -310,6 +311,10 @@ def map_elementwise(node, output_dir):
             _set_tensor_field(param.other, node.args[1], output_dir)
         elif node.target == torch.ops.aten.amax.default:
             param.dim.extend(node.args[1])
+        elif node.target == torch.ops.quantized_ops.get_mx_scale:
+            # TODO we are abusing the other_scalar field to store the qmax value
+            param.other_scalar = node.args[1]
+            param.dim.extend(node.args[2])
         else:
             param.other_scalar = node.args[1]
 
