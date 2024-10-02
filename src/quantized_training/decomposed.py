@@ -100,10 +100,10 @@ def conv2d_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * (2 ** scale_inp)
+        input = input * scale_inp
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * (2 ** scale_wt)
+        weight = weight * scale_wt
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 quantized_decomposed_lib.define(
@@ -120,10 +120,10 @@ def linear_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * (2 ** scale_inp)
+        input = input * scale_inp
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * (2 ** scale_wt)
+        weight = weight * scale_wt
     return F.linear(input, weight, bias)
 
 quantized_decomposed_lib.define(
@@ -139,10 +139,10 @@ def matmul_mx(
 ) -> torch.Tensor:
     if scale_inp is not None:
         scale_inp = _broadcast_shapes(scale_inp, input, block_size)
-        input = input * (2 ** scale_inp)
+        input = input * scale_inp
     if scale_wt is not None:
         scale_wt = _broadcast_shapes(scale_wt, weight, block_size)
-        weight = weight * (2 ** scale_wt)
+        weight = weight * scale_wt
     return torch.matmul(input, weight)
 
 quantized_decomposed_lib.define(
@@ -159,11 +159,11 @@ def get_mx_scale(
         shared_exp = _shared_exponents(input, method="max", axes=axis, ebits=0)
         shared_exp = shared_exp.squeeze(dim=axis)
         shared_exp = shared_exp - math.floor(math.log2(qmax))
-        return shared_exp
+        return 2 ** shared_exp
 
     # Use absolute maximum value for scaling
     amax = torch.amax(torch.abs(input), dim=axis)
     scale = amax / qmax
     scale = torch.where(amax > 0.0, scale, 1.0)
     scale = torch.where(torch.isfinite(amax), scale, 1.0)
-    return torch.log2(scale)
+    return scale

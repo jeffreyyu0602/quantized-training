@@ -569,7 +569,6 @@ def _replace_mx_observer_node(
         input, axes, block_size
     )
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
-    emax = math.floor(math.log2(activation_post_process.quant_max))
 
     if decompose_mx_node:
         class QuantizeMX(torch.nn.Module):
@@ -579,15 +578,17 @@ def _replace_mx_observer_node(
                 reshaped = reshaped.view(padded_shape)
 
                 amax = torch.amax(torch.abs(reshaped), dim=shared_exp_axes)
-                shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype))) - emax
+                shared_exp = torch.floor(torch.log2(amax + (amax == 0).type(amax.dtype)))
+                shared_exp = shared_exp - math.floor(math.log2(activation_post_process.quant_max))
+                scale = 2 ** shared_exp
                 input = torch.ops.quantized_ops.quantize_symmetric(
                     input,
-                    2 ** shared_exp,
+                    scale,
                     activation_post_process.dtype,
                     activation_post_process.quant_map,
                     block_size,
                 )
-                return (input, shared_exp)
+                return (input, scale)
 
         gm = capture_pre_autograd_graph(QuantizeMX(), (input,))
         return _decompose_node(model, gm, node)
@@ -604,7 +605,8 @@ def _replace_mx_observer_node(
             torch.ops.quantized_ops.get_mx_scale,
             (view_2, activation_post_process.quant_max, shared_exp_axes),
         )
-        code = create_getattr_from_value(model, model.graph, "code_", activation_post_process.quant_map)
+        code = create_getattr_from_value(
+            model, model.graph, "code_", activation_post_process.quant_map)
         quantize_node = model.graph.call_function(
             torch.ops.quantized_ops.quantize_symmetric,
             (node.args[0], qparam_node, activation_post_process.dtype, code, block_size),
@@ -656,7 +658,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
         # annotate weight node dtype
         input_node.meta["dtype"] = input_dtype
-        qparam_node_wt.meta["dtype"] = "int8"
+        qparam_node_wt.meta["dtype"] = "e8m0"
     else:
         quantized_node, qparam_node_inp = _replace_mx_observer_node(
             model,
@@ -665,7 +667,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             activation_post_process,
         )
         quantized_node.meta["dtype"] = input_dtype
-        qparam_node_inp.meta["dtype"] = "int8"
+        qparam_node_inp.meta["dtype"] = "e8m0"
     graph.erase_node(node)
 
     for user_node in orig_fq_users:
