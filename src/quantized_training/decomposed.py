@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.library import Library, impl
 
 from .fake_quantize import _quantize
-from .mx_utils import _shared_exponents
+from .mx_utils import _reshape_to_blocks, _shared_exponents
 
 
 def _broadcast_shapes(input, target, block_size=32):
@@ -146,23 +146,45 @@ def matmul_mx(
     return torch.matmul(input, weight)
 
 quantized_decomposed_lib.define(
-    "get_mx_scale(Tensor self, float qmax, int[] axis, bool force_scale_power_of_two=True) -> Tensor")
+    "calculate_mx_qparam(Tensor self, float qmax, int axis, int block_size, bool force_scale_power_of_two=True) -> Tensor")
 
-@impl(quantized_decomposed_lib, "get_mx_scale", "CompositeExplicitAutograd")
-def get_mx_scale(
+@impl(quantized_decomposed_lib, "calculate_mx_qparam", "CompositeExplicitAutograd")
+def calculate_mx_qparam(
     input: torch.Tensor,
     qmax: float,
-    axis: int,
-    force_scale_power_of_two: bool = True,
+    axes: int,
+    block_size: int,
+    force_scale_power_of_two: bool = False,
 ) -> torch.Tensor:
+    axes = [axes] if type(axes) == int else axes
+    axes = [x + input.ndim if x < 0 else x for x in axes]
+
+    # Perform tiling to the hardware vector size
+    if block_size > 0:
+        input, axes, orig_shape, padded_shape = _reshape_to_blocks(
+            input, axes, block_size
+        )
+
+    shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+
     if force_scale_power_of_two:
-        shared_exp = _shared_exponents(input, method="max", axes=axis, ebits=0)
-        shared_exp = shared_exp.squeeze(dim=axis)
+        # Get shared exponents
+        shared_exp = _shared_exponents(
+            input, method="max", axes=shared_exp_axes, ebits=0,
+        )
+
+        # Offset the max exponent by the largest representable exponent
+        # in the element data format
         shared_exp = shared_exp - math.floor(math.log2(qmax))
+
+        for axis in reversed(axes):
+            # Remove extra dimension
+            shared_exp = torch.squeeze(shared_exp, dim=axis + 1)
+
         return 2 ** shared_exp
 
     # Use absolute maximum value for scaling
-    amax = torch.amax(torch.abs(input), dim=axis)
+    amax = torch.amax(torch.abs(input), dim=shared_exp_axes)
     scale = amax / qmax
     scale = torch.where(amax > 0.0, scale, 1.0)
     scale = torch.where(torch.isfinite(amax), scale, 1.0)
