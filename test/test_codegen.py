@@ -8,7 +8,6 @@ from datasets import load_dataset
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToJson
 from torch._export import capture_pre_autograd_graph
-import torch.ao.quantization
 from torch.utils.data import DataLoader
 from torchvision import models
 from transformers import (
@@ -25,7 +24,6 @@ from quantized_training import (
     convert_pt2e,
     get_default_quantizer,
     prepare_pt2e,
-    propagate_fake_tensor,
 )
 from quantized_training.codegen import (
     MemoryManager,
@@ -37,7 +35,7 @@ from quantized_training.codegen import (
     gen_compute_graph,
     split_multi_head_attention,
 )
-from quantized_training.quantize_pt2e import _fuse_quantize_with_previous_nodes
+from quantized_training.quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 
@@ -155,7 +153,7 @@ def transform(
     split_multi_head_attention(gm)
     ShapeProp(gm).propagate(*uplifted_args)
 
-    _fuse_quantize_with_previous_nodes(gm)
+    _fuse_quantize_dequantize_with_previous_op(gm)
 
     pipeline = {
         0: ["gemm"],
@@ -291,7 +289,6 @@ if __name__ == "__main__":
 
         convert_pt2e(model)
 
-        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         pt_out, gm_out = transform(
             model,
             example_args,

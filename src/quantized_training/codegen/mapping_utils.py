@@ -23,53 +23,6 @@ def _save_tensor(tensor, filename):
     print(f"Writing tensor to {filename}")
 
 
-def _get_module_name(n: Node):
-    # example: {
-    #    'L__self___sub': ("L['self'].sub", <class '....Sub'>),
-    #    'L__self___sub_linear': ("L['self'].sub.linear", <class 'torch.nn.modules.linear.Linear'>)
-    # }
-    # get_attr nodes doesn't have nn_module_stack?
-    nn_module_stack = n.meta.get("nn_module_stack", {})
-
-    def _normalize_path(n):
-        prefix = 0
-        # TODO This is non standard behavior and should be removed when we migrate off capture_pre_autograd_graph.
-        if n.startswith("L['self']."):
-            prefix = len("L['self'].")
-        return n[prefix:]
-
-    names = [_normalize_path(n) for n, _ in nn_module_stack.values()]
-    return names
-
-
-def _get_node_name(node: Node):
-    def _normalize_name(name):
-        return name.replace("[", "_").replace("]", "").replace(".", "_")
-
-    module_name = None
-    if node.op == "get_attr":
-        module_name = _normalize_name(node.target)
-    elif node.op == "placeholder":
-        if (
-            (source_node := node.meta.get("source_node", None)) is not None
-            and source_node.op == "get_attr"
-        ):
-            module_name = _normalize_name(source_node.target)
-    elif node.op == "call_function":
-        module_names = _get_module_name(node)
-        if len(module_names) > 0:
-            module_name = _normalize_name(module_names[-1])
-    elif node.op == "call_module":
-        if (gm := node.meta.get("source_module", None)) is not None:
-            first_node = next(n for n in gm.graph.nodes if n.op == "call_function")
-            module_names = _get_module_name(first_node)
-            if len(module_names) > 0:
-                module_name = _normalize_name(module_names[-1]) + "_fused"
-    if module_name is not None:
-        print(f"{node.name} -> {module_name}")
-    return module_name
-
-
 def _set_tensor_field(field, node, output_dir):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
         f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."

@@ -1,7 +1,7 @@
 import copy
 import itertools
 from dataclasses import asdict, replace
-from typing import Dict, Tuple, Union, Any, Optional, Callable, List
+from typing import Dict, Tuple, Any, Optional, Callable, List
 
 import torch
 from torch import Tensor
@@ -570,43 +570,38 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             user_node.kwargs = new_kwargs
 
 
-def _eliminated_dequantize_with_no_effect(model: GraphModule):
+def _eliminate_dequantize_with_no_effect(model: GraphModule):
     partitions = get_source_partitions(
         model.graph, [torch.ops.quantized_ops.dequantize_symmetric]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
-        dequantize_node = partition.output_nodes[0]
-        if (
-            dequantize_node.op != "call_function"
-            or dequantize_node.target != torch.ops.quantized_ops.dequantize_symmetric
-        ):
-            continue
+        dequantized_node = partition.output_nodes[0]
 
-        scale_node = dequantize_node.args[1]
+        scale_node = dequantized_node.args[1]
         scale = model.get_buffer(scale_node.target)
         if torch.any(scale != 1):
             continue
 
-        dtype = dequantize_node.args[2]
+        dtype = dequantized_node.args[2]
         if dtype is not None:
             continue
 
-        dequantize_node.replace_all_uses_with(dequantize_node.args[0])
-        model.graph.erase_node(dequantize_node)
+        dequantized_node.replace_all_uses_with(dequantized_node.args[0])
+        model.graph.erase_node(dequantized_node)
 
 
-def _fuse_quantize_with_previous_nodes(model: GraphModule):
+def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     graph = model.graph
 
-    def find_source_node_and_insert_quantize(node, prev_node=None, scale=None):
-        quantized_nodes = []
+    def find_node_and_insert(node, prev_node=None, scale=None):
+        nodes_on_path = []
         prev_node = node.args[0] if prev_node is None else prev_node
         while len(prev_node.users) == 1:
             if _is_nop(prev_node) or prev_node.target in [
                 torch.ops.aten.permute.default, torch.ops.aten.transpose.int,
             ]:
-                quantized_nodes.append(prev_node)
+                nodes_on_path.append(prev_node)
                 prev_node = prev_node.args[0]
             # Our accelerator doesn't support fusing quantize with dequantize
             # elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
@@ -620,8 +615,8 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
             elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                 # If there is a split, trace each branch separately
                 for arg in prev_node.all_input_nodes:
-                    quantized_nodes.extend(find_source_node_and_insert_quantize(node, arg, scale))
-                return quantized_nodes
+                    nodes_on_path.extend(find_node_and_insert(node, arg, scale))
+                return nodes_on_path
             else:
                 break
 
@@ -645,7 +640,7 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
         source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
         source_fn_st.append((new_node.name, new_node.target))
 
-        return quantized_nodes
+        return nodes_on_path
 
     # Switch the order of dequantize nodes with stack and view nodes inserted
     # during MHA splitting.
@@ -655,17 +650,20 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
         output_node = partition.output_nodes[0]
-        dequantized_nodes = find_source_node_and_insert_quantize(output_node)
-        if dequantized_nodes is None:
+        nodes = find_node_and_insert(output_node)
+        if nodes is None:
             continue
-        # TODO remove unused buffer
-        for n in dequantized_nodes:
+
+        dq_inputs = list(output_node.args)
+
+        for n in nodes:
             del n.meta["dtype"]
-        output_node.replace_all_uses_with(output_node.args[0])
-        orig_args = output_node.args
+
+        output_node.replace_all_uses_with(dq_inputs[0])
+
         graph.erase_node(output_node)
-        graph.erase_node(orig_args[1])
-        graph.erase_node(orig_args[3])
+        graph.erase_node(dq_inputs[1])
+        graph.erase_node(dq_inputs[3])
 
     partitions = get_source_partitions(
         model.graph, [torch.ops.quantized_ops.quantize_symmetric]
@@ -673,17 +671,20 @@ def _fuse_quantize_with_previous_nodes(model: GraphModule):
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
         output_node = partition.output_nodes[0]
-        quantized_nodes = find_source_node_and_insert_quantize(output_node)
-        if quantized_nodes is None:
+        nodes = find_node_and_insert(output_node)
+        if nodes is None:
             continue
-        # TODO remove unused buffer
-        for n in quantized_nodes:
-            n.meta["dtype"] = output_node.args[2]
-        output_node.replace_all_uses_with(output_node.args[0])
-        orig_args = output_node.args
+
+        quantize_op_inputs = list(output_node.args)
+
+        for n in nodes:
+            n.meta["dtype"] = quantize_op_inputs[2]
+
+        output_node.replace_all_uses_with(quantize_op_inputs[0])
+
         graph.erase_node(output_node)
-        graph.erase_node(orig_args[1])
-        graph.erase_node(orig_args[3])
+        graph.erase_node(quantize_op_inputs[1])
+        graph.erase_node(quantize_op_inputs[3])
 
 
 def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor]):
@@ -714,8 +715,8 @@ def convert_pt2e(model: GraphModule):
                 else:
                     _replace_observer_with_quantize_dequantize_node_decomposed(model, node, modules)
 
-    _eliminated_dequantize_with_no_effect(model)
-    _fuse_quantize_with_previous_nodes(model)
+    _eliminate_dequantize_with_no_effect(model)
+    _fuse_quantize_dequantize_with_previous_op(model)
 
     model.graph.lint()
     model.recompile()

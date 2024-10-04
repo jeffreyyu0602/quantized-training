@@ -10,4 +10,5 @@ __all__ = [
     "fuse_operator",
     "gen_code",
     "gen_compute_graph",
+    "split_multi_head_attention",
 ]

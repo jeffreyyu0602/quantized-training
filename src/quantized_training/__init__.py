@@ -1,3 +1,4 @@
+from .codegen import *
 from .decomposed import *
 from .fake_quantize import *
 from .fp8 import *

@@ -256,8 +256,9 @@ def _annotate_residual(
         if (
             not isinstance(input_act0, Node)
             or not isinstance(input_act1, Node)
-            or input_act0.op != "call_function"
-            or input_act1.op != "call_function"
+            or input_act0.op == "get_attr"
+            or input_act1.op == "get_attr"
+            or input_act0.meta['val'].shape != input_act1.meta['val'].shape
         ):
             continue
 

@@ -55,7 +55,8 @@ def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> Lis
             value_remap[node] = new_node
 
             source_fn_st = new_node.meta.setdefault('source_fn_stack', [])
-            source_fn_st.append((new_node.name, new_node.target))
+            source_fn = source_fn_st[-1][1] if len(source_fn_st) > 0 else new_node.target
+            source_fn_st.append((new_node.name, source_fn))
 
             if (nn_module_stack := orig_node.meta.get('nn_module_stack', None)) is not None:
                 new_node.meta.setdefault('nn_module_stack', nn_module_stack)
@@ -500,12 +501,20 @@ def fuse_operator(model: GraphModule, pipeline=None):
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize_symmetric])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for p in partitions:
-        group = search_group(p.output_nodes[0])
-        if group is not None:
-            continue
+    while len(partitions) > 0:
+        p = partitions.pop(0)
         node = p.output_nodes[0]
+        # If the node is already fused, skip it
+        if search_group(node) is not None:
+            continue
+        # If the node has multiple users, duplicate the nodes
+        if len(node.users) != 1:
+            groups = split_nodes_on_path(graph, [node])
+            for g in groups:
+                partitions.insert(0, make_partition(g[0]))
+            continue
         assert len(node.users) == 1, "dequantize_symmetric should only have one user"
+        # Fuse the dequantize node with its user
         user_node = next(iter(node.users))
         group = search_group(user_node)
         if group is None:
@@ -714,13 +723,16 @@ def gen_code(model, args, output_dir=None):
                 ShapeProp(gm).propagate(*n_args)
                 for n in gm.graph.nodes:
                     # We don't generate params for dequantize nodes fused with input.
-                    # This logic should be handled during fusion.
-                    if n.target == torch.ops.quantized_ops.dequantize_symmetric:
-                        quantize_node = n.args[0]
-                        if quantize_node.op == 'placeholder':
-                            qparam_n = n.args[1]
-                            n.meta['dq_scale'] = buffers[qparam_n.target]
-                            continue
+                    # Annotate the dequantize node with the scale factor.
+                    if (
+                        n.target == torch.ops.quantized_ops.dequantize_symmetric
+                        and n.args[0].op == 'placeholder'
+                    ):
+                        qparam_node = n.args[1]
+                        if qparam_node.op == 'placeholder':
+                            qparam_node = qparam_node.meta['source_node']
+                        n.meta['dq_scale'] = buffers[qparam_node.target]
+                        continue
                     param = _map_operation(n, output_dir)
                     if isinstance(param, (MatrixParam, VectorParam)):
                         params.append(param)
@@ -744,7 +756,7 @@ def gen_compute_graph(model, output_file="compute_graph"):
         if node.op == "get_attr" and "code" in node.name:
             continue
 
-        if node.op in ["placeholder", "get_attr"]:
+        if node.op == "placeholder":
             continue
 
         label = ""
@@ -759,6 +771,8 @@ def gen_compute_graph(model, output_file="compute_graph"):
         node_str = node.name
         if hasattr(node, "shape"):
             node_str += f"&#92;n{str(tuple(node.shape))}"
+        if (dtype := node.meta.get("dtype", None)) is not None:
+            node_str += f"&#92;n{dtype}"
         label = f"{{{node_str}}}" if label == "" else f"{{{node_str}|{label}}}"
         label = label.replace("<", "\<").replace(">", "\>")
 
