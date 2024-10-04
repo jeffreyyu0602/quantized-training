@@ -199,31 +199,44 @@ def _is_gemm_op(node: Node) -> bool:
 
 
 def _is_elementwise_op(node: Node) -> bool:
+    # Unary ops
+    if (
+        len(node.all_input_nodes) == 1
+        and node.all_input_nodes[0].meta['val'].shape == node.meta['val'].shape
+    ):
+        return True
+
+    # TODO maybe we can determine if the op is elementwise by checking the op's
+    # overload name (node.target._overloadname). For example, the op's overload name
+    # always ends with "Tensor" for most elementwise ops.
     return node.target in [
-        torch.ops.aten.abs.default,
+        # Arithmetic ops
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add_.Tensor,
-        torch.ops.aten.amax.default,
-        torch.ops.aten.div.Tensor,
-        torch.ops.aten.div_.Tensor,
-        torch.ops.aten.exp.default,
-        torch.ops.aten.floor.default,
-        torch.ops.aten.gelu.default,
-        torch.ops.aten.gelu_.default,
-        torch.ops.aten.hardtanh.default,
-        torch.ops.aten.hardtanh_.default,
-        torch.ops.aten.log.default,
-        torch.ops.aten.log2.default,
-        torch.ops.aten.mul.Tensor,
-        torch.ops.aten.mul_.Tensor,
-        torch.ops.aten.pow.Scalar,
-        torch.ops.aten.reciprocal.default,
-        torch.ops.aten.relu.default,
-        torch.ops.aten.relu_.default,
-        torch.ops.aten.sqrt.default,
         torch.ops.aten.sub.Tensor,
         torch.ops.aten.sub_.Tensor,
-        torch.ops.aten.tanh.default,
+        torch.ops.aten.mul.Tensor,
+        torch.ops.aten.mul_.Tensor,
+        torch.ops.aten.div.Tensor,
+        torch.ops.aten.div_.Tensor,
+        torch.ops.aten.remainder.Tensor,
+        torch.ops.aten.fmod.Tensor,
+        torch.ops.aten.pow.Tensor_Tensor,
+        # Comparison ops
+        torch.ops.aten.eq.Tensor,
+        torch.ops.aten.ne.Tensor,
+        torch.ops.aten.ge.Tensor,
+        torch.ops.aten.gt.Tensor,
+        torch.ops.aten.le.Tensor,
+        torch.ops.aten.lt.Tensor,
+        # Bitwise ops
+        torch.ops.aten.bitwise_and.Tensor,
+        torch.ops.aten.bitwise_or.Tensor,
+        torch.ops.aten.bitwise_xor.Tensor,
+        # Maximum/Minimum ops
+        torch.ops.aten.maximum.default,
+        torch.ops.aten.minimum.default,
+        # Quantized ops
         torch.ops.quantized_ops.calculate_mx_qparam,
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
@@ -257,14 +270,12 @@ def map_elementwise(node, output_dir):
         param.input_scalar = node.args[0]
 
     if len(node.args) > 1:
-        if isinstance(node.args[1], Node):
-            _set_tensor_field(param.other, node.args[1], output_dir)
-        elif node.target == torch.ops.aten.amax.default:
-            param.dim.extend(node.args[1])
-        elif node.target == torch.ops.quantized_ops.calculate_mx_qparam:
-            # TODO we are abusing the other_scalar field to store the qmax value
+        # TODO move calculate_mx_qparam to reduction ops
+        if node.target == torch.ops.quantized_ops.calculate_mx_qparam:
             param.other_scalar = node.args[1]
             param.dim.append(node.args[2])
+        elif isinstance(node.args[1], Node):
+            _set_tensor_field(param.other, node.args[1], output_dir)
         else:
             param.other_scalar = node.args[1]
 
@@ -280,11 +291,12 @@ def map_elementwise(node, output_dir):
 @register_annotator("reduce")
 def map_reduce(node, output_dir):
     if node.op != "call_function" or node.target not in [
-        torch.ops.aten.sum.dim_IntList,
+        torch.ops.aten.amax.default,
         torch.ops.aten.max.dim,
         torch.ops.aten.mean.dim,
         torch.ops.aten._softmax.default,
         torch.ops.aten.softmax.int,
+        torch.ops.aten.sum.dim_IntList,
     ]:
         return None
     param = ReduceParam()

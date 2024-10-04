@@ -756,7 +756,8 @@ def gen_compute_graph(model, output_file="compute_graph"):
         if node.op == "get_attr" and "code" in node.name:
             continue
 
-        if node.op == "placeholder":
+        # Skip nodes with too many users
+        if len(node.users) > 10:
             continue
 
         label = ""
@@ -766,7 +767,7 @@ def gen_compute_graph(model, output_file="compute_graph"):
                 label = "&#92;n".join([
                     str(n.target) for n in gm.graph.nodes if n.op == "call_function"
                 ])
-        else:
+        elif node.op == "call_function":
             label = str(node.target)
         node_str = node.name
         if hasattr(node, "shape"):
@@ -784,6 +785,7 @@ def gen_compute_graph(model, output_file="compute_graph"):
             edges.append((node.name, n.name))
 
     g = graphviz.Digraph()
+    g.attr(bgcolor="transparent")
 
     for node, attrs in nodes.items():
         g.node(node, **attrs)
