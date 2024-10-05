@@ -47,22 +47,19 @@ def _set_tensor_field(field, node, output_dir=None):
             _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
         node = reshape.args[0]
 
-    # The reshape op can be further fused with a dequantize op. We should verify if
-    # a dequantize op can appear after a reshape op.
+    # The reshape op can be further fused with a dequantize op.
     if (dq_scale := node.meta.get("dq_scale", None)) is not None:
         field.scale = dq_scale
         node = node.args[0]
+
+    if (source_node := node.meta.get("source_node", None)) is not None:
+        node = source_node
 
     if output_dir is not None:
         _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
-        field.dtype = dtype
-    elif (
-        (source_node := node.meta.get("source_node", None)) is not None
-        and (dtype := source_node.meta.get("dtype", None)) is not None
-    ):
         field.dtype = dtype
     else:
         field.dtype = str(node.value.dtype).split(".")[1]

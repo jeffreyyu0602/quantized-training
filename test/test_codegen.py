@@ -400,8 +400,7 @@ if __name__ == "__main__":
             extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
             gm(embedding_output, extended_attention_mask, head_mask)
 
-            # Use 20 calibration steps
-            if step == 19:
+            if step == 9:
                 break
 
         convert_pt2e(gm)

@@ -524,6 +524,10 @@ def fuse_operator(model: GraphModule, pipeline=None):
         else:
             group.insert(group.index(user_node), node)
 
+    # Fuse nodes that appear earlier in the graph first
+    node_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    fused_partitions.sort(key=lambda x: node_order[x[0]])
+
     for partition in fused_partitions:
         node = _create_and_insert_subgraph(partition, model, named_modules)
         named_modules = dict(model.named_modules(remove_duplicate=False))
@@ -571,8 +575,6 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         if node.op == "placeholder":
             node.meta["memory"] = manager.allocate_memory(node)
 
-    named_modules = dict(model.named_modules(remove_duplicate=False))
-
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
     for node in model.graph.nodes:
@@ -616,36 +618,24 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = maybe_stack_node.args[0][0]
             if (memory := first_node.meta.get("memory", None)) is None:
-                size = sum(manager.calculate_tensor_size(n.shape) * get_node_byte_size(n) for n in maybe_stack_node.args[0])
+                size = sum(
+                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n)
+                    for n in maybe_stack_node.args[0]
+                )
                 memory = manager.allocate_memory(first_node, size)
                 first_node.meta["memory"] = memory
 
             index = maybe_stack_node.args[0].index(node)
             if index > 0:
                 start_offset = memory.start + sum(
-                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n) for n in maybe_stack_node.args[0][:index]
+                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n)
+                    for n in maybe_stack_node.args[0][:index]
                 )
                 size = manager.calculate_tensor_size(node.shape) * get_node_byte_size(node)
                 node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None
-
-        # Propagate memory metadata for the inputs of submodules. Since reshape
-        # operations are fused within each submodule, we propagate memory metadata
-        # for these nodes as well.
-        # TODO we can get memory metadata from the source node now
-        if node.op == "call_module" and isinstance(named_modules[node.target], GraphModule):
-            gm = named_modules[node.target]
-            node_args = iter(node.args)
-            for n in gm.graph.nodes:
-                if n.op == 'placeholder':
-                    n.meta['memory'] = next(node_args).meta.get('memory', None)
-                elif _is_nop(n) or n.target in [
-                    torch.ops.aten.permute.default,
-                    torch.ops.aten.transpose.int,
-                ]:
-                    n.meta['memory'] = n.args[0].meta.get('memory', None)
 
         # We treat cat, select, slice, and stack operations as nops. Therefore,
         # we need to find if their immediate users have been visited.
