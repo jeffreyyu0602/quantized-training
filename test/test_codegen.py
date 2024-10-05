@@ -206,7 +206,7 @@ def transform(
     with open(os.path.join(output_dir, 'params.json'), "w") as f:
         f.write(MessageToJson(params))
 
-    layers = [p.name for p in params.params]
+    layers = [p.name for p in params.params if p.WhichOneof("param_type") != "nop"]
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(layers))
 
