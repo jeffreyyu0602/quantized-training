@@ -1,3 +1,4 @@
+import logging
 import operator
 import os
 import struct
@@ -12,7 +13,11 @@ from .param_pb2 import (
     PoolingParam,
     ReduceParam,
     ReshapeParam,
+    NopParam,
+    Tensor,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _save_tensor(tensor, filename):
@@ -23,7 +28,7 @@ def _save_tensor(tensor, filename):
     print(f"Writing tensor to {filename}")
 
 
-def _set_tensor_field(field, node, output_dir):
+def _set_tensor_field(field, node, output_dir=None):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
         f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
     )
@@ -203,6 +208,7 @@ def _is_elementwise_op(node: Node) -> bool:
     if (
         len(node.all_input_nodes) == 1
         and node.all_input_nodes[0].meta['val'].shape == node.meta['val'].shape
+        and not _is_nop(node)
     ):
         return True
 
@@ -408,3 +414,21 @@ def _is_nop(node: Node) -> bool:
         torch.ops.aten.view.default,
         operator.getitem,
     ]
+
+
+@register_annotator("nop")
+def map_nop(node, output_dir):
+    if node.op != "call_function" or not _is_nop(node) and node.target not in [
+        torch.ops.aten.select.int,
+        torch.ops.aten.stack.default,
+        torch.ops.aten.cat.default,
+    ]:
+        logger.warning(f"Unsupported operation {node.name}: {node.target}")
+    param = NopParam()
+    param.name = node.name
+    param.opcode = node.target.__name__.split(".")[0]
+    for n in node.all_input_nodes:
+        tensor = Tensor()
+        _set_tensor_field(tensor, n)
+        param.inputs.append(tensor)
+    return param

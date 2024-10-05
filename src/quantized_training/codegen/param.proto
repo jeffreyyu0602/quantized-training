@@ -94,6 +94,12 @@ message ReshapeParam {
   repeated int32 dims = 4;
 }
 
+message NopParam {
+  string name = 1;
+  string opcode = 2;
+  repeated Tensor inputs = 3;
+}
+
 // One of GEMM, reduction, or shape permutation operations
 message AcceleratorParam {
   string name = 1;
@@ -102,9 +108,10 @@ message AcceleratorParam {
     PoolingParam pooling_param = 3;
     ReduceParam reduce_param = 4;
     ReshapeParam reshape_param = 5;
+    NopParam nop = 6;
   }
-  repeated VectorParam vector_params = 6;
-  Tensor output = 7;
+  repeated VectorParam vector_params = 7;
+  Tensor output = 8;
 }
 
 message ModelParams {

@@ -614,6 +614,7 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             #     graph.erase_node(node_to_remove)
             elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                 # If there is a split, trace each branch separately
+                nodes_on_path.append(prev_node)
                 for arg in prev_node.all_input_nodes:
                     nodes_on_path.extend(find_node_and_insert(node, arg, scale))
                 return nodes_on_path

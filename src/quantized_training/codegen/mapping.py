@@ -31,6 +31,7 @@ from .param_pb2 import (
     PoolingParam,
     ReduceParam,
     ReshapeParam,
+    NopParam,
 )
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
@@ -553,42 +554,6 @@ def fuse_operator(model: GraphModule, pipeline=None):
     return model
 
 
-def _map_operation(node: Node, output_dir: str):
-    if node.op != "call_function":
-        return None
-    for mapping_fn in OP_TO_MAPPING_FUNC.values():
-        param = mapping_fn(node, output_dir)
-        if param is not None:
-            return param
-    print(f"WARNING: unsupported operation {node.name}: {node.target}")
-    return None
-
-
-def _compose_accelerator_param(params: List):
-    params = [p for p in params if p is not None]
-    if len(params) == 0:
-        return None
-
-    accelerator_param = AcceleratorParam()
-    if isinstance(params[0], MatrixParam):
-        accelerator_param.matrix_param.CopyFrom(params[0])
-        if len(params) > 1:
-            accelerator_param.vector_params.extend(params[1:])
-    elif isinstance(params[0], VectorParam):
-        accelerator_param.vector_params.extend(params)
-    else:
-        assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
-        if params[0].opcode == "layer_norm":
-            accelerator_param.matrix_param.CopyFrom(params[0])
-        if isinstance(params[0], PoolingParam):
-            accelerator_param.pooling_param.CopyFrom(params[0])
-        if isinstance(params[0], ReduceParam):
-            accelerator_param.reduce_param.CopyFrom(params[0])
-        if isinstance(params[0], ReshapeParam):
-            accelerator_param.reshape_param.CopyFrom(params[0])
-    return accelerator_param
-
-
 def allocate_weights(model: GraphModule, manager: MemoryManager = None):
     if manager is None:
         manager = MemoryManager(DEFAULT_MEMORY_SIZE)
@@ -703,6 +668,45 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
                 manager.free_memory(n)
 
 
+def _map_operation(node: Node, output_dir: str):
+    if node.op != "call_function":
+        return None
+    for mapping_fn in OP_TO_MAPPING_FUNC.values():
+        param = mapping_fn(node, output_dir)
+        if param is not None:
+            return param
+    raise NotImplementedError(f"Unsupported operation: {node.target}")
+
+
+def _compose_accelerator_param(node: Node, params: List, output_dir: str):
+    accelerator_param = AcceleratorParam()
+    accelerator_param.name = node.name
+    _set_tensor_field(accelerator_param.output, node, output_dir)
+
+    if isinstance(params[0], MatrixParam):
+        accelerator_param.matrix_param.CopyFrom(params[0])
+        if len(params) > 1:
+            accelerator_param.vector_params.extend(params[1:])
+        return accelerator_param
+
+    if isinstance(params[0], VectorParam):
+        accelerator_param.vector_params.extend(params)
+        return accelerator_param
+
+    assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
+    if params[0].opcode == "layer_norm":
+        accelerator_param.matrix_param.CopyFrom(params[0])
+    elif isinstance(params[0], PoolingParam):
+        accelerator_param.pooling_param.CopyFrom(params[0])
+    elif isinstance(params[0], ReduceParam):
+        accelerator_param.reduce_param.CopyFrom(params[0])
+    elif isinstance(params[0], ReshapeParam):
+        accelerator_param.reshape_param.CopyFrom(params[0])
+    elif isinstance(params[0], NopParam):
+        accelerator_param.nop.CopyFrom(params[0])
+    return accelerator_param
+
+
 def gen_code(model, args, output_dir=None):
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
@@ -714,36 +718,32 @@ def gen_code(model, args, output_dir=None):
     model_params = ModelParams()
     for node in model.graph.nodes:
         params = []
-        if node.op == 'call_module':
-            gm = named_modules[node.target]
-            if isinstance(gm, torch.fx.GraphModule):
-                n_args = torch.fx.node.map_aggregate(
-                    node.args, lambda n: n.value if isinstance(n, Node) else n
-                )
-                ShapeProp(gm).propagate(*n_args)
-                for n in gm.graph.nodes:
-                    # We don't generate params for dequantize nodes fused with input.
-                    # Annotate the dequantize node with the scale factor.
-                    if (
-                        n.target == torch.ops.quantized_ops.dequantize_symmetric
-                        and n.args[0].op == 'placeholder'
-                    ):
-                        qparam_node = n.args[1]
-                        if qparam_node.op == 'placeholder':
-                            qparam_node = qparam_node.meta['source_node']
-                        n.meta['dq_scale'] = buffers[qparam_node.target]
-                        continue
-                    param = _map_operation(n, output_dir)
-                    if isinstance(param, (MatrixParam, VectorParam)):
-                        params.append(param)
-        elif node.op == 'call_function':
+        if node.op == 'call_function':
             params.append(_map_operation(node, output_dir))
+        elif node.op == 'call_module':
+            gm = named_modules[node.target]
+            assert isinstance(gm, torch.fx.GraphModule)
+            n_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+            ShapeProp(gm).propagate(*n_args)
+            for n in gm.graph.nodes:
+                # Skip dequantize nodes that are fused with its user
+                if (
+                    n.target == torch.ops.quantized_ops.dequantize_symmetric
+                    and n.args[0].op == 'placeholder'
+                ):
+                    qparam_node = n.args[1]
+                    if qparam_node.op == 'placeholder':
+                        qparam_node = qparam_node.meta['source_node']
+                    n.meta['dq_scale'] = buffers[qparam_node.target]
+                    continue
+                param = _map_operation(n, output_dir)
+                if isinstance(param, (MatrixParam, VectorParam)):
+                    params.append(param)
+        else:
+            continue
 
-        param = _compose_accelerator_param(params)
-        if param is not None:
-            param.name = node.name
-            _set_tensor_field(param.output, node, output_dir)
-            model_params.params.append(param)
+        param = _compose_accelerator_param(node, params, output_dir)
+        model_params.params.append(param)
 
     return model_params
 
