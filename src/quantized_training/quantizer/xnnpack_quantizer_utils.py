@@ -349,11 +349,11 @@ def _annotate_mul(
 
 # TODO: make the list of ops customizable
 def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModule:
-    model_device = assert_and_get_unique_device(model)
+    device = assert_and_get_unique_device(model)
+    model_dtype = next(model.parameters()).dtype
     for n in model.graph.nodes:
         if n.op != "call_function" or n.target not in [
             torch.ops.aten.add.Tensor,
-            torch.ops.aten.sub.Tensor,
             torch.ops.aten.mul.Tensor,
             torch.ops.aten.div.Tensor,
         ]:
@@ -367,7 +367,7 @@ def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModu
             prefix = "_tensor_constant_"
             get_new_attr_name = get_new_attr_name_with_prefix(prefix)
             tensor_constant_name = get_new_attr_name(model)
-            float_tensor = torch.tensor(float(args[i]), device=model_device)
+            float_tensor = torch.tensor(float(args[i]), dtype=model_dtype, device=device)
             model.register_buffer(tensor_constant_name, float_tensor)
             fake_mode = n.meta["val"].fake_mode
             with model.graph.inserting_before(n):
