@@ -44,7 +44,7 @@ def _set_tensor_field(field, node, output_dir=None):
         )
         field.permutation.output_shape.extend(node.shape)
         if output_dir is not None:
-            _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
+            _save_tensor(reshape.value, os.path.join(output_dir, f"{reshape.name}.bin"))
         node = reshape.args[0]
 
     # The reshape op can be further fused with a dequantize op.
