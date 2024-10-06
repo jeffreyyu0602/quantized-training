@@ -750,21 +750,20 @@ def gen_compute_graph(model, output_file="compute_graph"):
         if len(node.users) > 10:
             continue
 
-        label = ""
+        header = node.name
+        if hasattr(node, "shape"):
+            header += f"&#92;n{str(tuple(node.shape))}"
+        if (dtype := node.meta.get("dtype", None)) is not None:
+            header += f"&#92;n{dtype}"
+
+        body = None
         if node.op == "call_module":
             gm = named_modules[node.target]
             if isinstance(gm, torch.fx.GraphModule):
-                label = "&#92;n".join([
-                    str(n.target) for n in gm.graph.nodes if n.op == "call_function"
+                body = "&#92;n".join([
+                    n.name for n in gm.graph.nodes if n.op == "call_function"
                 ])
-        elif node.op == "call_function":
-            label = str(node.target)
-        node_str = node.name
-        if hasattr(node, "shape"):
-            node_str += f"&#92;n{str(tuple(node.shape))}"
-        if (dtype := node.meta.get("dtype", None)) is not None:
-            node_str += f"&#92;n{dtype}"
-        label = f"{{{node_str}}}" if label == "" else f"{{{node_str}|{label}}}"
+        label = f"{{{header}}}" if body is None else f"{{{header}|{body}}}"
         label = label.replace("<", "\<").replace(">", "\>")
 
         nodes[node.name] = {

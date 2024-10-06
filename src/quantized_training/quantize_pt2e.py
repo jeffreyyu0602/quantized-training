@@ -434,7 +434,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model.register_buffer(qparam_node.target, scale * buffer)
         else:
             # Insert a dequantize node after the quantize node
-            with graph.inserting_before(user_node):
+            with graph.inserting_before(quantized_node.next):
                 qparam_node = create_getattr_from_value(
                     model, graph, user_node.name + "_scale_", scale)
                 dq_inputs = [quantized_node, qparam_node, None, None]
