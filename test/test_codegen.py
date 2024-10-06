@@ -151,6 +151,7 @@ def transform(
 
     ShapeProp(gm).propagate(*uplifted_args)
     split_multi_head_attention(gm)
+
     ShapeProp(gm).propagate(*uplifted_args)
 
     _fuse_quantize_dequantize_with_previous_op(gm)

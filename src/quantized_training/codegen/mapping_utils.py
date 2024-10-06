@@ -28,24 +28,25 @@ def _save_tensor(tensor, filename):
     print(f"Writing tensor to {filename}")
 
 
-def _set_tensor_field(field, node, output_dir=None):
+def _set_tensor_field(field, node, output_dir=None, is_output=False):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
         f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
     )
 
     # If there is a reshape operation, we take the input from the reshape args
-    if (reshape := node.meta.get("reshape", None)) is not None:
-        field.permutation.node = reshape.name
-        field.permutation.opcode = reshape.target.__name__.split(".")[0]
-        field.permutation.dims.extend(
-            reshape.args[1]
-            if reshape.target == torch.ops.aten.permute.default
-            else reshape.args[1:]
-        )
-        field.permutation.output_shape.extend(node.shape)
-        if output_dir is not None:
-            _save_tensor(reshape.value, os.path.join(output_dir, f"{reshape.name}.bin"))
-        node = reshape.args[0]
+    if node.op != "call_module" or is_output:
+        if (reshape := node.meta.get("reshape", None)) is not None:
+            field.permutation.node = reshape.name
+            field.permutation.opcode = reshape.target.__name__.split(".")[0]
+            field.permutation.dims.extend(
+                reshape.args[1]
+                if reshape.target == torch.ops.aten.permute.default
+                else reshape.args[1:]
+            )
+            field.permutation.input_shape.extend(reshape.args[0].shape)
+            field.permutation.output_shape.extend(node.shape)
+            if not is_output:
+                node = reshape.args[0]
 
     # The reshape op can be further fused with a dequantize op.
     if (dq_scale := node.meta.get("dq_scale", None)) is not None:
@@ -72,8 +73,6 @@ def _set_tensor_field(field, node, output_dir=None):
     if (memory := node.meta.get("memory", None)) is not None:
         field.memory.partition = memory.partition_id
         field.memory.offset = memory.start
-    else:
-        print(f"Node {node.name} does not have memory attribute")
 
 
 def _set_repeated_field(field, value):
@@ -201,11 +200,12 @@ def _is_gemm_op(node: Node) -> bool:
 
 
 def _is_elementwise_op(node: Node) -> bool:
-    # Unary ops
+    # Unary ops: same input and output shape
     if (
         len(node.all_input_nodes) == 1
         and node.all_input_nodes[0].meta['val'].shape == node.meta['val'].shape
         and not _is_nop(node)
+        and node.target != torch.ops.aten.softmax.int
     ):
         return True
 
@@ -239,8 +239,7 @@ def _is_elementwise_op(node: Node) -> bool:
         # Maximum/Minimum ops
         torch.ops.aten.maximum.default,
         torch.ops.aten.minimum.default,
-        # Quantized ops
-        torch.ops.quantized_ops.calculate_mx_qparam,
+        # Quantization ops
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
     ]
@@ -282,7 +281,7 @@ def map_elementwise(node, output_dir):
         else:
             param.other_scalar = node.args[1]
 
-    # TODO: Add a new field called dtype for quantize/dequantize operations
+    # TODO Add a new field called dtype for quantize/dequantize operations
     if len(node.args) > 2 and node.args[2] is not None:
         if node.target == torch.ops.quantized_ops.quantize_symmetric:
             param.opcode += "_to_" + node.args[2]
@@ -300,6 +299,7 @@ def map_reduce(node, output_dir):
         torch.ops.aten._softmax.default,
         torch.ops.aten.softmax.int,
         torch.ops.aten.sum.dim_IntList,
+        torch.ops.quantized_ops.calculate_mx_qparam,
     ]:
         return None
     param = ReduceParam()

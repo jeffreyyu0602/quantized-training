@@ -480,24 +480,25 @@ def fuse_operator(model: GraphModule, pipeline=None):
             fused_nodes[n] = None
 
         # Switch order of transpose and select nodes
-        if group[0].target == torch.ops.aten.transpose.int:
-            transpose_node = group.pop(0)
-            next_node = next(iter(transpose_node.users))
-            unfuse_nodes = []
+        reshape_node = group[0]
+        if reshape_node.target == torch.ops.aten.transpose.int:
+            next_node = next(iter(reshape_node.users))
+            unfused_nodes = []
             while next_node.target == torch.ops.aten.select.int:
-                unfuse_nodes.append(next_node)
+                unfused_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
 
-            if len(unfuse_nodes) > 0:
+            if len(unfused_nodes) > 0:
                 with graph.inserting_before(next_node):
-                    new_node = graph.node_copy(transpose_node, lambda _: unfuse_nodes[-1])
-                next_node.replace_input_with(unfuse_nodes[-1], new_node)
-                unfuse_nodes[0].replace_input_with(transpose_node, transpose_node.args[0])
+                    new_node = graph.node_copy(reshape_node, lambda _: unfused_nodes[-1])
+                next_node.replace_input_with(unfused_nodes[-1], new_node)
+                unfused_nodes[0].replace_input_with(reshape_node, reshape_node.args[0])
 
-                graph.erase_node(transpose_node)
+                graph.erase_node(reshape_node)
 
-                for n in unfuse_nodes:
+                for n in unfused_nodes:
                     group.remove(n)
+                group.remove(reshape_node)
                 group.insert(0, new_node)
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize_symmetric])
@@ -508,21 +509,29 @@ def fuse_operator(model: GraphModule, pipeline=None):
         # If the node is already fused, skip it
         if search_group(node) is not None:
             continue
-        # If the node has multiple users, duplicate the nodes
-        if len(node.users) != 1:
-            groups = split_nodes_on_path(graph, [node])
-            for g in groups:
-                partitions.insert(0, make_partition(g[0]))
-            continue
-        assert len(node.users) == 1, "dequantize_symmetric should only have one user"
         # Fuse the dequantize node with its user
-        user_node = next(iter(node.users))
-        group = search_group(user_node)
-        if group is None:
-            group = [node, user_node]
-            fused_partitions.append(group)
+        next_node = next(iter(node.users))
+        fused_nodes = [node]
+        fused = True
+        while not _is_gemm_op(next_node) and not _is_elementwise_op(next_node):
+            fused_nodes.append(next_node)
+            if len(next_node.users) != 1:
+                fused = False
+                groups = split_nodes_on_path(graph, fused_nodes)
+                for g in groups:
+                    partitions.insert(0, make_partition(g[0]))
+                break
+            next_node = next(iter(next_node.users))
+        if not fused:
+            continue
+        if (group := search_group(next_node)) is not None:
+            for n in reversed(fused_nodes):
+                if n not in group:
+                    user_node = next(iter(n.users))
+                    group.insert(group.index(user_node), n)
         else:
-            group.insert(group.index(user_node), node)
+            fused_nodes.append(next_node)
+            fused_partitions.append(fused_nodes)
 
     # Fuse nodes that appear earlier in the graph first
     node_order = {node: idx for idx, node in enumerate(graph.nodes)}
@@ -671,7 +680,7 @@ def _map_operation(node: Node, output_dir: str):
 def _compose_accelerator_param(node: Node, params: List, output_dir: str):
     accelerator_param = AcceleratorParam()
     accelerator_param.name = node.name
-    _set_tensor_field(accelerator_param.output, node, output_dir)
+    _set_tensor_field(accelerator_param.output, node, output_dir, True)
 
     if isinstance(params[0], MatrixParam):
         accelerator_param.matrix_param.CopyFrom(params[0])

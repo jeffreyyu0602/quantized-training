@@ -11,7 +11,8 @@ message Permutation {
   string node = 1;
   string opcode = 2;
   repeated int32 dims = 3;
-  repeated int32 output_shape = 4;
+  repeated int32 input_shape = 4;
+  repeated int32 output_shape = 5;
 }
 
 message Tensor {
@@ -40,7 +41,6 @@ message VectorParam {
     Tensor other = 5;
     float other_scalar = 6;
   }
-  repeated int32 dim = 7;
 }
 
 // Define message for GEMM and layer norm
