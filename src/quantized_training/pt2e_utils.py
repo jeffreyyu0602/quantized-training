@@ -1,7 +1,9 @@
 import re
-from typing import Dict
+from collections import defaultdict
+from typing import Dict, Tuple, Callable, Any
 
 import torch
+from torch._export import capture_pre_autograd_graph
 from torch.fx import GraphModule, Node
 from accelerate.big_modeling import infer_auto_device_map
 from accelerate.utils import get_max_memory
@@ -169,3 +171,70 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
 
     model.graph.lint()
     model.recompile()
+
+
+def get_aten_graph_module(
+    pattern: Callable,
+    example_inputs: Tuple[Any, ...],
+    is_cuda: bool = False,
+    **kwargs,
+) -> GraphModule:
+    """
+    Convert the pattern to an FX graph with decomposed aten ops.
+    """
+    if is_cuda:
+        example_inputs = tuple([x.cuda() if isinstance(x, torch.Tensor) else x for x in example_inputs])
+    aten_pattern = capture_pre_autograd_graph(
+        pattern,
+        example_inputs,
+        kwargs,
+    )
+    aten_pattern.graph.eliminate_dead_code()
+    aten_pattern.recompile()
+    return aten_pattern
+
+
+def get_node_name_to_scope(model: GraphModule) -> Dict[str, Tuple[str, type, int]]:
+    node_name_to_scope: Dict[str, Tuple[str, type]] = {}
+    submodule_to_object_type_to_cur_idx: Dict[str, Dict[Callable, int]] = \
+        defaultdict(lambda: defaultdict(int))
+    for n in model.graph.nodes:
+        if (nn_module_stack := n.meta.get("nn_module_stack", None)) is None:
+            node_name_to_scope[n.name] = [("", type(None))]
+            continue
+
+        def _normalize_path(n):
+            prefix = 0
+            # TODO This is non standard behavior and should be removed when we migrate off capture_pre_autograd_graph.
+            if n.startswith("L['self']."):
+                prefix = len("L['self'].")
+            return n[prefix:]
+
+        current_scope = []
+        for bt in nn_module_stack.values():
+            module_path = _normalize_path(bt[0])
+            cur_object_type_idx = \
+                submodule_to_object_type_to_cur_idx[module_path][n.target]
+            submodule_to_object_type_to_cur_idx[module_path][n.target] += 1
+            current_scope.append((module_path, bt[1], cur_object_type_idx))
+        node_name_to_scope[n.name] = current_scope[-1]
+
+    return node_name_to_scope
+
+
+def print_node_scope_tabular(gm: GraphModule):
+    try:
+        from tabulate import tabulate
+    except ImportError:
+        print("`print_tabular` relies on the library `tabulate`, "
+                "which could not be found on this machine. Run `pip "
+                "install tabulate` to install the library.")
+        raise
+
+    node_name_to_scope = get_node_name_to_scope(gm)
+    node_specs = [
+        [n.op, n.name, n.target, node_name_to_scope[n.name]]
+        for n in gm.graph.nodes if n.name in node_name_to_scope
+    ]
+    print(tabulate(node_specs,
+                   headers=['opcode', 'name', 'target', 'scope']))

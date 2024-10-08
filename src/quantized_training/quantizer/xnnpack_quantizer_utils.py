@@ -237,13 +237,15 @@ def _annotate_residual(
 ) -> Optional[List[List[Node]]]:
     node_order = {node: i for i, node in enumerate(gm.graph.nodes)}
     add_partitions = get_source_partitions(
-        gm.graph, [operator.add, torch.add, operator.iadd], filter_fn
+        gm.graph, [operator.add, torch.add, operator.iadd]
     )
     add_partitions = list(itertools.chain.from_iterable(add_partitions.values()))
     annotated_partitions = []
     for add_partition in add_partitions:
         annotated_partitions.append(add_partition.nodes)
         add_node = add_partition.output_nodes[0]
+        if filter_fn and not filter_fn(add_node):
+            continue
         if _is_annotated([add_node]):
             continue
 

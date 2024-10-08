@@ -21,7 +21,6 @@ from torch.fx import (
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 import quantized_training as qt
-from quantized_training.export_utils import _allow_exported_model_train_eval
 from quantized_training.fake_quantize import (
     _DerivedObserverOrFakeQuantize,
     FusedAmaxObsFakeQuantize,
@@ -110,7 +109,7 @@ def get_microscaling_quantizer(
     return (XNNPACKQuantizer()
         .set_module_type(torch.nn.Conv2d, qconfig_conv2d)
         .set_module_type(torch.nn.Linear, qconfig_linear)
-        .set_operator_type(torch.ops.aten.matmul.default, qconfig_matmul)
+        .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
     )
 
 
@@ -135,7 +134,7 @@ def get_per_channel_act_quantizer(
     return (XNNPACKQuantizer()
         .set_module_type(torch.nn.Conv2d, qconfig_conv2d)
         .set_module_type(torch.nn.Linear, qconfig_linear)
-        .set_operator_type(torch.ops.aten.matmul.default, qconfig_matmul)
+        .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
     )
 
 
@@ -225,7 +224,7 @@ def get_default_quantizer(
     qconfig = QuantizationConfig(input_activation, output_activation, weight, bias)
     qconfig_matmul = QuantizationConfig(input_activation, output_activation, input_activation, None)
     return XNNPACKQuantizer().set_global(qconfig) \
-        .set_operator_type(torch.ops.aten.matmul.default, qconfig_matmul)
+        .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
 
 
 def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
@@ -243,7 +242,6 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     )
 
     model = prepare_pt2e(model, quantizer)
-    _allow_exported_model_train_eval(model)
     return model
 
 
@@ -562,10 +560,11 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                     user_node.args,
                     new_kwargs,
                 )
-            user_node.replace_all_uses_with(new_node)
-            graph.erase_node(user_node)
+            new_node.meta = user_node.meta
             source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
             source_fn_st.append((new_node.name, new_node.target))
+            user_node.replace_all_uses_with(new_node)
+            graph.erase_node(user_node)
         elif user_node.target in QUANT_OP_MAPPINGS.values():
             user_node.kwargs = new_kwargs
 

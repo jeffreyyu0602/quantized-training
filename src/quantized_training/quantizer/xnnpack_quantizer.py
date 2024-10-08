@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union, Tuple, OrderedDict
 
 import torch
 from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
@@ -86,23 +86,55 @@ def _get_module_type_filter(tp: Callable):
     return module_type_filter
 
 
-def _get_operator_type_filter(op: torch._ops.OpOverloadPacket):
-    """Get the operator_type_filter function for a given operator type, the filter accepts
+def _get_object_type_filter(object_type: Union[Callable, str]):
+    """Get the object_type_filter function for a given operator type, the filter accepts
     a node and checks if the node comes from a call_function node that calls the operator
 
     For example:
         node: linear_op = call_function[...](...)  # calls the linear operator
 
 
-    >> operator_type_filter = _get_operator_type_filter(torch.ops.aten.linear.default)
-    >> print(operator_type_filter(node))
+    >> object_type_filter = _get_object_type_filter(torch.ops.aten.linear.default)
+    >> print(object_type_filter(node))
     True  # the node calls the linear operator
     """
 
-    def operator_type_filter(n: Node) -> bool:
-        return n.target == op
+    def object_type_filter(n: Node) -> bool:
+        return n.target == object_type
 
-    return operator_type_filter
+    return object_type_filter
+
+
+def _get_module_name_object_type_order_filter(
+    model: torch.fx.GraphModule,
+    module_name: str,
+    object_type: Callable,
+    index: int,
+):
+    """Get the module_name_object_type_order_filter function for a given module name,
+    object type, and index, the filter accepts a node and checks if the node comes from
+    a module that has certain module name, object type, and index
+
+    For example:
+        node: linear_op = call_function[...](...)  # comes from a module with name blocks.sub.linear1
+
+
+    >> module_name_object_type_order_filter = _get_module_name_object_type_order_filter(
+    >>     model, "mobilebert.encoder.layer[0].attention.self", torch.ops.aten.linear.default, 0)
+    >> print(module_name_object_type_order_filter(node))
+    """
+    from ..pt2e_utils import get_node_name_to_scope
+    node_name_to_scope = get_node_name_to_scope(model)
+
+    def module_name_object_type_order_filter(n: Node) -> bool:
+        current_scope = node_name_to_scope[n.name]
+        return (
+            module_name == current_scope[0] and
+            object_type == n.target and
+            index == current_scope[2]
+        )
+
+    return module_name_object_type_order_filter
 
 
 def _get_not_module_type_or_name_filter(
@@ -130,22 +162,23 @@ class XNNPACKQuantizer(Quantizer):
     def __init__(self):
         super().__init__()
         self.global_config: Optional[QuantizationConfig] = None
-        self.operator_type_config: Dict[
-            torch._ops.OpOverloadPacket, Optional[QuantizationConfig]
-        ] = {}
+        self.object_type_config: Dict[Union[Callable, str], Optional[QuantizationConfig]] = {}
         self.module_type_config: Dict[Callable, Optional[QuantizationConfig]] = {}
         self.module_name_config: Dict[str, Optional[QuantizationConfig]] = {}
+        self.module_name_object_type_order_config: OrderedDict[
+            Tuple[str, Callable, int], Optional[QuantizationConfig]
+        ] = {}
 
     def set_global(self, quantization_config: QuantizationConfig) -> XNNPACKQuantizer:
         self.global_config = quantization_config
         return self
 
-    def set_operator_type(
+    def set_object_type(
         self,
-        operator_type: torch._ops.OpOverloadPacket,
+        object_type: Union[Callable, str],
         quantization_config: QuantizationConfig,
     ) -> XNNPACKQuantizer:
-        self.operator_type_config[operator_type] = quantization_config
+        self.object_type_config[object_type] = quantization_config
         return self
 
     def set_module_type(
@@ -168,6 +201,19 @@ class XNNPACKQuantizer(Quantizer):
         self.module_name_config[module_name] = quantization_config
         return self
 
+    def set_module_name_object_type_order(
+        self,
+        module_name: str,
+        object_type: Callable,
+        index: int,
+        quantization_config: Optional[QuantizationConfig],
+    ):
+        """Set quantization_config for modules matching a combination of the given module name, object type,
+        and the index at which the module appears.
+        """
+        self.module_name_object_type_order_config[(module_name, object_type, index)] = quantization_config
+        return self
+
     def transform_for_annotation(
         self, model: torch.fx.GraphModule
     ) -> torch.fx.GraphModule:
@@ -175,6 +221,13 @@ class XNNPACKQuantizer(Quantizer):
         return _convert_scalars_to_attrs(model)
 
     def annotate(self, model: torch.fx.GraphModule) -> torch.fx.GraphModule:
+        for (module_name, object_type, index), config in self.module_name_object_type_order_config.items():
+            self._annotate_all_static_patterns(
+                model,
+                config,
+                _get_module_name_object_type_order_filter(model, module_name, object_type, index),
+            )
+
         module_name_list = list(self.module_name_config.keys())
         for module_name, config in self.module_name_config.items():
             self._annotate_all_static_patterns(
@@ -187,9 +240,9 @@ class XNNPACKQuantizer(Quantizer):
                 model, config, _get_module_type_filter(module_type)
             )
 
-        for op, config in self.operator_type_config.items():
+        for op, config in self.object_type_config.items():
             self._annotate_all_static_patterns(
-                model, config, _get_operator_type_filter(op)
+                model, config, _get_object_type_filter(op)
             )
 
         self._annotate_all_static_patterns(
