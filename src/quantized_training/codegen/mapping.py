@@ -2,6 +2,7 @@ import copy
 import itertools
 import logging
 import os
+from collections import defaultdict
 from typing import List, Dict, Type
 
 import graphviz
@@ -129,63 +130,41 @@ def split_multi_head_attention(model: GraphModule):
     graph = model.graph
     partitions = get_source_partitions(graph, [torch.matmul])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
-    count = 0
+    grouped_nodes = defaultdict(list)
     for partition in partitions:
-        # we group matmul into pairs. This logic assumes that torch.matmul
-        # is only used in multi-head attention.
-        count += 1
-        if count % 2 == 0:
+        matmul_node = partition.output_nodes[0]
+        if (nn_module_stack := matmul_node.meta.get('nn_module_stack', None)) is None:
             continue
 
-        # Find the path between two matmul operations
-        output_node = partition.output_nodes[0]
-        next_node = next(iter(output_node.users))
+        bt = list(nn_module_stack.values())[-1]
+        grouped_nodes[bt[0]].append(matmul_node)
+
+    for nodes in grouped_nodes.values():
+        if len(nodes) == 1:
+            _decompose_bmm(model, nodes[0])
+            continue
+
+        assert len(nodes) == 2
+        matmul_1 = nodes[0]
+        matmul_2 = nodes[1]
+
+        query = matmul_1.args[0]
+        key = matmul_1.args[1]
+        value = matmul_2.args[1]
+
+        # Find all the nodes between two matmul operations
         nodes_in_path = []
+        next_node = next(iter(matmul_1.users))
         while len(next_node.users) == 1 and next_node.target != torch.ops.aten.matmul.default:
             nodes_in_path.append(next_node)
             next_node = next(iter(next_node.users))
 
-        query = output_node.args[0]
-        key = output_node.args[1]
-        value = next_node.args[1]
+        assert id(next_node) == id(matmul_2)
 
-        output_1 = _decompose_bmm(model, output_node)
-        output_2 = _decompose_bmm(model, next_node)
+        output_1 = _decompose_bmm(model, matmul_1)
+        output_2 = _decompose_bmm(model, matmul_2)
 
-        if output_1 is None or output_2 is None:
-            continue
-
-        # Before splitting the nodes:
-        # select -> matmul \                          / select_1 -> select_2
-        #       ...
-        # select -> matmul -> stack -> view -> group -> select_1 -> select_2
-        # select -> matmul /                          \ select_1 -> select_2
-        node_groups = split_nodes_on_path(graph, nodes_in_path)
-
-        # After splitting the nodes:
-        # select -> matmul \                 / group 1 -> select_1 -> select_2
-        #       ...
-        # select -> matmul -> stack -> view -> group N-1 -> select_1 -> select_2
-        # select -> matmul /                 \ group N -> select_1 -> select_2
-        # We can match the decomposed matmul nodes with a specific path and remove
-        # the stack and view nodes. Each group perform a single head attention.
-        # Final graph:
-        # select -> matmul -> group 1 -> matmul
-        #       ...
-        # select -> matmul -> group N-1 -> matmul
-        # select -> matmul -> group N -> matmul
-        matmul_nodes = output_1.args[0].args[0]
-        for node in matmul_nodes:
-            select = node.args[0]
-            for group in node_groups:
-                select_1 = next(iter(group[-1].users))
-                select_2 = next(iter(select_1.users))
-                if select_2.args[1:] == select.args[1:]:
-                    group[0].replace_input_with(group[0].args[0], node)
-                    select_2.replace_all_uses_with(group[-1])
-                    break
-
-        def propagate_dtype(node):
+        def propagate_input_dtype(node):
             if (dtype := node.meta.get('dtype', None)) is None:
                 return
             select_nodes = list(node.users)
@@ -196,21 +175,63 @@ def split_multi_head_attention(model: GraphModule):
                     n for n in select.users if n.target != torch.ops.aten.matmul.default
                 ])
 
-        propagate_dtype(query)
-        propagate_dtype(key)
-        propagate_dtype(value)
-
-        if (dtype := output_node.meta.get('dtype', None)) is not None:
-            for node in matmul_nodes:
+        def propagate_output_dtype(matmul_node, output_node):
+            if (dtype := matmul_node.meta.get('dtype', None)) is None:
+                return
+            output_nodes = [output_node, output_node.args[0]] + output_node.args[0].args[0]
+            for node in output_nodes:
                 node.meta['dtype'] = dtype
 
-        if (dtype := next_node.meta.get('dtype', None)) is not None:
-            user_nodes = [output_2, output_2.args[0]] + output_2.args[0].args[0]
-            for node in user_nodes:
-                node.meta['dtype'] = dtype
+        if output_1 is not None:
+            propagate_input_dtype(query)
+            propagate_input_dtype(key)
+            propagate_output_dtype(matmul_1, output_1)
+
+        if output_2 is not None:
+            propagate_input_dtype(value)
+            propagate_output_dtype(matmul_2, output_2)
+
+        if output_1 is None or output_2 is None:
+            continue
+
+        # Before splitting the nodes:
+        # select -> matmul \                          / select_1 -> select_2
+        #       ...
+        # select -> matmul -> stack -> view -> group -> select_1 -> select_2
+        # select -> matmul /                          \ select_1 -> select_2
+
+        # After splitting the nodes:
+        # select -> matmul \                 / group 1   -> select_1 -> select_2
+        #       ...
+        # select -> matmul -> stack -> view -> group N-1 -> select_1 -> select_2
+        # select -> matmul /                 \ group N   -> select_1 -> select_2
+        # We can match the decomposed matmul nodes with a specific path and remove
+        # the stack and view nodes. Each group perform a single head attention.
+
+        # Final graph after removing the stack and view nodes:
+        # select -> matmul -> group 1   -> matmul
+        #       ...
+        # select -> matmul -> group N-1 -> matmul
+        # select -> matmul -> group N   -> matmul
+
+        node_groups = split_nodes_on_path(graph, nodes_in_path)
+        matmul_nodes = output_1.args[0].args[0]
+        for node in matmul_nodes:
+            # Input select for the first set of matmul nodes
+            select = node.args[0]
+            for group in node_groups:
+                # Input select for the second set of matmul nodes
+                select_1 = next(iter(group[-1].users))
+                select_2 = next(iter(select_1.users))
+                if select_2.args[1:] == select.args[1:]:
+                    group[0].replace_input_with(group[0].args[0], node)
+                    select_2.replace_all_uses_with(group[-1])
+                    break
 
     graph.eliminate_dead_code()
     graph.lint()
+    model.recompile()
+    return model
 
 
 def _create_subgraph(nodes: List[Node]):

@@ -201,6 +201,8 @@ def _is_gemm_op(node: Node) -> bool:
 
 def _is_elementwise_op(node: Node) -> bool:
     # Unary ops: same input and output shape
+    # See if an operation can be decomposed into smaller operations and check if
+    # each sub-operation is elementwise
     if (
         len(node.all_input_nodes) == 1
         and node.all_input_nodes[0].meta['val'].shape == node.meta['val'].shape
