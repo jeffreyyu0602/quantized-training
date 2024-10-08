@@ -20,19 +20,17 @@ from transformers import (
 from tqdm import tqdm
 
 from quantized_training import (
-    add_qspec_args,
-    convert_pt2e,
-    get_default_quantizer,
-    prepare_pt2e,
-)
-from quantized_training.codegen import (
     MemoryManager,
     ShapeProp,
+    add_qspec_args,
     allocate_activations,
     allocate_weights,
+    convert_pt2e,
     fuse_operator,
     gen_code,
     gen_compute_graph,
+    get_default_quantizer,
+    prepare_pt2e,
     split_multi_head_attention,
 )
 from quantized_training.quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
@@ -248,7 +246,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     quantizer = get_default_quantizer(
-        args.activation, args.output_activation, args.weight, args.bias
+        input_activation=args.activation,
+        output_activation=args.output_activation,
+        weight=args.weight,
+        bias=args.bias,
+        force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
     if args.model in TORCHVISION_MODELS:
@@ -441,6 +443,9 @@ if __name__ == "__main__":
         for name, module in gm.named_modules():
             if hasattr(module, "scale"):
                 module.scale = torch.randn_like(module.scale)
+
+        for name, param in gm.named_parameters():
+            param.data.div_(100.0)
 
         convert_pt2e(gm)
 

@@ -609,8 +609,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # the memory offset from the select index
         if node.target == torch.ops.aten.select.int:
             assert node.args[1] == 0, "Only support select on the first dimension"
-            size = manager.calculate_tensor_size(node.shape)
-            size *= get_node_byte_size(node)
+            size = manager.calculate_tensor_size(node.shape) * get_node_byte_size(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
