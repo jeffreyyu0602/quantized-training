@@ -418,9 +418,9 @@ def _is_nop(node: Node) -> bool:
 @register_annotator("nop")
 def map_nop(node, output_dir):
     if node.op != "call_function" or not _is_nop(node) and node.target not in [
+        torch.ops.aten.cat.default,
         torch.ops.aten.select.int,
         torch.ops.aten.stack.default,
-        torch.ops.aten.cat.default,
     ]:
         logger.warning(f"Unsupported operation {node.name}: {node.target}")
     param = NopParam()

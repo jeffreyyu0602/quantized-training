@@ -418,40 +418,37 @@ def fuse_operator(model: GraphModule, pipeline=None):
         # we trace down the graph until we reach a GEMM or elementwise operation. If we
         # encounter a node with multiple users, we duplicate all the elements on the path
         # and perform fusion on each branch.
-        reshape_nodes = []
-        prev_node = output_node
+        reshape_nodes = [output_node]
+        prev_node = output_node.all_input_nodes[0]
         fused = True
-        while not _is_gemm_op(prev_node) and not _is_elementwise_op(prev_node):
+        while _is_nop(prev_node) or prev_node.target in [
+            torch.ops.aten.cat.default,
+            torch.ops.aten.select.int,
+            torch.ops.aten.stack.default,
+        ]:
+            # Reshape cannot be fused with a node that has multiple users or inputs
+            if (
+                len(prev_node.users) > 1 or
+                len(prev_node.all_input_nodes) != 1
+            ):
+                fused = False
+                break
+
             reshape_nodes.insert(0, prev_node)
-
-            # Right now we don't support fusing more than one reshape operation.
-            if id(prev_node) != id(output_node) and prev_node.target in [
-                torch.ops.aten.permute.default,
-                torch.ops.aten.transpose.int,
-            ]:
-                fused = False
-                break
-
-            # If a previous node has multiple users, we cannot fuse it with the reshape
-            if id(prev_node) != id(output_node) and len(prev_node.users) > 1:
-                fused = False
-                break
-
-            # Lastly, if a node has multiple input nodes, the reshape op cannot
-            # be fused with any single branch.
-            if len(prev_node.all_input_nodes) != 1:
-                fused = False
-                break
-
             prev_node = prev_node.all_input_nodes[0]
 
-        if fused:
+        # We don't support fusing more than one reshape operation.
+        if fused and prev_node.target not in [
+            torch.ops.aten.permute.default,
+            torch.ops.aten.transpose.int,
+        ]:
             if prev_node in fused_nodes:
                 group = search_group(prev_node)
                 group.extend(reshape_nodes)
             else:
                 reshape_nodes.insert(0, prev_node)
                 fused_partitions.append(reshape_nodes)
+
             for n in reshape_nodes:
                 fused_nodes[n] = None
             continue
@@ -459,15 +456,12 @@ def fuse_operator(model: GraphModule, pipeline=None):
         reshape_nodes = []
         next_node = output_node
         fused = True
-        while not _is_gemm_op(next_node) and not _is_elementwise_op(next_node):
+        while id(next_node) == id(output_node) or _is_nop(next_node) or next_node.target in [
+            torch.ops.aten.cat.default,
+            torch.ops.aten.select.int,
+            torch.ops.aten.stack.default,
+        ]:
             reshape_nodes.append(next_node)
-
-            if id(next_node) != id(output_node) and next_node.target in [
-                torch.ops.aten.permute.default,
-                torch.ops.aten.transpose.int,
-            ]:
-                fused = False
-                break
 
             # If the node is the last node, stop.
             if len(next_node.users) == 0:
@@ -485,7 +479,10 @@ def fuse_operator(model: GraphModule, pipeline=None):
 
             next_node = next(iter(next_node.users))
 
-        if not fused:
+        if not fused or next_node.target in [
+            torch.ops.aten.permute.default,
+            torch.ops.aten.transpose.int,
+        ]:
             continue
 
         if next_node in fused_nodes:
@@ -503,11 +500,18 @@ def fuse_operator(model: GraphModule, pipeline=None):
         # Switch order of transpose and select nodes
         reshape_node = group[0]
         if reshape_node.target == torch.ops.aten.transpose.int:
-            next_node = next(iter(reshape_node.users))
+            ndim = reshape_node.args[0].meta['val'].ndim
+            axes = [x if x >= 0 else x + ndim for x in reshape_node.args[1:]]
             unfused_nodes = []
-            while next_node.target == torch.ops.aten.select.int:
+            next_node = next(iter(reshape_node.users))
+            while (
+                next_node.target == torch.ops.aten.select.int
+                and next_node.args[1] == 0
+                and next_node.args[1] not in axes
+            ):
                 unfused_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
+                axes = [x - 1 for x in axes]
 
             if len(unfused_nodes) > 0:
                 with graph.inserting_before(next_node):
@@ -531,10 +535,14 @@ def fuse_operator(model: GraphModule, pipeline=None):
         if search_group(node) is not None:
             continue
         # Fuse the dequantize node with its user
-        next_node = next(iter(node.users))
-        fused_nodes = [node]
+        fused_nodes = []
+        next_node = node
         fused = True
-        while not _is_gemm_op(next_node) and not _is_elementwise_op(next_node):
+        while id(next_node) == id(node) or _is_nop(next_node) or next_node.target in [
+            torch.ops.aten.cat.default,
+            torch.ops.aten.select.int,
+            torch.ops.aten.stack.default,
+        ]:
             fused_nodes.append(next_node)
             if len(next_node.users) != 1:
                 fused = False
@@ -543,8 +551,10 @@ def fuse_operator(model: GraphModule, pipeline=None):
                     partitions.insert(0, make_partition(g[0]))
                 break
             next_node = next(iter(next_node.users))
+
         if not fused:
             continue
+
         if (group := search_group(next_node)) is not None:
             for n in reversed(fused_nodes):
                 if n not in group:
@@ -577,7 +587,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 node.meta['reshape'] = n
             else:
                 input_node = n
-                while not _is_gemm_op(user) and not _is_elementwise_op(user):
+                while _is_nop(user):
                     input_node = user
                     user = next(iter(user.users))
                 input_node.meta['reshape'] = n
@@ -745,7 +755,13 @@ def gen_code(model, args, output_dir=None):
             n_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
             ShapeProp(gm).propagate(*n_args)
             for n in gm.graph.nodes:
-                # Skip dequantize nodes that are fused with its user
+                if _is_nop(n) or n.target in [
+                    torch.ops.aten.permute.default,
+                    torch.ops.aten.transpose.int,
+                ]:
+                    continue
+
+                # Skip dequantize nodes that are fused inputs
                 if (
                     n.target == torch.ops.quantized_ops.dequantize_symmetric
                     and n.args[0].op == 'placeholder'
@@ -755,8 +771,8 @@ def gen_code(model, args, output_dir=None):
                         qparam_node = qparam_node.meta['source_node']
                     n.meta['dq_scale'] = buffers[qparam_node.target]
                     continue
-                param = _map_operation(n, output_dir)
-                if isinstance(param, (MatrixParam, VectorParam)):
+
+                if (param := _map_operation(n, output_dir)) is not None:
                     params.append(param)
         else:
             continue
@@ -777,6 +793,9 @@ def gen_compute_graph(model, output_file="compute_graph"):
 
         # Skip nodes with too many users
         if len(node.users) > 10:
+            continue
+
+        if node.op == "get_attr":
             continue
 
         header = node.name
