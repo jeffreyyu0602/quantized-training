@@ -218,6 +218,9 @@ def _is_elementwise_op(node: Node) -> bool:
     ]:
         return True
 
+    if len(node.all_input_nodes) > 2:
+        return False
+
     # Get the shapes of all inputs and determine the broadcasted shape
     input_shapes = [n.meta['val'].shape for n in node.all_input_nodes]
     try:
@@ -229,20 +232,16 @@ def _is_elementwise_op(node: Node) -> bool:
     def arg_transform(n):
         if n not in value_remap:
             value_remap[n] = torch.randn(broadcasted_shape)
-        return value_remap[n]
+        return value_remap[n].clone()
 
     args, kwargs = torch.fx.node.map_arg((node.args, node.kwargs), arg_transform)
     orig_output = node.target(*args, **kwargs)
 
-    # Unary elementwise ops must have the same input and output shape and different values
-    if len(node.all_input_nodes) == 1:
-        if args[0].shape != orig_output.shape or torch.all(args[0] == orig_output):
-            return False
-
     for arg in node.all_input_nodes:
         input_tensor = value_remap[arg]
 
-        if input_tensor.shape != orig_output.shape:
+        # Output shape should be the same as the input shape and the output must be different
+        if input_tensor.shape != orig_output.shape or torch.all(input_tensor == orig_output):
             return False
 
         # Modify one element of the input tensor. TODO This might fail for some input values
@@ -252,10 +251,11 @@ def _is_elementwise_op(node: Node) -> bool:
 
         new_args, new_kwargs = torch.fx.node.map_arg(
             (node.args, node.kwargs),
-            lambda n: value_remap[n] if n != arg else new_input
+            lambda n: arg_transform(n) if n != arg else new_input,
         )
         new_output = node.target(*new_args, **new_kwargs)
 
+        # Check if the output is different only at the modified index
         changed_indices = torch.nonzero(orig_output != new_output, as_tuple=False)
 
         if changed_indices.size(0) != 1 or tuple(changed_indices[0].tolist()) != indices:
