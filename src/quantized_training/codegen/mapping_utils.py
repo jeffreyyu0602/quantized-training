@@ -1,6 +1,7 @@
 import logging
 import operator
 import os
+import random
 import struct
 from typing import Callable, Dict
 
@@ -200,51 +201,67 @@ def _is_gemm_op(node: Node) -> bool:
 
 
 def _is_elementwise_op(node: Node) -> bool:
-    # Unary ops: same input and output shape
-    # See if an operation can be decomposed into smaller operations and check if
-    # each sub-operation is elementwise
-    if (
-        len(node.all_input_nodes) == 1
-        and node.all_input_nodes[0].meta['val'].shape == node.meta['val'].shape
-        and not _is_nop(node)
-        and node.target != torch.ops.aten.softmax.int
-    ):
-        return True
+    """The function test if a callable is elementwise by applying a random input
+    tensor and modifying one element of the input tensor. If the output of the
+    function changes only at the modified index, then the function is elementwise.
 
-    # TODO maybe we can determine if the op is elementwise by checking the op's
-    # overload name (node.target._overloadname). For example, the op's overload name
-    # always ends with "Tensor" for most elementwise ops.
-    return node.target in [
-        # Arithmetic ops
-        torch.ops.aten.add.Tensor,
-        torch.ops.aten.add_.Tensor,
-        torch.ops.aten.sub.Tensor,
-        torch.ops.aten.sub_.Tensor,
-        torch.ops.aten.mul.Tensor,
-        torch.ops.aten.mul_.Tensor,
-        torch.ops.aten.div.Tensor,
-        torch.ops.aten.div_.Tensor,
-        torch.ops.aten.remainder.Tensor,
-        torch.ops.aten.fmod.Tensor,
-        torch.ops.aten.pow.Tensor_Tensor,
-        # Comparison ops
-        torch.ops.aten.eq.Tensor,
-        torch.ops.aten.ne.Tensor,
-        torch.ops.aten.ge.Tensor,
-        torch.ops.aten.gt.Tensor,
-        torch.ops.aten.le.Tensor,
-        torch.ops.aten.lt.Tensor,
-        # Bitwise ops
-        torch.ops.aten.bitwise_and.Tensor,
-        torch.ops.aten.bitwise_or.Tensor,
-        torch.ops.aten.bitwise_xor.Tensor,
-        # Maximum/Minimum ops
-        torch.ops.aten.maximum.default,
-        torch.ops.aten.minimum.default,
-        # Quantization ops
+    Parameters:
+    - node: The node to be tested.
+
+    Returns:
+    - True if the function is elementwise, False otherwise.
+    """
+
+    if node.target in [
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
-    ]
+    ]:
+        return True
+
+    # Get the shapes of all inputs and determine the broadcasted shape
+    input_shapes = [n.meta['val'].shape for n in node.all_input_nodes]
+    try:
+        broadcasted_shape = torch.broadcast_shapes(*input_shapes)
+    except RuntimeError:
+        return False
+
+    value_remap = {}
+    def arg_transform(n):
+        if n not in value_remap:
+            value_remap[n] = torch.randn(broadcasted_shape)
+        return value_remap[n]
+
+    args, kwargs = torch.fx.node.map_arg((node.args, node.kwargs), arg_transform)
+    orig_output = node.target(*args, **kwargs)
+
+    # Unary elementwise ops must have the same input and output shape and different values
+    if len(node.all_input_nodes) == 1:
+        if args[0].shape != orig_output.shape or torch.all(args[0] == orig_output):
+            return False
+
+    for arg in node.all_input_nodes:
+        input_tensor = value_remap[arg]
+
+        if input_tensor.shape != orig_output.shape:
+            return False
+
+        # Modify one element of the input tensor. TODO This might fail for some input values
+        indices = tuple(random.randint(0, dim_size - 1) for dim_size in input_tensor.shape)
+        new_input = input_tensor.clone()
+        new_input[indices] *= -1.0
+
+        new_args, new_kwargs = torch.fx.node.map_arg(
+            (node.args, node.kwargs),
+            lambda n: value_remap[n] if n != arg else new_input
+        )
+        new_output = node.target(*new_args, **new_kwargs)
+
+        changed_indices = torch.nonzero(orig_output != new_output, as_tuple=False)
+
+        if changed_indices.size(0) != 1 or tuple(changed_indices[0].tolist()) != indices:
+            return False
+
+    return True
 
 
 @register_annotator("elementwise")
@@ -274,11 +291,7 @@ def map_elementwise(node, output_dir):
         param.input_scalar = node.args[0]
 
     if len(node.args) > 1:
-        # TODO move calculate_mx_qparam to reduction ops
-        if node.target == torch.ops.quantized_ops.calculate_mx_qparam:
-            param.other_scalar = node.args[1]
-            param.dim.append(node.args[2])
-        elif isinstance(node.args[1], Node):
+        if isinstance(node.args[1], Node):
             _set_tensor_field(param.other, node.args[1], output_dir)
         else:
             param.other_scalar = node.args[1]
@@ -298,7 +311,6 @@ def map_reduce(node, output_dir):
         torch.ops.aten.amax.default,
         torch.ops.aten.max.dim,
         torch.ops.aten.mean.dim,
-        torch.ops.aten._softmax.default,
         torch.ops.aten.softmax.int,
         torch.ops.aten.sum.dim_IntList,
         torch.ops.quantized_ops.calculate_mx_qparam,

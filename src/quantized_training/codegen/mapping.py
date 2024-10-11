@@ -772,7 +772,8 @@ def gen_code(model, args, output_dir=None):
                     n.meta['dq_scale'] = buffers[qparam_node.target]
                     continue
 
-                if (param := _map_operation(n, output_dir)) is not None:
+                param = _map_operation(n, output_dir)
+                if param is not None and not isinstance(param, NopParam):
                     params.append(param)
         else:
             continue

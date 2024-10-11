@@ -146,13 +146,13 @@ def matmul_mx(
     return torch.matmul(input, weight)
 
 quantized_decomposed_lib.define(
-    "calculate_mx_qparam(Tensor self, float qmax, int axis, int block_size, bool force_scale_power_of_two=False) -> Tensor")
+    "calculate_mx_qparam(Tensor self, int axis, float qmax, int block_size, bool force_scale_power_of_two=False) -> Tensor")
 
 @impl(quantized_decomposed_lib, "calculate_mx_qparam", "CompositeExplicitAutograd")
 def calculate_mx_qparam(
     input: torch.Tensor,
-    qmax: float,
     axes: int,
+    qmax: float,
     block_size: int,
     force_scale_power_of_two: bool = False,
 ) -> torch.Tensor:

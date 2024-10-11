@@ -476,8 +476,8 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         param = param_dict[input_node.target]
         scale = torch.ops.quantized_ops.calculate_mx_qparam(
             param.data,
-            activation_post_process.quant_max,
             activation_post_process.ch_axis,
+            activation_post_process.quant_max,
             activation_post_process.block_size,
             activation_post_process.force_scale_power_of_two,
         )
@@ -503,8 +503,8 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         with model.graph.inserting_before(node):
             calculate_qparam_op_inputs = [
                 node.args[0],
-                activation_post_process.quant_max,
                 activation_post_process.ch_axis,
+                activation_post_process.quant_max,
                 activation_post_process.block_size,
                 activation_post_process.force_scale_power_of_two,
             ]
