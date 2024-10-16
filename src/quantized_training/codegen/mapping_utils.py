@@ -145,7 +145,8 @@ def map_linear(node, output_dir):
         _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
         _set_tensor_field(param.mx_weight.input, node.args[1], output_dir)
         _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
-    _set_tensor_field(param.bias, node.args[2], output_dir)
+    if len(node.args) > 2:
+        _set_tensor_field(param.bias, node.args[2], output_dir)
     return param
 
 
@@ -201,67 +202,129 @@ def _is_gemm_op(node: Node) -> bool:
 
 
 def _is_elementwise_op(node: Node) -> bool:
-    """The function test if a callable is elementwise by applying a random input
-    tensor and modifying one element of the input tensor. If the output of the
-    function changes only at the modified index, then the function is elementwise.
-
-    Parameters:
-    - node: The node to be tested.
-
-    Returns:
-    - True if the function is elementwise, False otherwise.
-    """
-
-    if node.target in [
+    return node.target in [
+        # Arithmetic operations
+        torch.ops.aten.abs.default,
+        torch.ops.aten.add.Scalar,
+        torch.ops.aten.add.Tensor,
+        torch.ops.aten.ceil.default,
+        torch.ops.aten.div.Scalar,
+        torch.ops.aten.div.Tensor,
+        torch.ops.aten.erf.default,
+        torch.ops.aten.exp.default,
+        torch.ops.aten.expm1.default,
+        torch.ops.aten.floor.default,
+        torch.ops.aten.fmod.Scalar,
+        torch.ops.aten.fmod.Tensor,
+        torch.ops.aten.log.default,
+        torch.ops.aten.log10.default,
+        torch.ops.aten.log1p.default,
+        torch.ops.aten.log2.default,
+        torch.ops.aten.mul.Scalar,
+        torch.ops.aten.mul.Tensor,
+        torch.ops.aten.neg.default,
+        torch.ops.aten.pow.Scalar,
+        torch.ops.aten.pow.Tensor_Scalar,
+        torch.ops.aten.pow.Tensor_Tensor,
+        torch.ops.aten.reciprocal.default,
+        torch.ops.aten.remainder.Scalar,
+        torch.ops.aten.remainder.Tensor,
+        torch.ops.aten.round.default,
+        torch.ops.aten.rsqrt.default,
+        torch.ops.aten.sqrt.default,
+        torch.ops.aten.sub.Scalar,
+        torch.ops.aten.sub.Tensor,
+        torch.ops.aten.trunc.default,
+        # Trigonometric operations
+        torch.ops.aten.sin.default,
+        torch.ops.aten.cos.default,
+        torch.ops.aten.tan.default,
+        # Activation functions
+        torch.ops.aten.gelu.default,
+        torch.ops.aten.hardtanh.default,
+        torch.ops.aten.leaky_relu.default,
+        torch.ops.aten.relu.default,
+        torch.ops.aten.sigmoid.default,
+        torch.ops.aten.tanh.default,
+        torch.ops.aten.silu.default,    # Not in core aten operator set
+        # Comparison and conditional operations
+        torch.ops.aten.clamp.Tensor,
+        torch.ops.aten.where.self,
+        # Comparison operations
+        torch.ops.aten.ge.Scalar,
+        torch.ops.aten.ge.Tensor,
+        torch.ops.aten.gt.Scalar,
+        torch.ops.aten.gt.Tensor,
+        torch.ops.aten.le.Scalar,
+        torch.ops.aten.le.Tensor,
+        torch.ops.aten.lt.Scalar,
+        torch.ops.aten.lt.Tensor,
+        torch.ops.aten.eq.Scalar,
+        torch.ops.aten.eq.Tensor,
+        torch.ops.aten.ne.Scalar,
+        torch.ops.aten.ne.Tensor,
+        torch.ops.aten.maximum.default,
+        torch.ops.aten.minimum.default,
+        # Bitwise operations
+        torch.ops.aten.bitwise_and.Scalar,
+        torch.ops.aten.bitwise_and.Tensor,
+        torch.ops.aten.bitwise_or.Scalar,
+        torch.ops.aten.bitwise_or.Tensor,
+        torch.ops.aten.bitwise_xor.Scalar,
+        torch.ops.aten.bitwise_xor.Tensor,
+        torch.ops.aten.bitwise_not.default,
+        # Inplace versions of the above operations
+        torch.ops.aten.abs_.default,
+        torch.ops.aten.add_.Scalar,
+        torch.ops.aten.add_.Tensor,
+        torch.ops.aten.ceil_.default,
+        torch.ops.aten.div_.Scalar,
+        torch.ops.aten.div_.Tensor,
+        torch.ops.aten.erf_.default,
+        torch.ops.aten.exp_.default,
+        torch.ops.aten.expm1_.default,
+        torch.ops.aten.floor_.default,
+        torch.ops.aten.fmod_.Scalar,
+        torch.ops.aten.fmod_.Tensor,
+        torch.ops.aten.log_.default,
+        torch.ops.aten.log10_.default,
+        torch.ops.aten.log1p_.default,
+        torch.ops.aten.log2_.default,
+        torch.ops.aten.mul_.Scalar,
+        torch.ops.aten.mul_.Tensor,
+        torch.ops.aten.neg_.default,
+        torch.ops.aten.pow_.Scalar,
+        torch.ops.aten.pow_.Tensor,
+        torch.ops.aten.reciprocal_.default,
+        torch.ops.aten.remainder_.Scalar,
+        torch.ops.aten.remainder_.Tensor,
+        torch.ops.aten.round_.default,
+        torch.ops.aten.rsqrt_.default,
+        torch.ops.aten.sqrt_.default,
+        torch.ops.aten.sub_.Scalar,
+        torch.ops.aten.sub_.Tensor,
+        torch.ops.aten.trunc_.default,
+        torch.ops.aten.sin_.default,
+        torch.ops.aten.cos_.default,
+        torch.ops.aten.tan_.default,
+        torch.ops.aten.gelu_.default,
+        torch.ops.aten.hardtanh_.default,
+        torch.ops.aten.leaky_relu_.default,
+        torch.ops.aten.relu_.default,
+        torch.ops.aten.sigmoid_.default,
+        torch.ops.aten.tanh_.default,
+        torch.ops.aten.clamp_.Tensor,
+        torch.ops.aten.bitwise_and_.Scalar,
+        torch.ops.aten.bitwise_and_.Tensor,
+        torch.ops.aten.bitwise_or_.Scalar,
+        torch.ops.aten.bitwise_or_.Tensor,
+        torch.ops.aten.bitwise_xor_.Scalar,
+        torch.ops.aten.bitwise_xor_.Tensor,
+        torch.ops.aten.bitwise_not_.default,
+        # Quantization operations
         torch.ops.quantized_ops.dequantize_symmetric,
         torch.ops.quantized_ops.quantize_symmetric,
-    ]:
-        return True
-
-    if len(node.all_input_nodes) > 2:
-        return False
-
-    # Get the shapes of all inputs and determine the broadcasted shape
-    input_shapes = [n.meta['val'].shape for n in node.all_input_nodes]
-    try:
-        broadcasted_shape = torch.broadcast_shapes(*input_shapes)
-    except RuntimeError:
-        return False
-
-    value_remap = {}
-    def arg_transform(n):
-        if n not in value_remap:
-            value_remap[n] = torch.randn(broadcasted_shape)
-        return value_remap[n].clone()
-
-    args, kwargs = torch.fx.node.map_arg((node.args, node.kwargs), arg_transform)
-    orig_output = node.target(*args, **kwargs)
-
-    for arg in node.all_input_nodes:
-        input_tensor = value_remap[arg]
-
-        # Output shape should be the same as the input shape and the output must be different
-        if input_tensor.shape != orig_output.shape or torch.all(input_tensor == orig_output):
-            return False
-
-        # Modify one element of the input tensor. TODO This might fail for some input values
-        indices = tuple(random.randint(0, dim_size - 1) for dim_size in input_tensor.shape)
-        new_input = input_tensor.clone()
-        new_input[indices] *= -1.0
-
-        new_args, new_kwargs = torch.fx.node.map_arg(
-            (node.args, node.kwargs),
-            lambda n: arg_transform(n) if n != arg else new_input,
-        )
-        new_output = node.target(*new_args, **new_kwargs)
-
-        # Check if the output is different only at the modified index
-        changed_indices = torch.nonzero(orig_output != new_output, as_tuple=False)
-
-        if changed_indices.size(0) != 1 or tuple(changed_indices[0].tolist()) != indices:
-            return False
-
-    return True
+    ]
 
 
 @register_annotator("elementwise")
@@ -416,24 +479,40 @@ def _is_nop(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.clone.default,
         torch.ops.aten.contiguous.default,
-        # TODO: remove?
         torch.ops.aten.dropout.default,
+        # TODO: remove?
         torch.ops.aten.expand.default,
         torch.ops.aten.flatten.using_ints,
         torch.ops.aten.reshape.default,
+        torch.ops.aten.squeeze.default,
         torch.ops.aten.unsqueeze.default,
         torch.ops.aten.view.default,
+        torch.ops.aten.split.Tensor,
+        torch.ops.aten.chunk.default,
         operator.getitem,
+    ]
+
+
+def _is_reshape_op(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.transpose.int,
+        torch.ops.aten.permute.default,
+    ]
+
+
+def _is_indexing_or_concatenation_op(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.slice.Tensor,
+        torch.ops.aten.select.int,
+        torch.ops.aten.index.Tensor,
+        torch.ops.aten.stack.default,
+        torch.ops.aten.cat.default,
     ]
 
 
 @register_annotator("nop")
 def map_nop(node, output_dir):
-    if node.op != "call_function" or not _is_nop(node) and node.target not in [
-        torch.ops.aten.cat.default,
-        torch.ops.aten.select.int,
-        torch.ops.aten.stack.default,
-    ]:
+    if node.op != "call_function" or not (_is_nop(node) or _is_indexing_or_concatenation_op(node)):
         logger.warning(f"Unsupported operation {node.name}: {node.target}")
     param = NopParam()
     param.name = node.name

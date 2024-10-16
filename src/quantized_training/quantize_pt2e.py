@@ -705,6 +705,15 @@ def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor
 def convert_pt2e(model: GraphModule):
     modules = dict(model.named_modules(remove_duplicate=False))
 
+    while True:
+        nodes_to_remove = [
+            n for n in model.graph.nodes if len(n.users) == 0 and n.op == 'call_function'
+        ]
+        if not nodes_to_remove:
+            break
+        for node in nodes_to_remove:
+            model.graph.erase_node(node)
+
     for node in list(model.graph.nodes):
         if node.op == "call_module":
             mod = _get_module(node, modules)

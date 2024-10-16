@@ -22,6 +22,8 @@ from .mapping_utils import (
     _is_gemm_op,
     _is_elementwise_op,
     _is_nop,
+    _is_indexing_or_concatenation_op,
+    _is_reshape_op,
 )
 from .memory import MemoryManager, Partition
 from .param_pb2 import (
@@ -39,7 +41,7 @@ from ..pt2e_utils import dtype_byte_size
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MEMORY_SIZE = 1024 ** 4
+DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
 def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> List[Node]:
@@ -421,16 +423,18 @@ def fuse_operator(model: GraphModule, pipeline=None):
         reshape_nodes = [output_node]
         prev_node = output_node.all_input_nodes[0]
         fused = True
-        while _is_nop(prev_node) or prev_node.target in [
-            torch.ops.aten.cat.default,
-            torch.ops.aten.select.int,
-            torch.ops.aten.stack.default,
-        ]:
+        while not (_is_gemm_op(prev_node) or _is_elementwise_op(prev_node)):
             # Reshape cannot be fused with a node that has multiple users or inputs
             if (
                 len(prev_node.users) > 1 or
-                len(prev_node.all_input_nodes) != 1
+                len(prev_node.all_input_nodes) != 1 or
+                _is_reshape_op(prev_node)
             ):
+                fused = False
+                break
+
+            if not (_is_nop(prev_node) or _is_indexing_or_concatenation_op(prev_node)):
+                logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
                 fused = False
                 break
 
@@ -438,10 +442,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
             prev_node = prev_node.all_input_nodes[0]
 
         # We don't support fusing more than one reshape operation.
-        if fused and prev_node.target not in [
-            torch.ops.aten.permute.default,
-            torch.ops.aten.transpose.int,
-        ]:
+        if fused and len(prev_node.users) == 1:
             if prev_node in fused_nodes:
                 group = search_group(prev_node)
                 group.extend(reshape_nodes)
@@ -456,11 +457,17 @@ def fuse_operator(model: GraphModule, pipeline=None):
         reshape_nodes = []
         next_node = output_node
         fused = True
-        while id(next_node) == id(output_node) or _is_nop(next_node) or next_node.target in [
-            torch.ops.aten.cat.default,
-            torch.ops.aten.select.int,
-            torch.ops.aten.stack.default,
-        ]:
+        while not (_is_gemm_op(next_node) or _is_elementwise_op(next_node)):
+            if id(next_node) != id(output_node):
+                if _is_reshape_op(next_node):
+                    fused = False
+                    break
+
+                if not (_is_nop(next_node) or _is_indexing_or_concatenation_op(next_node)):
+                    logger.warning(f"Cannot fuse reshape operation with {next_node.target}")
+                    fused = False
+                    break
+
             reshape_nodes.append(next_node)
 
             # If the node is the last node, stop.
@@ -479,10 +486,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
 
             next_node = next(iter(next_node.users))
 
-        if not fused or next_node.target in [
-            torch.ops.aten.permute.default,
-            torch.ops.aten.transpose.int,
-        ]:
+        if not fused:
             continue
 
         if next_node in fused_nodes:
@@ -538,11 +542,11 @@ def fuse_operator(model: GraphModule, pipeline=None):
         fused_nodes = []
         next_node = node
         fused = True
-        while id(next_node) == id(node) or _is_nop(next_node) or next_node.target in [
-            torch.ops.aten.cat.default,
-            torch.ops.aten.select.int,
-            torch.ops.aten.stack.default,
-        ]:
+        while (
+            id(next_node) == id(node) or
+            _is_nop(next_node) or
+            _is_indexing_or_concatenation_op(next_node)
+        ):
             fused_nodes.append(next_node)
             if len(next_node.users) != 1:
                 fused = False
@@ -653,7 +657,10 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
-        maybe_stack_node = next(iter(node.users))
+        try:
+            maybe_stack_node = next(iter(node.users))
+        except StopIteration:
+            continue
         if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = maybe_stack_node.args[0][0]
             if (memory := first_node.meta.get("memory", None)) is None:
@@ -784,16 +791,12 @@ def gen_code(model, args, output_dir=None):
     return model_params
 
 
-def gen_compute_graph(model, output_file="compute_graph"):
+def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     nodes = {}
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
         if node.op == "get_attr" and "code" in node.name:
-            continue
-
-        # Skip nodes with too many users
-        if len(node.users) > 10:
             continue
 
         if node.op == "get_attr":
@@ -819,8 +822,32 @@ def gen_compute_graph(model, output_file="compute_graph"):
             "label": label,
             "shape": "Mrecord",
         }
-        for n in node.users:
-            edges.append((node.name, n.name))
+
+        users = list(node.users)
+        num_users = len(users)
+        if num_users > max_users:
+            num_splits = (num_users + max_users - 1) // max_users
+            for i in range(num_splits):
+                sub_node = f"{node.name}_split_{i}"
+                sub_label = f"{{{sub_node}}}"
+                sub_label = sub_label.replace("<", "\<").replace(">", "\>")
+
+                # Create a sub-node for this group of users
+                nodes[sub_node] = {
+                    "label": sub_label,
+                    "shape": "Mrecord",
+                }
+
+                edges.append((node.name, sub_node))
+
+                # Add edges from sub-node to its users
+                start_idx = i * max_users
+                end_idx = min(start_idx + max_users, num_users)
+                for u in users[start_idx:end_idx]:
+                    edges.append((sub_node, u.name))
+        else:
+            for u in users:
+                edges.append((node.name, u.name))
 
     g = graphviz.Digraph()
     g.attr(bgcolor="transparent")
@@ -828,7 +855,6 @@ def gen_compute_graph(model, output_file="compute_graph"):
     for node, attrs in nodes.items():
         g.node(node, **attrs)
 
-    for edge in edges:
-        g.edge(edge[0], edge[1])
+    g.edges(edges)
 
     g.render(output_file, format='svg', cleanup=True)
