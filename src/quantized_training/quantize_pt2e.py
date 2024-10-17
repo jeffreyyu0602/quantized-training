@@ -231,7 +231,7 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     from torch.ao.quantization.pt2e import prepare
     from torch.ao.quantization.quantize_pt2e import prepare_pt2e
 
-    # HACK monkey patching to replace the default implementation of _create_obs_or_fq_from_qspec
+    # HACK replace the default implementation of _create_obs_or_fq_from_qspec
     prepare._get_obs_or_fq_map = _get_obs_or_fq_map
 
     model = capture_pre_autograd_graph(
@@ -242,6 +242,7 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     )
 
     model = prepare_pt2e(model, quantizer)
+    model.meta["quantizer"] = quantizer
     return model
 
 
@@ -313,19 +314,12 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     scale = activation_post_process.calculate_qparams().to(torch_dtype)
     input_dtype = activation_post_process.dtype
 
-    # HACK this logic needs to be improved. Accumulation and output data types are set
-    # to match the bias data type. We loop through all nodes, locate any conv2d or linear
-    # nodes, and extract their bias data type.
+    # Accumulation and output data types are set to match the bias data type.
     output_dtype = None
-    for n in model.graph.nodes:
-        if n.target not in [torch.ops.aten.conv2d.default, torch.ops.aten.linear.default]:
-            continue
-        bias_n = n.args[2]
-        if bias_n.op == 'get_attr':
-            output_dtype = bias_n.meta.get("dtype", None)
-        elif bias_n.op == 'call_module':
-            output_dtype = modules[bias_n.target].dtype
-        break
+    if (quantizer := model.meta.get("quantizer", None)) is not None:
+        qconfig = quantizer.global_config
+        if qconfig.bias is not None:
+            output_dtype = qconfig.bias.dtype
 
     param_dict = dict(model.named_parameters())
     orig_fq_users = list(node.users.keys())

@@ -2,6 +2,7 @@ import argparse
 import copy
 import operator
 import os
+import logging
 
 import torch
 from datasets import load_dataset
@@ -36,6 +37,8 @@ from quantized_training import (
 )
 from quantized_training.quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
+
+logger = logging.getLogger(__name__)
 
 
 task_to_keys = {
@@ -180,13 +183,16 @@ def transform(
 
     ShapeProp(gm).propagate(*uplifted_args)
 
-    manager = MemoryManager(1024 ** 4)
-    allocate_weights(gm, manager)
-    manager = MemoryManager(1024 ** 4)
-    allocate_activations(gm, manager)
-
-    filename = os.path.join(output_dir, "memory_layout.png")
-    visualize_memory_layout(manager.snapshots, filename)
+    try:
+        manager = MemoryManager(1024 ** 4)
+        allocate_weights(gm, manager)
+        manager = MemoryManager(1024 ** 4)
+        allocate_activations(gm, manager)
+    except RuntimeError:
+        manager.print_partitions()
+        filename = os.path.join(output_dir, "memory_layout.png")
+        visualize_memory_layout(manager.snapshots, filename)
+        logger.error(f"Memory allocation failed. Memory layout saved to {filename}")
 
     manager.print_partitions()
     print("\nMemory allocated to tensors:")
@@ -483,9 +489,6 @@ if __name__ == "__main__":
         for name, module in gm.named_modules():
             if hasattr(module, "scale"):
                 module.scale = torch.randn_like(module.scale)
-
-        for name, param in gm.named_parameters():
-            param.data.div_(100.0)
 
         convert_pt2e(gm)
 
