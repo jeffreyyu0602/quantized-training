@@ -350,21 +350,24 @@ def map_elementwise(node, output_dir):
     param.opcode = node.target.__name__.split(".")[0]
     if isinstance(node.args[0], Node):
         _set_tensor_field(param.input, node.args[0], output_dir)
-    else:
+    elif isinstance(node.args[0], (float, int)):
         param.input_scalar = node.args[0]
+    else:
+        logger.warning(f"Unsupported input type {type(node.args[0])} for {node}")
 
     if len(node.args) > 1:
         if isinstance(node.args[1], Node):
             _set_tensor_field(param.other, node.args[1], output_dir)
-        else:
+        elif isinstance(node.args[1], (float, int)):
             param.other_scalar = node.args[1]
+        else:
+            logger.warning(f"Unsupported input type {type(node.args[1])} for {node}")
 
     # TODO Add a new field called dtype for quantize/dequantize operations
-    if len(node.args) > 2 and node.args[2] is not None:
-        if node.target == torch.ops.quantized_ops.quantize_symmetric:
-            param.opcode += "_to_" + node.args[2]
-        elif node.target == torch.ops.quantized_ops.dequantize_symmetric:
-            param.opcode += "_from_" + node.args[2]
+    if node.target == torch.ops.quantized_ops.quantize_symmetric:
+        param.opcode += "_to_" + node.args[2]
+    if node.target == torch.ops.quantized_ops.dequantize_symmetric:
+        param.opcode += "_from_" + node.args[2]
     return param
 
 
