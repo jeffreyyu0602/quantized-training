@@ -32,6 +32,7 @@ from quantized_training import (
     get_default_quantizer,
     prepare_pt2e,
     split_multi_head_attention,
+    visualize_memory_layout,
 )
 from quantized_training.quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
 from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -50,13 +51,6 @@ task_to_keys = {
 }
 
 OPERATOR_MAPPINGS = {
-    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
-    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
-    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
-    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
-    "exp": [torch.exp],
-    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
-    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
     "gemm": [
         torch.nn.Conv2d,
         torch.nn.Linear,
@@ -65,6 +59,14 @@ OPERATOR_MAPPINGS = {
         torch.ops.quantized_ops.linear_mx.default,
         torch.ops.quantized_ops.matmul_mx.default,
     ],
+    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
+    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
+    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
+    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
+    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
+    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
+    "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
+    "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
     "quantize": [torch.ops.quantized_ops.quantize_symmetric],
     "dequantize": [torch.ops.quantized_ops.dequantize_symmetric],
 }
@@ -161,7 +163,7 @@ def transform(
         3: ["exp"],
         4: ["add", "mul", "div"],
         5: ["relu"],
-        6: ["quantize"],
+        7: ["quantize"],
     }
 
     # If there is no corresponding mapping, we directly append the op string
@@ -180,7 +182,11 @@ def transform(
 
     manager = MemoryManager(1024 ** 4)
     allocate_weights(gm, manager)
+    manager = MemoryManager(1024 ** 4)
     allocate_activations(gm, manager)
+
+    filename = os.path.join(output_dir, "memory_layout.png")
+    visualize_memory_layout(manager.snapshots, filename)
 
     manager.print_partitions()
     print("\nMemory allocated to tensors:")
@@ -242,6 +248,11 @@ if __name__ == "__main__":
         required=True,
         help="Output directory for generated tensor files"
     )
+    parser.add_argument(
+        "--use_mixed_qscheme",
+        action="store_true",
+        help="Quantize attention matrix multiplication using per-tensor symmetric quantization"
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
@@ -258,7 +269,7 @@ if __name__ == "__main__":
 
         if args.model_name_or_path:
             checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         if args.bf16:
             model.bfloat16()
@@ -277,6 +288,22 @@ if __name__ == "__main__":
                 module.padding = 0
 
         quantizer.set_module_name("fc", None)
+
+        if args.use_mixed_qscheme:
+            from quantized_training import DerivedQuantizationSpec, FusedAmaxObsFakeQuantize, QuantizationSpec, QuantizationConfig
+            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+
+            from quantized_training.quantize_pt2e import derive_bias_qparams_fn
+
+            bias_qspec = DerivedQuantizationSpec(
+                derived_from=None,
+                derive_qparams_fn=derive_bias_qparams_fn,
+                dtype="int24",
+            )
+
+            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+            quantizer.set_module_name("conv1", qconfig)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         model = prepare_pt2e(model, quantizer, example_args)
@@ -366,6 +393,19 @@ if __name__ == "__main__":
                 first_token_tensor = hidden_states[:, 0]
                 output = self.classifier(first_token_tensor)
                 return output
+
+        if args.use_mixed_qscheme:
+            from quantized_training.pt2e_utils import get_aten_graph_module, print_node_scope_tabular
+            gm = get_aten_graph_module(MobileBertNoEmbed(), example_args)
+            print_node_scope_tabular(gm)
+
+            from quantized_training import FusedAmaxObsFakeQuantize, QuantizationSpec, QuantizationConfig
+            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+            qconfig = QuantizationConfig(qspec, None, qspec, None)
+            quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
+
+        quantizer.set_module_name("classifier", None)
 
         gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
 
@@ -507,6 +547,39 @@ if __name__ == "__main__":
             gm,
             example_args,
             output_file="bert",
+            output_dir=args.output_dir,
+        )
+    elif args.model == "llama":
+        from transformers import AutoModelForCausalLM
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "meta-llama/Llama-3.2-1B"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="eager", # turn off flash attention
+        )
+
+        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        target_ids = input_ids.clone()
+        example_args = (input_ids, target_ids)
+
+        class LlamaWrapper(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+
+            def forward(self, *args, **kwargs):
+                output = self.model(*args, **kwargs)
+                return output.logits
+
+        gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
+        convert_pt2e(gm)
+
+        pt_out, gm_out = transform(
+            gm,
+            example_args,
             output_dir=args.output_dir,
         )
     else:
