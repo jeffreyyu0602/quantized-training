@@ -260,7 +260,7 @@ class XNNPACKQuantizer(Quantizer):
     ) -> torch.fx.GraphModule:
         # TODO: implement the support for None to be canceling out previous annotations
         if quantization_config is None:
-            return model
+            quantization_config = QuantizationConfig(None, None, None, None)
 
         for op in self.STATIC_OPS:
             OP_TO_ANNOTATOR[op](model, quantization_config, filter_fn)
