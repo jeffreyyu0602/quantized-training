@@ -619,6 +619,8 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         if node.op == "placeholder":
             node.meta["memory"] = manager.allocate_memory(node)
 
+    manager.take_snapshot()
+
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
     for node in model.graph.nodes:
@@ -702,6 +704,8 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
                 continue
             if all(_node_visited(user) for user in n.users):
                 manager.free_memory(n)
+
+        manager.take_snapshot()
 
 
 def _map_operation(node: Node, output_dir: str):

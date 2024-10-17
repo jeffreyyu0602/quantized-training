@@ -11,4 +11,5 @@ __all__ = [
     "gen_code",
     "gen_compute_graph",
     "split_multi_head_attention",
+    "visualize_memory_layout",
 ]

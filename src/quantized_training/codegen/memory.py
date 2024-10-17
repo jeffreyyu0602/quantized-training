@@ -1,7 +1,9 @@
 import operator
 from functools import reduce
+from random import randint
 
 import torch
+import matplotlib.pyplot as plt
 
 from ..pt2e_utils import dtype_byte_size
 
@@ -35,6 +37,7 @@ class MemoryManager:
         MemoryManager.total_partitions += 1
         self.memory_partitions = [Partition(start=0, end=total_memory, partition_id=self.partition_id)]
         self.tensor_memory_map = {}
+        self.snapshots = []  # Stores the snapshots of partitions over time
 
     def calculate_tensor_size(self, shape):
         if len(shape) == 0:
@@ -58,11 +61,15 @@ class MemoryManager:
             for user in n.users:
                 if user.target == torch.ops.aten.conv2d.default:
                     return True
-                elif user.op == 'call_module':
+                if user.op == 'call_module':
                     submodule = user.meta['source_module']
-                    for sn in submodule.graph.nodes:
-                        if sn.op == 'placeholder' and sn.name == n.name:
-                            return is_conv2d_input(sn)
+                    for sub_node in submodule.graph.nodes:
+                        if (
+                            sub_node.op == 'placeholder' and
+                            sub_node.name == n.name and
+                            is_conv2d_input(sub_node)
+                        ):
+                            return True
             return False
 
         if is_conv2d_input(node) and node.value.shape[1] < 16:
@@ -85,7 +92,8 @@ class MemoryManager:
                 self.tensor_memory_map[node] = partition
                 partition.node = node
                 return Partition(start=partition.start, end=partition.end, partition_id=self.partition_id)
-        return None
+
+        raise RuntimeError(f"Memory allocation failed for tensor {node.name}")
 
     def free_memory(self, node):
         partition = self.tensor_memory_map[node]
@@ -108,3 +116,41 @@ class MemoryManager:
         for partition in self.memory_partitions:
             status = 'free' if partition.node is None else partition.node.name
             print(f"Partition from {partition.start} to {partition.end}: {status}")
+
+    def take_snapshot(self):
+        partitions = [
+            (partition.start, partition.end, partition.node.name if partition.node else 'Free')
+            for partition in self.memory_partitions
+        ]
+        self.snapshots.append(partitions)
+
+
+def visualize_memory_layout(snapshots, filename="memory_layout.png"):
+    color_map = plt.cm.get_cmap('tab10')
+    node_colors = {}
+
+    def get_color(node_name):
+        if node_name not in node_colors:
+            color_idx = randint(0, color_map.N)
+            node_colors[node_name] = color_map(color_idx)
+        return node_colors[node_name]
+
+    num_snapshots = len(snapshots)
+    peak_memory = max(p[1] for snapshot in snapshots for p in snapshot if p[2] != 'Free')
+
+    plt.rcParams.update({'font.size': 20})
+
+    fig, ax = plt.subplots(figsize=(10, num_snapshots * 0.5))
+    ax.set_xlim(0, peak_memory)
+    ax.set_ylim(-0.5, num_snapshots - 0.5)
+    ax.set_yticks(range(num_snapshots))
+
+    for i, snapshot in enumerate(snapshots):
+        for (start, end, label) in snapshot:
+            color = get_color(label) if label != 'Free' else (0, 0, 0, 0)
+            ax.barh(y=i, width=(end - start), left=start, color=color, height=1)
+            if i < num_snapshots - 1:
+                ax.hlines(y=i + 0.5, xmin=0, xmax=peak_memory, color='black', linewidth=1)
+
+    plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)
+    plt.close()
