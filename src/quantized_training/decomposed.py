@@ -25,13 +25,13 @@ def _broadcast_shapes(input, target, block_size=32):
 quantized_decomposed_lib = Library("quantized_ops", "DEF")
 
 quantized_decomposed_lib.define(
-    "quantize_symmetric(Tensor input, Tensor scale, str dtype, Tensor quant_map, SymInt? block_size=None) -> Tensor")
+    "quantize_symmetric(Tensor input, Tensor scale, str? dtype, Tensor quant_map, SymInt? block_size=None) -> Tensor")
 
 @impl(quantized_decomposed_lib, "quantize_symmetric", "CompositeExplicitAutograd")
 def quantize_symmetric(
     input: torch.Tensor,
     scale: torch.Tensor,
-    dtype: str,
+    dtype: Optional[str],
     quant_map: torch.Tensor,
     block_size: Optional[int] = None,
 ) -> torch.Tensor:

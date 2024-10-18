@@ -362,12 +362,6 @@ def map_elementwise(node, output_dir):
             param.other_scalar = node.args[1]
         else:
             logger.warning(f"Unsupported input type {type(node.args[1])} for {node}")
-
-    # TODO Add a new field called dtype for quantize/dequantize operations
-    if node.target == torch.ops.quantized_ops.quantize_symmetric:
-        param.opcode += "_to_" + node.args[2]
-    if node.target == torch.ops.quantized_ops.dequantize_symmetric:
-        param.opcode += "_from_" + node.args[2]
     return param
 
 
