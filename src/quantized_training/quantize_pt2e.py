@@ -326,7 +326,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     if input_node.op == 'get_attr':
         # Quantize weight and remove the fq module
         param = param_dict[input_node.target]
-        param.data = torch.ops.quantized_ops.quantize_symmetric(
+        param.data = torch.ops.quantized_ops.quantize(
             param.data,
             scale,
             input_dtype,
@@ -353,7 +353,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model, graph, "code_", activation_post_process.quant_map)
             quantize_op_inputs = [node.args[0], qparam_node, input_dtype, qmap_node]
             quantized_node = graph.call_function(
-                torch.ops.quantized_ops.quantize_symmetric,
+                torch.ops.quantized_ops.quantize,
                 tuple(quantize_op_inputs),
                 {}
             )
@@ -397,7 +397,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
 
             if (
                 maybe_dq_node.op != "call_function"
-                or maybe_dq_node.target != torch.ops.quantized_ops.dequantize_symmetric
+                or maybe_dq_node.target != torch.ops.quantized_ops.dequantize
             ):
                 # Insert a dequantize node after the gemm operation
                 quant_map = _get_quantization_map(output_dtype, device)
@@ -407,7 +407,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                     qmap_node = create_getattr_from_value(model, graph, "code_", quant_map)
                     dq_inputs = [user_node, qparam_node, output_dtype, qmap_node]
                     dequantized_node = graph.call_function(
-                        torch.ops.quantized_ops.dequantize_symmetric,
+                        torch.ops.quantized_ops.dequantize,
                         tuple(dq_inputs),
                         {}
                     )
@@ -436,7 +436,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                     model, graph, user_node.name + "_scale_", scale)
                 dq_inputs = [quantized_node, qparam_node, None, None]
                 dequantized_node = graph.call_function(
-                    torch.ops.quantized_ops.dequantize_symmetric,
+                    torch.ops.quantized_ops.dequantize,
                     tuple(dq_inputs),
                     {}
                 )
@@ -484,7 +484,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             qparam_node_wt = create_getattr_from_value(
                 model, graph, input_node.name + "_scale_", scale)
 
-        param.data = torch.ops.quantized_ops.quantize_symmetric(
+        param.data = torch.ops.quantized_ops.quantize(
             param.data,
             scale,
             activation_post_process.dtype,
@@ -522,7 +522,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 activation_post_process.block_size,
             ]
             quantized_node = model.graph.call_function(
-                torch.ops.quantized_ops.quantize_symmetric,
+                torch.ops.quantized_ops.quantize,
                 tuple(quantize_op_inputs),
                 {}
             )
@@ -570,7 +570,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
     partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.dequantize_symmetric]
+        model.graph, [torch.ops.quantized_ops.dequantize]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
@@ -602,7 +602,7 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
                 nodes_on_path.append(prev_node)
                 prev_node = prev_node.args[0]
             # Our accelerator doesn't support fusing quantize with dequantize
-            # elif prev_node.target == torch.ops.quantized_ops.dequantize_symmetric:
+            # elif prev_node.target == torch.ops.quantized_ops.dequantize:
             #     # Update scale
             #     scale = model.get_buffer(prev_node.args[1].target)
             #     node_to_remove = prev_node
@@ -644,7 +644,7 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     # Switch the order of dequantize nodes with stack and view nodes inserted
     # during MHA splitting.
     partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.dequantize_symmetric]
+        model.graph, [torch.ops.quantized_ops.dequantize]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
@@ -665,7 +665,7 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         graph.erase_node(dq_inputs[3])
 
     partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.quantize_symmetric]
+        model.graph, [torch.ops.quantized_ops.quantize]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:

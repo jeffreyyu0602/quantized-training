@@ -322,8 +322,8 @@ def _is_elementwise_op(node: Node) -> bool:
         torch.ops.aten.bitwise_xor_.Tensor,
         torch.ops.aten.bitwise_not_.default,
         # Quantization operations
-        torch.ops.quantized_ops.dequantize_symmetric,
-        torch.ops.quantized_ops.quantize_symmetric,
+        torch.ops.quantized_ops.dequantize,
+        torch.ops.quantized_ops.quantize,
     ]
 
 

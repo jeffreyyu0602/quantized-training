@@ -53,6 +53,11 @@ class ShapeProp:
             elif node.op == 'call_module':
                 result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
 
+            # TODO this is a temporary fix to handle split_with_sizes
+            if isinstance(result, (tuple, list)):
+                assert all(isinstance(item, torch.Tensor) for item in result)
+                result = torch.stack(result)
+
             # This is the only code specific to shape propagation.
             # you can delete this `if` branch and this becomes
             # a generic GraphModule interpreter.

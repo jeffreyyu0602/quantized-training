@@ -530,7 +530,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
                 group.remove(reshape_node)
                 group.insert(0, new_node)
 
-    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize_symmetric])
+    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
         p = partitions.pop(0)
@@ -774,7 +774,7 @@ def gen_code(model, args, output_dir=None):
 
                 # Skip dequantize nodes that are fused inputs
                 if (
-                    n.target == torch.ops.quantized_ops.dequantize_symmetric
+                    n.target == torch.ops.quantized_ops.dequantize
                     and n.args[0].op == 'placeholder'
                 ):
                     qparam_node = n.args[1]
