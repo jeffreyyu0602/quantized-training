@@ -311,7 +311,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     # HACK We loop through all nodes, locate any conv2d or linear nodes, and extract
     # their bias data type. This logic should be improved.
     for n in model.graph.nodes:
-        if n.target not in [torch.ops.aten.conv2d.default, torch.ops.aten.linear.default]:
+        if n.target not in [torch.ops.aten.conv2d.default, torch.ops.aten.linear.default] or len(n.args) < 3:
             continue
         bias_n = n.args[2]
         if bias_n.op == 'get_attr':
@@ -378,8 +378,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
             # Infer the output data type from the bias data type
-            bias_node = user_node.args[2]
-            if bias_node is not None:
+            if len(n.args) > 2 and (bias_node := user_node.args[2]) is not None:
                 if bias_n.op == 'get_attr':
                     output_dtype = bias_n.meta.get("dtype", None)
                 elif bias_n.op == 'call_module':
