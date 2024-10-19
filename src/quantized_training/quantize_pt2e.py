@@ -307,17 +307,19 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     scale = activation_post_process.calculate_qparams().to(torch_dtype)
     input_dtype = activation_post_process.dtype
 
-    # Accumulation and output data types are set to match the bias data type.
     # HACK We loop through all nodes, locate any conv2d or linear nodes, and extract
-    # their bias data type. This logic should be improved.
+    # the bias data type. We use the bias data type as the default output data type.
+    # This is a temporary solution until we have a better way to infer the output data type.
     for n in model.graph.nodes:
-        if n.target not in [torch.ops.aten.conv2d.default, torch.ops.aten.linear.default] or len(n.args) < 3:
+        if len(n.args) <= 2 or n.target not in [
+            torch.ops.aten.conv2d.default, torch.ops.aten.linear.default
+        ]:
             continue
-        bias_n = n.args[2]
-        if bias_n.op == 'get_attr':
-            output_dtype = bias_n.meta.get("dtype", None)
-        elif bias_n.op == 'call_module':
-            output_dtype = modules[bias_n.target].dtype
+        bias_node = n.args[2]
+        if bias_node.op == 'get_attr':
+            output_dtype = bias_node.meta.get("dtype", None)
+        elif bias_node.op == 'call_module':
+            output_dtype = modules[bias_node.target].dtype
         break
 
     param_dict = dict(model.named_parameters())
@@ -378,11 +380,11 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
             # Infer the output data type from the bias data type
-            if len(n.args) > 2 and (bias_node := user_node.args[2]) is not None:
-                if bias_n.op == 'get_attr':
-                    output_dtype = bias_n.meta.get("dtype", None)
-                elif bias_n.op == 'call_module':
-                    output_dtype = modules[bias_n.target].dtype
+            if len(user_node.args) > 2 and (bias_node := user_node.args[2]) is not None:
+                if bias_node.op == 'get_attr':
+                    output_dtype = bias_node.meta.get("dtype", None)
+                elif bias_node.op == 'call_module':
+                    output_dtype = modules[bias_node.target].dtype
             if output_dtype is not None:
                 user_node.meta["dtype"] = output_dtype
 
