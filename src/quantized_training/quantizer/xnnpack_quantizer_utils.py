@@ -353,8 +353,7 @@ def _annotate_mul(
 def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModule:
     device = assert_and_get_unique_device(model)
 
-    dtypes = {p.dtype for p in model.parameters()} | \
-        {p.dtype for p in model.buffers()}
+    dtypes = {p.dtype for p in model.parameters()}
     assert len(dtypes) <= 1
     dtype = next(iter(dtypes)) if len(dtypes) > 0 else None
 
