@@ -37,6 +37,9 @@ def get_fake_quant_fn(dtype: str):
         nbits, es = match.groups()
         return lambda x: quantize_to_posit(x, int(nbits), int(es), round_to_even=True)
 
+    if dtype == "float16":
+        return lambda x: x.to(torch.float16).to(x.dtype)
+
     if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
         fp8_format = match.group(1).lower()
         return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
@@ -65,11 +68,11 @@ def get_fake_quant_fn(dtype: str):
 
 
 def _get_quantization_map(dtype, device=None):
-    values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
-    if dtype is not None:
+    values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
+    if dtype is not None or dtype not in ["bfloat16", "float32"]:
         fq_fn = get_fake_quant_fn(dtype)
         values = fq_fn(values)
-    return values.to(device)
+    return values
 
 
 def _quantize(input, quant_map):
@@ -241,9 +244,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.outlier_threshold = kwargs.get("outlier_threshold", None)
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
-        values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-        fake_quant_fn = get_fake_quant_fn(dtype)
-        self.register_buffer("quant_map", fake_quant_fn(values), persistent=False)
+        self.register_buffer("quant_map", _get_quantization_map(dtype, device), persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
