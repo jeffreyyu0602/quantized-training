@@ -242,7 +242,12 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     )
 
     model = prepare_pt2e(model, quantizer)
+
     model.meta["quantizer"] = quantizer
+    model.meta["example_args"] = args
+    model.meta["example_kwargs"] = kwargs
+    model.meta["dynamic_shapes"] = dynamic_shapes
+
     return model
 
 
@@ -296,6 +301,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     model: torch.fx.GraphModule,
     node: Node,
     modules: Dict[str, torch.nn.Module],
+    accumulation_dtype: str = None
 ):
     graph = model.graph
     assert modules is not None
@@ -306,21 +312,6 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     torch_dtype = next(iter(model.parameters())).dtype
     scale = activation_post_process.calculate_qparams().to(torch_dtype)
     input_dtype = activation_post_process.dtype
-
-    # HACK We loop through all nodes, locate any conv2d or linear nodes, and extract
-    # the bias data type. We use the bias data type as the default output data type.
-    # This is a temporary solution until we have a better way to infer the output data type.
-    for n in model.graph.nodes:
-        if len(n.args) <= 2 or n.target not in [
-            torch.ops.aten.conv2d.default, torch.ops.aten.linear.default
-        ]:
-            continue
-        bias_node = n.args[2]
-        if bias_node.op == 'get_attr':
-            output_dtype = bias_node.meta.get("dtype", None)
-        elif bias_node.op == 'call_module':
-            output_dtype = modules[bias_node.target].dtype
-        break
 
     param_dict = dict(model.named_parameters())
     orig_fq_users = list(node.users.keys())
@@ -380,13 +371,14 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
             # Infer the output data type from the bias data type
+            bias_dtype = None
             if len(user_node.args) > 2 and (bias_node := user_node.args[2]) is not None:
                 if bias_node.op == 'get_attr':
-                    output_dtype = bias_node.meta.get("dtype", None)
+                    bias_dtype = bias_node.meta.get("dtype", None)
                 elif bias_node.op == 'call_module':
-                    output_dtype = modules[bias_node.target].dtype
-            if output_dtype is not None:
-                user_node.meta["dtype"] = output_dtype
+                    bias_dtype = modules[bias_node.target].dtype
+            output_dtype = bias_dtype or accumulation_dtype
+            user_node.meta["dtype"] = output_dtype
 
             # Insert dequantize node before the node that appear the earlist in the graph
             node_index_map = {n: i for i, n in enumerate(graph.nodes)}
@@ -593,7 +585,7 @@ def _eliminate_dequantize_with_no_effect(model: GraphModule):
 def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     graph = model.graph
 
-    def find_node_and_insert(node, prev_node=None, scale=None):
+    def find_node_and_insert(node, prev_node=None):
         nodes_on_path = []
         prev_node = node.args[0] if prev_node is None else prev_node
         while len(prev_node.users) == 1:
@@ -602,20 +594,11 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             ]:
                 nodes_on_path.append(prev_node)
                 prev_node = prev_node.args[0]
-            # Our accelerator doesn't support fusing quantize with dequantize
-            # elif prev_node.target == torch.ops.quantized_ops.dequantize:
-            #     # Update scale
-            #     scale = model.get_buffer(prev_node.args[1].target)
-            #     node_to_remove = prev_node
-            #     prev_node = prev_node.args[0]
-            #     # Remove dequantize node since it has no effect
-            #     node_to_remove.replace_all_uses_with(prev_node)
-            #     graph.erase_node(node_to_remove)
             elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
                 # If there is a split, trace each branch separately
                 nodes_on_path.append(prev_node)
                 for arg in prev_node.all_input_nodes:
-                    nodes_on_path.extend(find_node_and_insert(node, arg, scale))
+                    nodes_on_path.extend(find_node_and_insert(node, arg))
                 return nodes_on_path
             else:
                 break
@@ -625,18 +608,18 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
 
         user = next(iter(prev_node.users))
         with model.graph.inserting_before(user):
-            # q_scale = model.get_buffer(orig_args[1].target)
-            # if scale is not None:
-            #     q_scale = q_scale / scale
-            # qparam_node = create_getattr_from_value(
-            #     model, graph, orig_args[1].name.rsplit('_', 1)[0] + '_', q_scale)
             qparam_node = graph.node_copy(node.args[1])
             qmap_node = graph.node_copy(node.args[3])
             quantize_op_inputs = [prev_node, qparam_node, node.args[2], qmap_node]
             new_node = graph.call_function(node.target, tuple(quantize_op_inputs), {})
 
         user.replace_input_with(prev_node, new_node)
-        new_node.meta = {k: copy.deepcopy(v) for k, v in node.meta.items() if k != 'val'}
+
+        new_node.meta = {
+            k: copy.deepcopy(v) if k != 'val' else v.clone()
+            for k, v in node.meta.items()
+        }
+
         source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
         source_fn_st.append((new_node.name, new_node.target))
 
@@ -657,7 +640,7 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         dq_inputs = list(output_node.args)
 
         for n in nodes:
-            del n.meta["dtype"]
+            n.meta.pop("dtype", None)
 
         output_node.replace_all_uses_with(dq_inputs[0])
 
@@ -702,17 +685,35 @@ def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor
             print(f"Node {node} does not have a val attribute")
 
 
-def convert_pt2e(model: GraphModule):
+def eliminate_dead_code(self):
+    """
+    Remove all dead code from the graph, based on each node's number of
+    users, and whether the nodes have any side effects. The graph must be
+    topologically sorted before calling.
+
+    Returns:
+        bool: Whether the graph was changed as a result of the pass.
+    """
+    # Lint the graph first to make sure its topologically sorted, otherwise
+    # DCE below will not behave as expected.
+    self.lint()
+
+    # Reverse iterate so that when we remove a node, any nodes used as an
+    # input to that node have an updated user count that no longer reflects
+    # the removed node.
+    changed = False
+    for node in reversed(self.nodes):
+        if len(node.users) == 0 and node.op == 'call_function':
+            self.erase_node(node)
+            changed = True
+
+    return changed
+
+
+def convert_pt2e(model: GraphModule, accumulation_dtype: str = None):
     modules = dict(model.named_modules(remove_duplicate=False))
 
-    while True:
-        nodes_to_remove = [
-            n for n in model.graph.nodes if len(n.users) == 0 and n.op == 'call_function'
-        ]
-        if not nodes_to_remove:
-            break
-        for node in nodes_to_remove:
-            model.graph.erase_node(node)
+    eliminate_dead_code(model.graph)
 
     for node in list(model.graph.nodes):
         if node.op == "call_module":
@@ -722,11 +723,15 @@ def convert_pt2e(model: GraphModule):
                 if mod.qscheme == qt.microscaling:
                     _replace_observer_with_quantize_mx_node_decomposed(model, node, modules)
                 else:
-                    _replace_observer_with_quantize_dequantize_node_decomposed(model, node, modules)
+                    _replace_observer_with_quantize_dequantize_node_decomposed(
+                        model, node, modules, accumulation_dtype)
 
     _eliminate_dequantize_with_no_effect(model)
     _fuse_quantize_dequantize_with_previous_op(model)
 
     model.graph.lint()
     model.recompile()
+
+    model.delete_all_unused_submodules()
+
     return model

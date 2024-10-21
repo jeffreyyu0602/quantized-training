@@ -24,6 +24,10 @@ message Tensor {
   Permutation permutation = 6;
 }
 
+message TensorArray {
+  repeated Tensor tensors = 1;
+}
+
 message MXTensor {
   Tensor input = 1;
   Tensor scale = 2;
@@ -111,7 +115,10 @@ message AcceleratorParam {
     NopParam nop = 6;
   }
   repeated VectorParam vector_params = 7;
-  Tensor output = 8;
+  oneof output_type {
+    Tensor output = 8;
+    TensorArray outputs = 9;
+  }
 }
 
 message ModelParams {

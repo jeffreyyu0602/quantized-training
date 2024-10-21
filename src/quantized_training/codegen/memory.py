@@ -1,11 +1,12 @@
-import operator
-from functools import reduce
+import logging
 from random import randint
 
 import torch
 import matplotlib.pyplot as plt
 
 from ..pt2e_utils import dtype_byte_size
+
+logger = logging.getLogger(__name__)
 
 
 class Partition:
@@ -39,21 +40,10 @@ class MemoryManager:
         self.tensor_memory_map = {}
         self.snapshots = []  # Stores the snapshots of partitions over time
 
-    def calculate_tensor_size(self, shape):
-        if len(shape) == 0:
-            return 1
-        return reduce(operator.mul, shape)
-
     def allocate_memory(self, node, size=None):
-        if not hasattr(node, 'shape'):
-            print(f"Node {node} does not have a shape attribute")
+        if not hasattr(node, 'value'):
+            print(f"Node {node} does not have a value attribute")
             return None
-
-        tensor_size = size or self.calculate_tensor_size(node.shape)
-        if node.meta.get('dtype', None) is not None:
-            tensor_size *= dtype_byte_size(node.meta['dtype'])
-        else:
-            tensor_size *= dtype_byte_size(node.value.dtype)
 
         def is_conv2d_input(n):
             if n.op == 'get_attr':
@@ -61,20 +51,31 @@ class MemoryManager:
             for user in n.users:
                 if user.target == torch.ops.aten.conv2d.default:
                     return True
-                if user.op == 'call_module':
-                    submodule = user.meta['source_module']
+                elif user.op == 'call_module':
+                    submodule = user.meta['submodule']
                     for sub_node in submodule.graph.nodes:
-                        if (
-                            sub_node.op == 'placeholder' and
-                            sub_node.name == n.name and
-                            is_conv2d_input(sub_node)
-                        ):
+                        if sub_node.name == n.name and is_conv2d_input(sub_node):
                             return True
             return False
 
-        if is_conv2d_input(node) and node.value.shape[1] < 16:
-            print(f"Node {node} requires replication. Increase memory size.")
-            tensor_size *= 2
+        tensor_size = size
+        if tensor_size is None:
+            if isinstance(node.value, torch.Tensor):
+                tensor_size = size or node.value.numel()
+                if node.meta.get('dtype', None) is not None:
+                    tensor_size *= dtype_byte_size(node.meta['dtype'])
+                else:
+                    tensor_size *= dtype_byte_size(node.value.dtype)
+            elif isinstance(node.value, (tuple, list)):
+                tensor_size = sum(t.numel() * dtype_byte_size(t.dtype) for t in node.value)
+            else:
+                logger.warning(f"Node {node} has a non-tensor output")
+                return None
+
+            # TODO the systolic array dimension is hardcoded here
+            if is_conv2d_input(node) and node.value.shape[1] < 16:
+                print(f"Node {node} requires replication. Increase memory size.")
+                tensor_size *= 2
 
         # torch.bool has 1/8 byte. Round total size to the nearest byte.
         tensor_size = int(tensor_size)

@@ -31,7 +31,7 @@ def create_normal_map(offset=0.9677083, use_extra_value=True, k=4):
     return values
 
 
-def quantize_to_nf(input: torch.Tensor, k: int = 4):
+def quantize_to_nf(input: torch.Tensor, k: int):
     values = create_normal_map(k=k)
     values = values.to(dtype=torch.bfloat16, device=input.device)
     indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)

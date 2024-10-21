@@ -1,9 +1,13 @@
+import logging
+
 import torch
 import torch.fx
 from torch.fx.node import Node
 from torch._subclasses.fake_tensor import FakeTensorMode
 
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 
 class ShapeProp:
@@ -53,11 +57,6 @@ class ShapeProp:
             elif node.op == 'call_module':
                 result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
 
-            # TODO this is a temporary fix to handle split_with_sizes
-            if isinstance(result, (tuple, list)):
-                assert all(isinstance(item, torch.Tensor) for item in result)
-                result = torch.stack(result)
-
             # This is the only code specific to shape propagation.
             # you can delete this `if` branch and this becomes
             # a generic GraphModule interpreter.
@@ -65,6 +64,10 @@ class ShapeProp:
                 node.shape = result.shape
                 node.value = result.cpu().clone()
                 node.meta['val'] = self.fake_mode.from_tensor(result)
+            elif isinstance(result, (tuple, list)) and all(isinstance(x, torch.Tensor) for x in result):
+                node.value = [x.cpu().clone() for x in result]
+            else:
+                logger.warning(f"Node {node} produced non-tensor output {result}")
 
             env[node.name] = result
 

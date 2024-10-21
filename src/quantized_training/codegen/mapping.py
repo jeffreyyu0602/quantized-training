@@ -1,6 +1,7 @@
 import copy
 import itertools
 import logging
+import operator
 import os
 from collections import defaultdict
 from typing import List, Dict, Type
@@ -35,6 +36,7 @@ from .param_pb2 import (
     ReduceParam,
     ReshapeParam,
     NopParam,
+    Tensor,
 )
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
@@ -271,7 +273,7 @@ def _create_and_insert_subgraph(
     nodes[-1].replace_all_uses_with(new_node)
     for node in reversed(nodes):
         model.graph.erase_node(node)
-    new_node.meta['source_module'] = submodule
+    new_node.meta['submodule'] = submodule
     if (dtype := nodes[-1].meta.get('dtype', None)) is not None:
         new_node.meta['dtype'] = dtype
     return new_node
@@ -642,11 +644,18 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
                 return dtype_byte_size(n.meta['dtype'])
             return dtype_byte_size(n.value.dtype)
 
+        if node.target == operator.getitem:
+            sizes = [t.numel() * dtype_byte_size(t.dtype) for t in node.args[0].value]
+            start_offset = node.args[0].meta["memory"].start + sum(sizes[:node.args[1]])
+            size = sizes[node.args[1]]
+            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
+            continue
+
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
         if node.target == torch.ops.aten.select.int:
             assert node.args[1] == 0, "Only support select on the first dimension"
-            size = manager.calculate_tensor_size(node.shape) * get_node_byte_size(node)
+            size = node.value.numel() * get_node_byte_size(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
@@ -659,27 +668,18 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
-        try:
-            maybe_stack_node = next(iter(node.users))
-        except StopIteration:
-            continue
+        maybe_stack_node = next(iter(node.users))
         if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = maybe_stack_node.args[0][0]
+            tensor_sizes = [n.value.numel() * get_node_byte_size(n) for n in maybe_stack_node.args[0]]
             if (memory := first_node.meta.get("memory", None)) is None:
-                size = sum(
-                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n)
-                    for n in maybe_stack_node.args[0]
-                )
-                memory = manager.allocate_memory(first_node, size)
+                memory = manager.allocate_memory(first_node, sum(tensor_sizes))
                 first_node.meta["memory"] = memory
 
             index = maybe_stack_node.args[0].index(node)
             if index > 0:
-                start_offset = memory.start + sum(
-                    manager.calculate_tensor_size(n.shape) * get_node_byte_size(n)
-                    for n in maybe_stack_node.args[0][:index]
-                )
-                size = manager.calculate_tensor_size(node.shape) * get_node_byte_size(node)
+                start_offset = memory.start + sum(tensor_sizes[:index])
+                size = tensor_sizes[index]
                 node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
@@ -688,19 +688,14 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # We treat cat, select, slice, and stack operations as nops. Therefore,
         # we need to find if their immediate users have been visited.
         def _node_visited(n):
-            if _is_nop(n) or n.target in [
-                torch.ops.aten.cat.default,
-                torch.ops.aten.select.int,
-                torch.ops.aten.slice.Tensor,
-                torch.ops.aten.stack.default,
-            ]:
+            if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
                 return all(_node_visited(user) for user in n.users)
             return n in visited
 
         # Free the memory of nodes whose users have all been visited.
         active_nodes = list(manager.tensor_memory_map.keys())
         for n in active_nodes:
-            if n.op not in ["placeholder", "call_function", "call_module"]:
+            if n.op == "get_attr":
                 continue
             if all(_node_visited(user) for user in n.users):
                 manager.free_memory(n)
@@ -721,7 +716,20 @@ def _map_operation(node: Node, output_dir: str):
 def _compose_accelerator_param(node: Node, params: List, output_dir: str):
     accelerator_param = AcceleratorParam()
     accelerator_param.name = node.name
-    _set_tensor_field(accelerator_param.output, node, output_dir, True)
+    if isinstance(node.value, (tuple, list)):
+        partition = node.meta["memory"]
+        offset = partition.start
+        for i, tensor in enumerate(node.value):
+            tensor_param = Tensor()
+            tensor_param.node = f"{node.name}_{i}"
+            tensor_param.dtype = str(tensor.dtype).split(".")[1]
+            tensor_param.shape.extend(tuple(tensor.shape))
+            tensor_param.memory.partition = partition.partition_id
+            tensor_param.memory.offset = offset
+            offset += tensor.numel() * dtype_byte_size(tensor.dtype)
+            accelerator_param.outputs.tensors.append(tensor_param)
+    else:
+        _set_tensor_field(accelerator_param.output, node, output_dir, True)
 
     if isinstance(params[0], MatrixParam):
         accelerator_param.matrix_param.CopyFrom(params[0])
@@ -766,13 +774,10 @@ def gen_code(model, args, output_dir=None):
             n_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
             ShapeProp(gm).propagate(*n_args)
             for n in gm.graph.nodes:
-                if _is_nop(n) or n.target in [
-                    torch.ops.aten.permute.default,
-                    torch.ops.aten.transpose.int,
-                ]:
+                if _is_nop(n) or _is_reshape_op(n):
                     continue
 
-                # Skip dequantize nodes that are fused inputs
+                # Skip dequantize nodes that are fused with inputs
                 if (
                     n.target == torch.ops.quantized_ops.dequantize
                     and n.args[0].op == 'placeholder'
@@ -807,7 +812,10 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
             continue
 
         header = node.name
-        if hasattr(node, "shape"):
+        if hasattr(node, "value") and isinstance(node.value, (tuple, list)):
+            shape_str = ", ".join([str(tuple(t.shape)) for t in node.value])
+            header += f"&#92;n{shape_str}"
+        elif hasattr(node, "shape"):
             header += f"&#92;n{str(tuple(node.shape))}"
         if (dtype := node.meta.get("dtype", None)) is not None:
             header += f"&#92;n{dtype}"
