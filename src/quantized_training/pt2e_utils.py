@@ -137,8 +137,7 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
 
         if to_node is None:
             with model.graph.inserting_after(node):
-                to_node = model.graph.call_function(
-                    torch.Tensor.to, (node, device))
+                to_node = model.graph.call_function(torch.Tensor.to, (node, device))
             env[to_node] = value.to(device)
 
         user.replace_input_with(node, to_node)

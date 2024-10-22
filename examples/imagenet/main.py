@@ -214,13 +214,13 @@ def main_worker(gpu, ngpus_per_node, args):
         model.maxpool.padding = 0
 
     if args.bn_folding:
-        from utils import _pair_conv_bn
-        module_names = [name for name, _ in model.named_modules()]
-        modules_to_fuse = _pair_conv_bn(module_names)
+        from utils import get_conv_bn_layers
+        conv_bn_pairs = get_conv_bn_layers(model)
+        print(conv_bn_pairs)
         # TODO there are two cases here: 1. Evaluate a QAT model trained with batch
         # norm folded. 2. Evaluate a pretrained model and fold batch norm. We need
         # to fuse models differently in these two cases.
-        model = torch.ao.quantization.fuse_modules_qat(model, modules_to_fuse)
+        model = torch.ao.quantization.fuse_modules_qat(model, conv_bn_pairs)
 
     # If we are doing QAT or inference with batch norm folded, we need to swap
     # the intrinsic modules with their quantized counterparts.

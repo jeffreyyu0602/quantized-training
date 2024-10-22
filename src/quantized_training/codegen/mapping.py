@@ -48,12 +48,11 @@ DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
 def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
-    arg_index = 0
+    args_iter = iter(source_node.args)
     value_remap = {}
     for node in list(gm.graph.nodes):
         if node.op == 'placeholder':
-            value_remap[node] = source_node.args[arg_index]
-            arg_index += 1
+            value_remap[node] = next(args_iter)
         elif node.op == 'output':
             source_node.replace_all_uses_with(value_remap[node.args[0][0]])
         else:
