@@ -12,7 +12,6 @@ from quantized_training import (
     add_qspec_args,
     get_default_quantizer,
     prepare_pt2e,
-    quantize,
     plot_histogram,
     plot_layer_range,
     setup_logging,
@@ -53,12 +52,10 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
-        # device_map=args.gpu if args.gpu is not None else "auto",
-        attn_implementation="eager", # flash attention is not supported
+        device_map=args.gpu,
+        attn_implementation="eager", # Turn off flash attention
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-
-    # quantize(model, args)
 
     quantizer = get_default_quantizer(
         input_activation=args.activation,
@@ -73,22 +70,22 @@ def main(args):
     example_kwargs = {"labels": input_ids.clone()}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
-    model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
-    max_memory = get_max_memory()
-    if args.gpu is not None:
-        assert args.gpu in max_memory
-        max_memory = {args.gpu: max_memory[args.gpu]}
-    else:
-        # Reserve 2GB for activation
-        reserved = 4 * 1024 ** 3
+    # New LLaMA implementation includes @torch.no_grad() statement, which will turn
+    # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().
+    with torch.no_grad():
+        model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
+
+    if args.gpu is None:
+        # Reserve 8 GB for activations
         max_memory = {
-            k: v - reserved
-            for k, v in max_memory.items() if isinstance(k, int) and v > reserved
+            k: max(v - 8 * 1024 ** 3, 0)
+            for k, v in get_max_memory().items() if isinstance(k, int)
         }
         max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))
-    device_map = get_device_map(model, max_memory=max_memory)
-    dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
+        device_map = get_device_map(model, max_memory=max_memory)
+        dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
+        model.graph.print_tabular()
 
     def calibrate(model):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
@@ -148,6 +145,10 @@ def main(args):
     logger.info(f"max length: {args.max_length}")
     logger.info(f"stride:     {args.stride}")
     logger.info(f"perplexity: {ppl.item()}")
+
+    for name, module in model.named_modules():
+        if hasattr(module, "max_outlier_pct"):
+            print(f"{name}: {module.max_outlier_pct:.2%} outliers")
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

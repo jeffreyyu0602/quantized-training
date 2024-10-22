@@ -87,6 +87,7 @@ def get_device_map(model: GraphModule, max_memory=None, verbose=False):
     return device_map
 
 
+@torch.no_grad()
 def dispatch_model(model, args, device_map=None, max_memory=None):
     if device_map is None:
         device_map = infer_auto_device_map(model, max_memory=max_memory)
@@ -146,10 +147,10 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
         if node.op == 'placeholder':
             result = next(args_iter)
         elif node.op == 'get_attr':
+            result = fetch_attr(node)
             device = device_map[node.target]
-            attribute = fetch_attr(node)
-            attribute.data = attribute.data.to(device)
-            result = attribute.data
+            if device != result.device:
+                result.data = result.data.to(device)
         elif node.op == 'call_function':
             args = load_arg(node.args)
             devices = set(get_devices(args))
