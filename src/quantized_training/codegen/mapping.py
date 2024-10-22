@@ -47,6 +47,43 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
+def optimize_graph(model: GraphModule, mapping: Dict, custom_mapping=None):
+    mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
+    if custom_mapping is not None:
+        mapped_sources.extend(custom_mapping)
+
+    unmapped_nodes = []
+
+    for node in model.graph.nodes:
+        if (
+            node.op != "call_function"
+            or node.target in mapped_sources
+            or _is_nop(node)
+            or _is_indexing_or_concatenation_op(node)
+        ):
+            continue
+
+        if (source_fn_st := node.meta.get("source_fn_stack", None)) is None:
+            unmapped_nodes.append(node)
+            continue
+
+        source_fn = source_fn_st[-1]
+        if source_fn[1] not in mapped_sources:
+            unmapped_nodes.append(node)
+
+    mapped_nodes = [
+        n for n in model.graph.nodes
+        if n.op == 'call_function' and n not in unmapped_nodes
+    ]
+    mapped_ops = {node.target for node in mapped_nodes}
+    print("\nMapped ops:")
+    print('\n'.join([str(op) for op in mapped_ops]))
+
+    unmapped_ops = {node.target for node in unmapped_nodes}
+    print("Unmapped ops:")
+    print('\n'.join([str(op) for op in unmapped_ops]))
+
+
 def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
     args_iter = iter(source_node.args)
     value_remap = {}
@@ -321,9 +358,9 @@ def make_partition(nodes: List[Node], module_type: Type = None) -> SourcePartiti
     )
 
 
-def fuse_operator(model: GraphModule, pipeline=None):
-    if pipeline is None:
-        pipeline = {}
+def fuse_operator(model: GraphModule, mapping=None):
+    if mapping is None:
+        mapping = {}
 
     graph = model.graph
 
@@ -332,7 +369,7 @@ def fuse_operator(model: GraphModule, pipeline=None):
     fused_nodes: Dict[Node, None] = {}
 
     fused_partitions = []
-    for wanted_sources in pipeline.values():
+    for wanted_sources in mapping.values():
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
 

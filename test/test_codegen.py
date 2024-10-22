@@ -21,7 +21,11 @@ from transformers import (
 from tqdm import tqdm
 
 from quantized_training import (
+    DerivedQuantizationSpec,
+    FusedAmaxObsFakeQuantize,
     MemoryManager,
+    QuantizationConfig,
+    QuantizationSpec,
     ShapeProp,
     add_qspec_args,
     allocate_activations,
@@ -53,14 +57,12 @@ task_to_keys = {
     "wnli": ("sentence1", "sentence2"),
 }
 
+quantized_ops = torch.ops.quantized_ops
 OPERATOR_MAPPINGS = {
     "gemm": [
-        torch.nn.Conv2d,
-        torch.nn.Linear,
-        torch.matmul,
-        torch.ops.quantized_ops.conv2d_mx.default,
-        torch.ops.quantized_ops.linear_mx.default,
-        torch.ops.quantized_ops.matmul_mx.default,
+        torch.nn.Conv2d, torch.nn.Linear, torch.matmul, operator.matmul,
+        quantized_ops.conv2d_mx.default,  quantized_ops.linear_mx.default,
+        quantized_ops.matmul_mx.default,
     ],
     "add": ["add", "add_", operator.add, torch.add, operator.iadd],
     "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
@@ -70,8 +72,8 @@ OPERATOR_MAPPINGS = {
     "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
     "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
     "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
-    "quantize": [torch.ops.quantized_ops.quantize_symmetric],
-    "dequantize": [torch.ops.quantized_ops.dequantize_symmetric],
+    "quantize": [quantized_ops.quantize],
+    "dequantize": [quantized_ops.dequantize],
 }
 
 
@@ -97,40 +99,18 @@ def replace_interpolate():
     torch.nn.functional.interpolate = torch.ops.custom.interpolate
 
 
-def _pair_conv_bn(layers):
-    pairs = []
-    layer_dict = {}
-
-    # Organize layers by prefix
-    for layer in layers:
-        prefix = '.'.join(layer.split('.')[:-1])
-        if prefix not in layer_dict:
-            layer_dict[prefix] = []
-        layer_dict[prefix].append(layer)
-
-    # Find pairs of conv and bn
-    for prefix, layer_list in layer_dict.items():
-        if "downsample" in prefix:
-            pairs.append([f"{prefix}.0", f"{prefix}.1"])
+def get_conv_bn_layers(model):
+    layers = []
+    module_names = list(model._modules)
+    for k, name in enumerate(module_names):
+        if len(list(model._modules[name]._modules)) > 0:
+            conv_bn_pairs = get_conv_bn_layers(model._modules[name])
+            layers.extend([[f'{name}.{conv}', f'{name}.{bn}'] for conv, bn in conv_bn_pairs])
         else:
-            conv_layers = sorted([l for l in layer_list if 'conv' in l])
-            bn_layers = sorted([l for l in layer_list if 'bn' in l])
-
-            # Pair each conv with its corresponding bn
-            for conv, bn in zip(conv_layers, bn_layers):
-                pairs.append([conv, bn])
-
-    return pairs
-
-
-def flatten_args(mixed_list):
-    flattened_list = []
-    for element in mixed_list:
-        if isinstance(element, list):
-            flattened_list.extend(flatten_args(element))
-        else:
-            flattened_list.append(element)
-    return flattened_list
+            if isinstance(model._modules[name], torch.nn.BatchNorm2d):
+                if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
+                    layers.append([module_names[k-1], name])
+    return layers
 
 
 def transform(
@@ -150,12 +130,13 @@ def transform(
         gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
         _convert_scalars_to_attrs(gm)
 
-    uplifted_args = flatten_args(list(example_args)) + list(example_kwargs.values())
+    from torch.utils._pytree import tree_flatten
+    flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
-    ShapeProp(gm).propagate(*uplifted_args)
+    ShapeProp(gm).propagate(*flatten_args)
     split_multi_head_attention(gm)
 
-    ShapeProp(gm).propagate(*uplifted_args)
+    ShapeProp(gm).propagate(*flatten_args)
 
     _fuse_quantize_dequantize_with_previous_op(gm)
 
@@ -175,13 +156,18 @@ def transform(
         for stage, ops in pipeline.items()
     }
 
+    from quantized_training.codegen.mapping import optimize_graph
+
+    custom_mapping = [torch.ops.aten.softmax.int]
+    optimize_graph(gm, pipeline, custom_mapping)
+
     fuse_operator(gm, pipeline)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)
     gm_out = gm(*example_args, *list(example_kwargs.values()))
 
-    ShapeProp(gm).propagate(*uplifted_args)
+    ShapeProp(gm).propagate(*flatten_args)
 
     try:
         manager = MemoryManager(1024 ** 4)
@@ -204,7 +190,7 @@ def transform(
 
     params = gen_code(
         gm,
-        uplifted_args,
+        flatten_args,
         os.path.join(output_dir, "tensor_files")
     )
 
@@ -270,6 +256,24 @@ if __name__ == "__main__":
         force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
+    if args.use_mixed_qscheme:
+        qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+        qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+
+        qconfig = QuantizationConfig(qspec, None, qspec, None)
+        quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
+
+        from quantized_training.quantize_pt2e import derive_bias_qparams_fn
+
+        bias_qspec = DerivedQuantizationSpec(
+            derived_from=None,
+            derive_qparams_fn=derive_bias_qparams_fn,
+            dtype=None,
+        )
+
+        qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+        quantizer.set_module_name("conv1", qconfig)
+
     if args.model in TORCHVISION_MODELS:
         model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
 
@@ -281,8 +285,7 @@ if __name__ == "__main__":
             model.bfloat16()
         torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
-        module_names = [name for name, _ in model.named_modules()]
-        modules_to_fuse = _pair_conv_bn(module_names)
+        modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
@@ -294,22 +297,6 @@ if __name__ == "__main__":
                 module.padding = 0
 
         quantizer.set_module_name("fc", None)
-
-        if args.use_mixed_qscheme:
-            from quantized_training import DerivedQuantizationSpec, FusedAmaxObsFakeQuantize, QuantizationSpec, QuantizationConfig
-            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-
-            from quantized_training.quantize_pt2e import derive_bias_qparams_fn
-
-            bias_qspec = DerivedQuantizationSpec(
-                derived_from=None,
-                derive_qparams_fn=derive_bias_qparams_fn,
-                dtype="int24",
-            )
-
-            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
-            quantizer.set_module_name("conv1", qconfig)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         model = prepare_pt2e(model, quantizer, example_args)
@@ -400,17 +387,6 @@ if __name__ == "__main__":
                 output = self.classifier(first_token_tensor)
                 return output
 
-        if args.use_mixed_qscheme:
-            from quantized_training.pt2e_utils import get_aten_graph_module, print_node_scope_tabular
-            gm = get_aten_graph_module(MobileBertNoEmbed(), example_args)
-            print_node_scope_tabular(gm)
-
-            from quantized_training import FusedAmaxObsFakeQuantize, QuantizationSpec, QuantizationConfig
-            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-            qconfig = QuantizationConfig(qspec, None, qspec, None)
-            quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
-
         quantizer.set_module_name("classifier", None)
 
         gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
@@ -490,7 +466,7 @@ if __name__ == "__main__":
             if hasattr(module, "scale"):
                 module.scale = torch.randn_like(module.scale)
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         pt_out, gm_out = transform(
             gm,
@@ -566,18 +542,83 @@ if __name__ == "__main__":
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
         target_ids = input_ids.clone()
-        example_args = (input_ids, target_ids)
+
+        inputs_embeds = model.model.embed_tokens(input_ids)
+        cache_position = torch.arange(0, inputs_embeds.shape[1])
+        position_ids = cache_position.unsqueeze(0)
+        causal_mask = model.model._update_causal_mask(
+            None, inputs_embeds, cache_position, None, None
+        )
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+
+        example_args = (hidden_states, causal_mask, position_embeddings)
 
         class LlamaWrapper(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.model = model
+                self.model = model.model
+                self.lm_head = model.lm_head
 
-            def forward(self, *args, **kwargs):
-                output = self.model(*args, **kwargs)
-                return output.logits
+            def forward(self, hidden_states, causal_mask, position_embeddings):
+                for decoder_layer in self.model.layers:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_embeddings=position_embeddings,
+                    )
+                    hidden_states = layer_outputs[0]
+                logits = self.lm_head(hidden_states)
+                return logits
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
+        convert_pt2e(gm)
+
+        pt_out, gm_out = transform(
+            gm,
+            example_args,
+            output_dir=args.output_dir,
+        )
+    elif args.model == "test":
+        class TestModel(torch.nn.Module):
+            def forward(self, x):
+                # outputs = torch.split_with_sizes(x, (5, 5))
+                # outputs = torch.ops.aten.split.sizes(x, (5, 5))
+                outputs = torch.split(x, (5, 5))
+                print(outputs)
+                outputs = torch.median(outputs[0])
+                return outputs
+
+        example_args = (torch.randn(10),)
+
+        TestModel()(*example_args)
+
+        gm = prepare_pt2e(TestModel(), quantizer, example_args)
+        convert_pt2e(gm)
+
+        pt_out, gm_out = transform(
+            gm,
+            example_args,
+            output_dir=args.output_dir,
+        )
+    elif args.model == "mcunet":
+        import sys
+        sys.path.append("mcunet")
+        from mcunet.model_zoo import net_id_list, build_model
+        print(net_id_list)  # the list of models in the model zoo
+
+        # pytorch fp32 model
+        model, image_size, description = build_model(net_id="mcunet-in4", pretrained=True)  # you can replace net_id with any other option from net_id_list
+
+        sys.path.append(".")
+        from bn_folder import bn_folding_model
+        model = bn_folding_model(model.eval())
+        model.bfloat16()
+        example_args = (torch.randn(1, 3, 160, 160, dtype=torch.bfloat16),)
+
+        gm = prepare_pt2e(model, quantizer, example_args)
         convert_pt2e(gm)
 
         pt_out, gm_out = transform(
