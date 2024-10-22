@@ -97,6 +97,9 @@ class MemoryManager:
         raise RuntimeError(f"Memory allocation failed for tensor {node.name}")
 
     def free_memory(self, node):
+        if node not in self.tensor_memory_map:
+            logger.warning(f"Node {node} is not in the memory")
+            return
         partition = self.tensor_memory_map[node]
         partition.node = None
         self.merge_partitions()

@@ -8,6 +8,7 @@ from torch import Tensor
 from torch.ao.quantization import FakeQuantizeBase, ObserverOrFakeQuantize
 
 import quantized_training as qt
+from quantized_training.decomposed import vmap
 from quantized_training.fp8 import (
     _quantize_elemwise_core,
     quantize_to_fp8_e4m3,
@@ -31,20 +32,27 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def get_fake_quant_fn(dtype: str):
+def get_quantization_map(dtype, device=None):
     """Return the quantization function for the given dtype."""
-    if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
-        nbits, es = match.groups()
-        return lambda x: quantize_to_posit(x, int(nbits), int(es), round_to_even=True)
-
-    if dtype == "float16":
-        return lambda x: x.to(torch.float16).to(x.dtype)
-
-    if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
+    values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
+    if dtype is None:
+        return values
+    if (torch_dtype := getattr(torch, dtype, None)) is not None:
+        # PyTorch native dtypes
+        return values.to(torch_dtype).to(torch.bfloat16)
+    elif (match := re.fullmatch(r'int(\d+)', dtype)):
+        nbits = int(match.group(1))
+        quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
+        return torch.clamp(torch.round(values), quant_min, quant_max)
+    elif (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
+        # Custom implementation for NVIDIA FP8 format
         fp8_format = match.group(1).lower()
-        return quantize_to_fp8_e4m3 if fp8_format == 'e4m3' else quantize_to_fp8_e5m2
-
-    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
+        return (
+            quantize_to_fp8_e4m3(values) if fp8_format == 'e4m3'
+            else quantize_to_fp8_e5m2(values)
+        )
+    elif (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
+        # Adopted from microscaling code
         nbits, ebits, mbits = map(int, match.groups())
         assert nbits == ebits + mbits + 1
         mbits = mbits + 2
@@ -52,37 +60,19 @@ def get_fake_quant_fn(dtype: str):
         if dtype != "fp8_e4m3":
             max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
         else:
-            max_norm = 2**emax * 1.75
-        return lambda x: _quantize_elemwise_core(x, mbits, ebits, max_norm, "even", True)
-
-    if (match := re.fullmatch(r'int(\d+)', dtype)):
+            max_norm = 2**emax * 1.75  # FP8 has custom max_norm
+        return _quantize_elemwise_core(
+            values, mbits, ebits, max_norm, round="even", saturate_normals=True
+        )
+    elif (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
+        nbits, es = match.groups()
+        return quantize_to_posit(values, int(nbits), int(es), round_to_even=True)
+    elif (match := re.fullmatch(r'nf(\d+)', dtype)):
+        # Adopted from bitsandbytes code
         nbits = int(match.group(1))
-        quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
-        return lambda x: torch.clamp(torch.round(x), quant_min, quant_max)
-
-    if (match := re.fullmatch(r'nf(\d+)', dtype)):
-        nbits = int(match.group(1))
-        return lambda x: quantize_to_nf(x, nbits)
-
-    raise ValueError(f"Unrecognized dtype: {dtype}")
-
-
-def _get_quantization_map(dtype, device=None):
-    values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
-    if dtype is not None or dtype not in ["bfloat16", "float32"]:
-        fq_fn = get_fake_quant_fn(dtype)
-        values = fq_fn(values)
-    return values
-
-
-def _quantize(input, quant_map):
-    if input.dtype == torch.bfloat16:
-        indices = input.view(torch.int16).to(torch.int32) & 0xffff
+        return quantize_to_nf(values, nbits)
     else:
-        raw_bits = input.to(torch.float32).view(torch.int32)
-        indices = (raw_bits >> 16) & 0xffff
-        indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
-    return quant_map[indices].to(input.dtype)
+        raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 class MXFakeQuantFunction(torch.autograd.Function):
@@ -95,7 +85,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
         ctx,
         input,
         fake_quant_enabled,
-        quant_map,
+        code,
         quant_max,
         shared_exp_method="max",
         axes=None,
@@ -109,12 +99,11 @@ class MXFakeQuantFunction(torch.autograd.Function):
         axes = [x + input.ndim if x < 0 else x for x in axes]
 
         # Perform tiling to the hardware vector size
-        if block_size > 0:
-            input, axes, orig_shape, padded_shape = _reshape_to_blocks(
-                input, axes, block_size
-            )
-
-        shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+        assert block_size > 0
+        input, axes, orig_shape, padded_shape = _reshape_to_blocks(
+            input, axes, block_size
+        )
+        shared_exp_axes = [x + 1 for x in axes]
 
         if force_scale_power_of_two:
             # Get shared exponents
@@ -128,17 +117,16 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
             scale = (2 ** shared_exp).to(input.dtype)
         else:
-            # Use absolute maximum value for scaling
+            # Use absolute maximum value for scale calculation
             amax = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
             scale = amax / quant_max
             scale = torch.where(amax > 0.0, scale, 1.0)
             scale = torch.where(torch.isfinite(amax), scale, 1.0)
 
-        input = _quantize(input / scale, quant_map) * scale
+        input = vmap(input / scale, code) * scale
 
         # Undo tile reshaping
-        if block_size:
-            input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
+        input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
 
         return input
 
@@ -158,7 +146,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         input: torch.Tensor,
         observer_enabled: torch.Tensor,
         fake_quant_enabled: torch.Tensor,
-        quant_map: torch.Tensor,
+        code: torch.Tensor,
         amax_history: torch.Tensor,
         scale: torch.Tensor,
         amax_history_len: int,
@@ -196,7 +184,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
 
         if fake_quant_enabled[0] == 1:
             scale = scale.to(input.dtype)
-            input = _quantize(input / scale, quant_map) * scale
+            input = vmap(input / scale, code) * scale
 
         return input
 
@@ -216,7 +204,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     tensors, and uses this statistic to compute the quantization parameters.
     """
 
-    quant_map: torch.Tensor
+    code: torch.Tensor
     amax_history: torch.Tensor
     scale: torch.Tensor
 
@@ -244,7 +232,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.outlier_threshold = kwargs.get("outlier_threshold", None)
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
-        self.register_buffer("quant_map", _get_quantization_map(dtype, device), persistent=False)
+        self.register_buffer("code", get_quantization_map(dtype, device), persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
@@ -303,7 +291,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             X = MXFakeQuantFunction.apply(
                 X,
                 self.fake_quant_enabled,
-                self.quant_map,
+                self.code,
                 self.quant_max,
                 self.shared_exp_method,
                 self.ch_axis,
@@ -315,7 +303,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 X,
                 self.observer_enabled,
                 self.fake_quant_enabled,
-                self.quant_map,
+                self.code,
                 self.amax_history,
                 self.scale,
                 self.amax_history_len,
@@ -377,7 +365,7 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
         super().__init__()
         self.obs_or_fqs = obs_or_fqs
         self.derive_qparams_fn = derive_qparams_fn
-        self.register_buffer("quant_map", _get_quantization_map(dtype), persistent=False)
+        self.register_buffer("code", get_quantization_map(dtype), persistent=False)
         self.observer_enabled[0] = 0
         self.dtype = dtype
         self.qscheme = obs_or_fqs[1].qscheme
@@ -391,7 +379,7 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
             x,
             self.observer_enabled,
             self.fake_quant_enabled,
-            self.quant_map,
+            self.code,
             None,
             self.calculate_qparams(),
             None,

@@ -2,6 +2,7 @@ from .codegen import *
 from .decomposed import *
 from .fake_quantize import *
 from .fp8 import *
+from .normal_float import *
 from .posit import *
 from .pt2e_utils import *
 from .qconfig import *
@@ -33,6 +34,7 @@ __all__ = [
     "quantize",
     "quantize_to_fp8_e4m3",
     "quantize_to_fp8_e5m2",
+    "quantize_to_nf",
     "quantize_to_posit",
     "replace_softmax",
     "setup_logging",

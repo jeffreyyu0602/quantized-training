@@ -24,7 +24,7 @@ import quantized_training as qt
 from quantized_training.fake_quantize import (
     _DerivedObserverOrFakeQuantize,
     FusedAmaxObsFakeQuantize,
-    _get_quantization_map,
+    get_quantization_map,
 )
 from quantized_training.quantizer.quantizer import QuantizationSpec, DerivedQuantizationSpec
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
@@ -242,12 +242,6 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     )
 
     model = prepare_pt2e(model, quantizer)
-
-    model.meta["quantizer"] = quantizer
-    model.meta["example_args"] = args
-    model.meta["example_kwargs"] = kwargs
-    model.meta["dynamic_shapes"] = dynamic_shapes
-
     return model
 
 
@@ -323,7 +317,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
             param.data,
             scale,
             input_dtype,
-            activation_post_process.quant_map
+            activation_post_process.code
         )
         node.replace_all_uses_with(input_node)
 
@@ -343,7 +337,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model, graph, next(iter(node.users)).name + "_scale_", scale)
             # TODO quantization map can be shared among multiple quantize nodes?
             qmap_node = create_getattr_from_value(
-                model, graph, "code_", activation_post_process.quant_map)
+                model, graph, "code_", activation_post_process.code)
             quantize_op_inputs = [node.args[0], qparam_node, input_dtype, qmap_node]
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize,
@@ -371,13 +365,12 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
             # Infer the output data type from the bias data type
-            bias_dtype = None
+            output_dtype = accumulation_dtype
             if len(user_node.args) > 2 and (bias_node := user_node.args[2]) is not None:
                 if bias_node.op == 'get_attr':
-                    bias_dtype = bias_node.meta.get("dtype", None)
+                    output_dtype = bias_node.meta.get("dtype", None)
                 elif bias_node.op == 'call_module':
-                    bias_dtype = modules[bias_node.target].dtype
-            output_dtype = bias_dtype or accumulation_dtype
+                    output_dtype = modules[bias_node.target].dtype
             user_node.meta["dtype"] = output_dtype
 
             # Insert dequantize node before the node that appear the earlist in the graph
@@ -393,11 +386,11 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 or maybe_dq_node.target != torch.ops.quantized_ops.dequantize
             ):
                 # Insert a dequantize node after the gemm operation
-                quant_map = _get_quantization_map(output_dtype, device)
+                code = get_quantization_map(output_dtype, device)
                 with graph.inserting_before(maybe_dq_node):
                     qparam_node = create_getattr_from_value(
                         model, graph, user_node.name + "_scale_", scale)
-                    qmap_node = create_getattr_from_value(model, graph, "code_", quant_map)
+                    qmap_node = create_getattr_from_value(model, graph, "code_", code)
                     dq_inputs = [user_node, qparam_node, output_dtype, qmap_node]
                     dequantized_node = graph.call_function(
                         torch.ops.quantized_ops.dequantize,
@@ -481,7 +474,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             param.data,
             scale,
             activation_post_process.dtype,
-            activation_post_process.quant_map,
+            activation_post_process.code,
             activation_post_process.block_size,
         )
         node.replace_all_uses_with(input_node)
@@ -506,7 +499,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 {}
             )
             qmap_node = create_getattr_from_value(
-                model, model.graph, "code_", activation_post_process.quant_map)
+                model, model.graph, "code_", activation_post_process.code)
             quantize_op_inputs = [
                 node.args[0],
                 qparam_node_inp,

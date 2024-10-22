@@ -11,6 +11,7 @@ import torch
 from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, Graph, GraphModule
+from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import (
     check_subgraphs_connected,
     get_source_partitions,
@@ -19,24 +20,24 @@ from torch.fx.passes.utils.source_matcher_utils import (
 
 from .mapping_utils import (
     OP_TO_MAPPING_FUNC,
-    _set_tensor_field,
-    _is_gemm_op,
     _is_elementwise_op,
-    _is_nop,
+    _is_gemm_op,
     _is_indexing_or_concatenation_op,
+    _is_nop,
     _is_reshape_op,
+    _set_tensor_field,
 )
 from .memory import MemoryManager, Partition
 from .param_pb2 import (
     AcceleratorParam,
-    ModelParams,
     MatrixParam,
-    VectorParam,
+    ModelParams,
+    NopParam,
     PoolingParam,
     ReduceParam,
     ReshapeParam,
-    NopParam,
     Tensor,
+    VectorParam,
 )
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
@@ -46,54 +47,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
-def _decompose_node(model: GraphModule, gm: GraphModule, orig_node: Node) -> List[Node]:
+def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
     arg_index = 0
     value_remap = {}
-    for node in gm.graph.nodes:
+    for node in list(gm.graph.nodes):
         if node.op == 'placeholder':
-            value_remap[node] = orig_node.args[arg_index]
+            value_remap[node] = source_node.args[arg_index]
             arg_index += 1
         elif node.op == 'output':
-            orig_node.replace_all_uses_with(value_remap[node.args[0][0]])
+            source_node.replace_all_uses_with(value_remap[node.args[0][0]])
         else:
-            with model.graph.inserting_before(orig_node):
-                new_node = model.graph.node_copy(node, lambda n: value_remap[n])
-            value_remap[node] = new_node
+            with model.graph.inserting_before(source_node):
+                value_remap[node] = model.graph.node_copy(node, lambda n: value_remap[n])
 
-            source_fn_st = new_node.meta.setdefault('source_fn_stack', [])
-            source_fn = source_fn_st[-1][1] if len(source_fn_st) > 0 else new_node.target
-            source_fn_st.append((new_node.name, source_fn))
-
-            if (nn_module_stack := orig_node.meta.get('nn_module_stack', None)) is not None:
-                new_node.meta.setdefault('nn_module_stack', nn_module_stack)
-
-            if node.op != "get_attr":
-                continue
-
-            # TODO: might have duplicate target names
-            if node.target in gm._buffers:
-                if new_node.target in model._buffers:
-                    logger.warning(f"Duplicate buffer name: {new_node.target}")
-                model.register_buffer(new_node.target, gm.get_buffer(node.target))
-            if node.target in gm._parameters:
-                if new_node.target in model._parameters:
-                    logger.warning(f"Duplicate parameter name: {new_node.target}")
-                model.register_parameter(new_node.target, gm.get_parameter(node.target))
+            if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
+                source_fn = source_fn_st[-1]
+                value_remap[node].meta['source_fn_stack'] = [(value_remap[node].name, source_fn[1])]
 
     output_node = list(gm.graph.nodes)[-1]
     return [value_remap[n] for n in output_node.args[0]]
-
-
-class BMM(torch.nn.Module):
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # Loop through each element in the batch dimensions
-        batch_shape = x.shape[:-2]
-        result = []
-        for idx in itertools.product(*[range(dim) for dim in batch_shape]):
-            result.append(torch.matmul(x[idx], y[idx]))
-        result = torch.stack(result)
-        result = result.view(*batch_shape, *result.shape[-2:])
-        return result
 
 
 def _decompose_bmm(model: GraphModule, node: Node):
@@ -105,6 +77,17 @@ def _decompose_bmm(model: GraphModule, node: Node):
     input2_dims = sum(1 for d in input2.shape if d > 1)
     if input1_dims < 3 and input2_dims < 3:
         return None
+
+    class BMM(torch.nn.Module):
+        def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            # Loop through each element in the batch dimensions
+            batch_shape = x.shape[:-2]
+            result = []
+            for idx in itertools.product(*[range(dim) for dim in batch_shape]):
+                result.append(torch.matmul(x[idx], y[idx]))
+            result = torch.stack(result)
+            result = result.view(*batch_shape, *result.shape[-2:])
+            return result
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2))
     output_nodes = _decompose_node(model, gm, node)
@@ -609,7 +592,7 @@ def allocate_weights(model: GraphModule, manager: MemoryManager = None):
         manager = MemoryManager(DEFAULT_MEMORY_SIZE)
 
     for node in model.graph.nodes:
-        if node.op == "get_attr" and "quant_map" not in node.name:
+        if node.op == "get_attr" and "code" not in node.name:
             node.meta["memory"] = manager.allocate_memory(node)
 
 
@@ -622,6 +605,34 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             node.meta["memory"] = manager.allocate_memory(node)
 
     manager.take_snapshot()
+
+    # Run through reverse nodes and record the first instance of a use
+    # of a given node. This represents the *last* use of the node in the
+    # execution order of the program, which we will use to free unused
+    # values
+    node_to_last_use : Dict[Node, Node] = {}
+    user_to_last_uses : Dict[Node, List[Node]] = {}
+
+    def register_last_uses(n : Node, user : Node):
+        if n.op != 'get_attr' and n not in node_to_last_use:
+            node_to_last_use[n] = user
+            user_to_last_uses.setdefault(user, []).append(n)
+
+    for node in reversed(model.graph.nodes):
+        map_arg(node.args, lambda n: register_last_uses(n, node))
+        map_arg(node.kwargs, lambda n: register_last_uses(n, node))
+
+    def delete_unused_values(user : Node):
+        """
+        Delete values after their last use. This ensures that values that are
+        not used in the remainder of the code are freed and the memory usage
+        of the code is optimal.
+        """
+        nodes_to_delete = user_to_last_uses.get(user, [])
+        for n in list(nodes_to_delete):
+            if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
+                nodes_to_delete.extend(delete_unused_values(n))
+        return nodes_to_delete
 
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
@@ -685,19 +696,9 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             node.meta["memory"] = manager.allocate_memory(node)
         visited[node] = None
 
-        # We treat cat, select, slice, and stack operations as nops. Therefore,
-        # we need to find if their immediate users have been visited.
-        def _node_visited(n):
-            if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
-                return all(_node_visited(user) for user in n.users)
-            return n in visited
-
-        # Free the memory of nodes whose users have all been visited.
-        active_nodes = list(manager.tensor_memory_map.keys())
-        for n in active_nodes:
-            if n.op == "get_attr":
-                continue
-            if all(_node_visited(user) for user in n.users):
+        nodes_to_delete = delete_unused_values(node)
+        for n in nodes_to_delete:
+            if n in manager.tensor_memory_map:
                 manager.free_memory(n)
 
         manager.take_snapshot()

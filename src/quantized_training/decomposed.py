@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch.library import Library, impl
 
-from .fake_quantize import _quantize
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
 
@@ -23,6 +22,19 @@ def _broadcast_shapes(input, target, block_size=32):
 # Note: decomposed means decomposed quantized tensor, using decomposed so that the
 # name is not too long
 quantized_decomposed_lib = Library("quantized_ops", "DEF")
+
+quantized_decomposed_lib.define("vmap(Tensor self, Tensor code) -> Tensor")
+
+@impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
+def vmap(input, code) -> torch.Tensor:
+    if input.dtype == torch.bfloat16:
+        indices = input.view(torch.int16).to(torch.int32) & 0xffff
+    else:
+        raw_bits = input.to(torch.float32).view(torch.int32)
+        indices = (raw_bits >> 16) & 0xffff
+        indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
+    return code[indices].to(input.dtype)
+
 
 quantized_decomposed_lib.define(
     "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, SymInt? block_size=None) -> Tensor")
@@ -52,7 +64,7 @@ def quantize(
 
     if block_size is not None:
         scale = _broadcast_shapes(scale, input, block_size)
-    return _quantize(input / scale, code)
+    return vmap(input / scale, code)
 
 quantized_decomposed_lib.define(
     "dequantize(Tensor input, Tensor scale, str? dtype, Tensor code) -> Tensor")
@@ -79,7 +91,7 @@ def dequantize(
     """
 
     if dtype is not None:
-        return _quantize(input, code) * scale
+        return vmap(input, code) * scale
     return input * scale
 
 quantized_decomposed_lib.define(
