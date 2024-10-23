@@ -359,6 +359,11 @@ def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModu
             torch.ops.aten.div.Tensor,
         ]:
             continue
+
+        dtypes = {arg.meta["val"].dtype for arg in n.args if isinstance(arg, torch.fx.Node)}
+        assert len(dtypes) <= 1
+        dtype = next(iter(dtypes)) if len(dtypes) > 0 else None
+
         args = list(n.args)
         new_args = []
         for i in range(len(args)):
@@ -368,7 +373,7 @@ def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModu
             prefix = "_tensor_constant_"
             get_new_attr_name = get_new_attr_name_with_prefix(prefix)
             tensor_constant_name = get_new_attr_name(model)
-            float_tensor = torch.tensor(float(args[i]), device=device)
+            float_tensor = torch.tensor(float(args[i]), dtype=dtype, device=device)
             model.register_buffer(tensor_constant_name, float_tensor)
             fake_mode = n.meta["val"].fake_mode
             with model.graph.inserting_before(n):
