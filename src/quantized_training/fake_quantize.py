@@ -37,8 +37,9 @@ def get_quantization_map(dtype, device=None):
     values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
     if dtype is None:
         return values
-    if (torch_dtype := getattr(torch, dtype, None)) is not None:
+    if dtype in ["float32", "float16", "bfloat16"]:
         # PyTorch native dtypes
+        torch_dtype = getattr(torch, dtype)
         return values.to(torch_dtype).to(torch.bfloat16)
     elif (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))

@@ -30,7 +30,6 @@ __all__ = [
     "prepare",
     "prepare_pt2e",
     "propagate_config",
-    "propagate_fake_tensor",
     "quantize",
     "quantize_to_fp8_e4m3",
     "quantize_to_fp8_e5m2",

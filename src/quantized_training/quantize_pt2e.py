@@ -534,8 +534,10 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 new_kwargs.setdefault("scale_wt", qparam_node_inp)
             else:
                 new_kwargs.setdefault("scale_inp", qparam_node_inp)
+
         if qparam_node_wt is not None:
             new_kwargs.setdefault("scale_wt", qparam_node_wt)
+
         # If user_node is a not a mx op, replace the node with its mx counterpart.
         # otherwise, replace one of its input with the quantized node
         if user_node.target in QUANT_OP_MAPPINGS:
@@ -545,11 +547,17 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                     user_node.args,
                     new_kwargs,
                 )
-            new_node.meta = user_node.meta
-            source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
-            source_fn_st.append((new_node.name, new_node.target))
+
             user_node.replace_all_uses_with(new_node)
             graph.erase_node(user_node)
+
+            new_node.meta = user_node.meta
+
+            source_fn_stack = new_node.meta.setdefault("source_fn_stack", [])
+            target = new_node.target
+            if len(source_fn_stack) > 0:
+                target = source_fn_stack[-1][1]
+            source_fn_stack.append((new_node.name, target))
         elif user_node.target in QUANT_OP_MAPPINGS.values():
             user_node.kwargs = new_kwargs
 
@@ -613,8 +621,11 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             for k, v in node.meta.items()
         }
 
-        source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
-        source_fn_st.append((new_node.name, new_node.target))
+        source_fn_stack = new_node.meta.setdefault("source_fn_stack", [])
+        target = new_node.target
+        if len(source_fn_stack) > 0:
+            target = source_fn_stack[-1][1]
+        source_fn_stack.append((new_node.name, target))
 
         return nodes_on_path
 
@@ -661,21 +672,6 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         graph.erase_node(output_node)
         graph.erase_node(quantize_op_inputs[1])
         graph.erase_node(quantize_op_inputs[3])
-
-
-def propagate_fake_tensor(model: GraphModule, example_inputs: Tuple[torch.Tensor]):
-    from torch.fx.passes.fake_tensor_prop import FakeTensorProp
-    from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
-    with FakeTensorMode(allow_non_fake_inputs=True) as fake_tensor_mode:
-        def to_fake_tensor(x):
-            if isinstance(x, torch.Tensor) and not isinstance(x, FakeTensor):
-                return fake_tensor_mode.from_tensor(x)
-            return x
-        example_inputs = tuple(map(to_fake_tensor, example_inputs))
-        FakeTensorProp(model, fake_tensor_mode).propagate(*example_inputs)
-    for node in model.graph.nodes:
-        if 'val' not in node.meta:
-            print(f"Node {node} does not have a val attribute")
 
 
 def eliminate_dead_code(self):

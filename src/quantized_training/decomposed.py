@@ -35,7 +35,6 @@ def vmap(input, code) -> torch.Tensor:
         indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
     return code[indices].to(input.dtype)
 
-
 quantized_decomposed_lib.define(
     "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, SymInt? block_size=None) -> Tensor")
 

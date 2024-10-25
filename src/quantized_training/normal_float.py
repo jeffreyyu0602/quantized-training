@@ -1,5 +1,7 @@
 import torch
 
+from .fp8 import quantize_to_fp8_e4m3
+
 
 def create_normal_map(offset=0.9677083, use_extra_value=True, k=4):
     try:
@@ -31,8 +33,10 @@ def create_normal_map(offset=0.9677083, use_extra_value=True, k=4):
     return values
 
 
-def quantize_to_nf(input: torch.Tensor, k: int):
-    values = create_normal_map(k=k)
+def quantize_to_nf(input: torch.Tensor, k: int, use_extra_value=True, use_fp8=False):
+    values = create_normal_map(k=k, use_extra_value=use_extra_value)
     values = values.to(dtype=torch.bfloat16, device=input.device)
+    if use_fp8:
+        values = quantize_to_fp8_e4m3(values)
     indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)
     return values[indices]
