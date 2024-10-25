@@ -22,7 +22,13 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
 from tqdm import tqdm
-from quantized_training import add_qspec_args, quantize
+from quantized_training import (
+    add_qspec_args,
+    convert_pt2e,
+    get_default_quantizer,
+    prepare_pt2e,
+    quantize,
+)
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -224,14 +230,40 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # If we are doing QAT or inference with batch norm folded, we need to swap
     # the intrinsic modules with their quantized counterparts.
-    args.do_train = True
-    quantize(model, args)
+    # args.do_train = True
+    # quantize(model, args)
 
-    example_inputs = torch.randn(1, 3, 224, 224).to(device)
-    if args.bf16:
-        example_inputs = example_inputs.bfloat16()
-    with torch.no_grad():
-        model(example_inputs)
+    # example_inputs = torch.randn(1, 3, 224, 224).to(device)
+    # if args.bf16:
+    #     example_inputs = example_inputs.bfloat16()
+    # with torch.no_grad():
+    #     model(example_inputs)
+
+    from utils import get_conv_bn_layers
+    conv_bn_pairs = get_conv_bn_layers(model)
+    model = torch.ao.quantization.fuse_modules(model.eval(), conv_bn_pairs)
+
+    quantizer = get_default_quantizer(
+        input_activation=args.activation,
+        output_activation=args.output_activation,
+        weight=args.weight,
+        bias=args.bias,
+        force_scale_power_of_two=args.force_scale_power_of_two,
+    )
+
+    torch_dtype = torch.bfloat16 if args.bf16 else None
+
+    example_args = (torch.randn(args.batch_size, 3, 224, 224, dtype=torch_dtype, device=device),)
+    bs = torch.export.Dim("bs", min=1, max=args.batch_size)
+    dynamic_shapes = {"x": {0: bs}}
+    model = prepare_pt2e(model, quantizer, example_args, dynamic_shapes=dynamic_shapes)
+
+    import types
+
+    def _eval(self, mode: bool = True):
+        pass
+
+    model.eval = types.MethodType(_eval, model)
 
     calibrate_dataset = datasets.ImageFolder(
         os.path.join(args.data, 'train'),
@@ -257,6 +289,8 @@ def main_worker(gpu, ngpus_per_node, args):
         for module in model.modules():
             if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
                 module.disable_observer()
+
+    convert_pt2e(model, args.bias)
 
     if args.model_id is not None:
         checkpoint = torch.load(args.model_id, map_location=device)
