@@ -26,7 +26,7 @@ quantized_decomposed_lib = Library("quantized_ops", "DEF")
 quantized_decomposed_lib.define("vmap(Tensor self, Tensor code) -> Tensor")
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
-def vmap(input, code) -> torch.Tensor:
+def vmap(input: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
     if input.dtype == torch.bfloat16:
         indices = input.view(torch.int16).to(torch.int32) & 0xffff
     else:

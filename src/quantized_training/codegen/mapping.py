@@ -46,45 +46,63 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
-def optimize_graph(model: GraphModule, mapping: Dict, custom_mapping=None):
+def replace_elementwise_with_vmap(
+    model: GraphModule,
+    mapping: Dict[str, Callable],
+    custom_mapping : Dict[str, Callable] = None
+) -> GraphModule:
     mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
     if custom_mapping is not None:
         mapped_sources.extend(custom_mapping)
 
-    unmapped_nodes = []
+    mapped_ops = set()
+    unknown_ops = set()
 
-    for node in model.graph.nodes:
+    for node in list(model.graph.nodes):
         if (
-            node.op != "call_function"
-            or node.target in mapped_sources
-            or _is_nop(node)
-            or _is_indexing_or_concatenation_op(node)
+            node.op != "call_function" or
+            _is_nop(node) or
+            _is_indexing_or_concatenation_op(node)
         ):
             continue
 
-        if (source_fn_st := node.meta.get("source_fn_stack", None)) is None:
-            unmapped_nodes.append(node)
+        source_fn_st = node.meta.get("source_fn_stack", [])
+        if source_fn_st and source_fn_st[-1][1] in mapped_sources:
+            mapped_ops.add(node.target)
             continue
 
-        source_fn = source_fn_st[-1]
-        if source_fn[1] not in mapped_sources:
-            unmapped_nodes.append(node)
+        if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
+            unknown_ops.add(node.target)
+            continue
 
-    mapped_nodes = [
-        n for n in model.graph.nodes
-        if n.op == 'call_function' and n not in unmapped_nodes
-    ]
-    mapped_ops = {node.target for node in mapped_nodes}
-    print("Mapped ops:")
-    print('\n'.join([str(op) for op in mapped_ops]))
+        logger.info(f"Replace {node.target} with value mapping")
 
-    unmapped_ops = {node.target for node in unmapped_nodes}
-    print("Unmapped ops:")
-    print('\n'.join([str(op) for op in unmapped_ops]))
+        values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
+        args = list(node.args)
+        val_map = node.target(values, *args[1:])
 
-    elementwise = {node.target for node in unmapped_nodes if _is_elementwise_op(node)}
-    print("Elementwise ops:")
-    print('\n'.join([str(op) for op in elementwise]))
+        from ..quantize_pt2e import create_getattr_from_value
+
+        with model.graph.inserting_before(node):
+            param_node = create_getattr_from_value(
+                model, model.graph, f'{node.name}_vmap_', val_map
+            )
+            new_node = model.graph.call_function(
+                torch.ops.quantized_ops.vmap, (args[0], param_node)
+            )
+
+        node.replace_all_uses_with(new_node)
+        model.graph.erase_node(node)
+
+    print("Mapped ops:\n" + '\n'.join(map(str, mapped_ops)))
+    print("Unknown ops:\n" + '\n'.join(map(str, unknown_ops)))
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+
+    return model
 
 
 def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
@@ -254,9 +272,11 @@ def split_multi_head_attention(model: GraphModule):
                     select_2.replace_all_uses_with(group[-1])
                     break
 
-    graph.eliminate_dead_code()
     graph.lint()
+
+    graph.eliminate_dead_code()
     model.recompile()
+
     return model
 
 
@@ -617,8 +637,10 @@ def fuse_operator(model: GraphModule, mapping=None):
                 input_node.meta['reshape'] = n
 
     graph.lint()
+
     graph.eliminate_dead_code()
     model.recompile()
+
     return model
 
 

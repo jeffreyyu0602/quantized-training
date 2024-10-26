@@ -10,6 +10,7 @@ __all__ = [
     "fuse_operator",
     "gen_code",
     "gen_compute_graph",
+    "replace_elementwise_with_vmap",
     "split_multi_head_attention",
     "visualize_memory_layout",
 ]

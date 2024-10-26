@@ -154,10 +154,10 @@ def transform(
         for stage, ops in pipeline.items()
     }
 
-    from quantized_training.codegen.mapping import optimize_graph
+    from quantized_training.codegen.mapping import replace_elementwise_with_vmap
 
     custom_mapping = [torch.ops.aten.softmax.int]
-    optimize_graph(gm, pipeline, custom_mapping)
+    replace_elementwise_with_vmap(gm, pipeline, custom_mapping)
 
     fuse_operator(gm, pipeline)
     gm.graph.print_tabular()

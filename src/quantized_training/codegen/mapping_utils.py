@@ -304,6 +304,7 @@ def _is_elementwise_op(node: Node) -> bool:
         # Quantization operations
         torch.ops.quantized_ops.dequantize,
         torch.ops.quantized_ops.quantize,
+        torch.ops.quantized_ops.vmap,
         # Not in the core aten operator set. Will be removed in the future.
         torch.ops.aten.silu.default,
     ]

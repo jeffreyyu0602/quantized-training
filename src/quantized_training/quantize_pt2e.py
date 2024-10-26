@@ -673,6 +673,13 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         graph.erase_node(quantize_op_inputs[1])
         graph.erase_node(quantize_op_inputs[3])
 
+    graph.lint()
+
+    graph.eliminate_dead_code()
+    model.recompile()
+
+    return model
+
 
 def eliminate_dead_code(self):
     """
