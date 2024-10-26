@@ -13,6 +13,9 @@ __all__ = [
     "dispatch_model",
     "dtype_byte_size",
     "get_device_map",
+    "get_aten_graph_module",
+    "get_node_name_to_scope",
+    "print_node_scope_tabular",
 ]
 
 

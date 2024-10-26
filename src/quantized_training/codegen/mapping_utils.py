@@ -188,8 +188,10 @@ def map_layer_norm(node, output_dir):
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
-    _set_tensor_field(param.weight, node.args[2], output_dir)
-    _set_tensor_field(param.bias, node.args[3], output_dir)
+    if len(node.args) > 2:
+        _set_tensor_field(param.weight, node.args[2], output_dir)
+    if len(node.args) > 3:
+        _set_tensor_field(param.bias, node.args[3], output_dir)
     return param
 
 

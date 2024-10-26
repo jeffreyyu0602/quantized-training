@@ -4,7 +4,7 @@ import logging
 import operator
 import os
 from collections import defaultdict
-from typing import List, Dict, Type
+from typing import List, Dict, Type, Callable
 
 import graphviz
 import torch
@@ -13,7 +13,6 @@ from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import (
-    check_subgraphs_connected,
     get_source_partitions,
     SourcePartition,
 )
@@ -76,12 +75,16 @@ def optimize_graph(model: GraphModule, mapping: Dict, custom_mapping=None):
         if n.op == 'call_function' and n not in unmapped_nodes
     ]
     mapped_ops = {node.target for node in mapped_nodes}
-    print("\nMapped ops:")
+    print("Mapped ops:")
     print('\n'.join([str(op) for op in mapped_ops]))
 
     unmapped_ops = {node.target for node in unmapped_nodes}
     print("Unmapped ops:")
     print('\n'.join([str(op) for op in unmapped_ops]))
+
+    elementwise = {node.target for node in unmapped_nodes if _is_elementwise_op(node)}
+    print("Elementwise ops:")
+    print('\n'.join([str(op) for op in elementwise]))
 
 
 def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
@@ -298,32 +301,23 @@ def _create_and_insert_subgraph(
     return new_node
 
 
-def _partitions_sequential(partitions: List[SourcePartition], node_order: Dict[Node, int]):
-    prev_partition = None
-    for partition in partitions:
-        if prev_partition is None:
-            prev_partition = partition
-            continue
-        if prev_partition is not None and not check_subgraphs_connected(
-            prev_partition, partition
-        ):
+def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
+    prev_node = nodes[0]
+    for n in nodes[1:]:
+        # Check if the current node is a user of the previous node
+        if n not in prev_node.users:
             return False
-        prev_output_node = prev_partition.output_nodes[0]
-        output_node = partition.output_nodes[0]
-        # Check if the two partitions are the same
-        if id(prev_output_node) == id(output_node):
-            return False
-        # Check if all the arguments of the output node are visited before the
-        # previous output node
-        for arg in output_node.args:
+        # Check if all the arguments of the current node are visited before the
+        # previous node
+        for arg in n.args:
             if (
                 isinstance(arg, Node)
+                and id(arg) != id(prev_node)
                 and arg.op == "call_function"
-                and id(arg) != id(prev_output_node)
-                and node_order[arg] > node_order[prev_output_node]
+                and order[arg] > order[prev_node]
             ):
                 return False
-        prev_partition = partition
+        prev_node = n
     return True
 
 
@@ -358,72 +352,85 @@ def make_partition(nodes: List[Node], module_type: Type = None) -> SourcePartiti
     )
 
 
-def fuse_operator(model: GraphModule, mapping=None):
-    if mapping is None:
-        mapping = {}
-
+def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
     graph = model.graph
 
     node_order = {node: idx for idx, node in enumerate(graph.nodes)}
-    named_modules = dict(model.named_modules(remove_duplicate=False))
-    fused_nodes: Dict[Node, None] = {}
+    nodes_fused: Dict[Node, None] = {}
 
-    fused_partitions = []
-    for wanted_sources in mapping.values():
+    fused_nodes_list = []
+    for wanted_sources in pattern:
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
 
-        if len(fused_partitions) == 0:
-            fused_partitions = partitions
+        if len(fused_nodes_list) == 0:
+            fused_nodes_list = [[p.output_nodes[0]] for p in partitions]
             continue
 
         if len(partitions) == 0:
             continue
 
         fusion_candidates = []
-        for fp in fused_partitions:
-            # If a node has already been fused at this round, skip it
-            if isinstance(fp, SourcePartition) and fp.output_nodes[0] in fused_nodes:
-                continue
-
+        for nodes in fused_nodes_list:
             # If the last node in the group has multiple users, it cannot be fused
-            last_node = fp[-1].output_nodes[0] if isinstance(fp, list) else fp.output_nodes[0]
+            last_node = nodes[-1]
             if len(last_node.users) > 1:
-                fusion_candidates.append(fp)
+                fusion_candidates.append(nodes)
                 continue
 
             # Include any NOP nodes after the last node in the group
-            nops = []
+            nop_nodes = []
             next_node = next(iter(last_node.users))
             while _is_nop(next_node) and len(next_node.users) == 1:
-                nops.append(make_partition(next_node))
+                nop_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
 
             matched = False
             for p in partitions:
-                if p.output_nodes[0] in fused_nodes:
+                output_node = p.output_nodes[0]
+                if output_node in nodes_fused:
                     continue
-                candidate = [*fp, *nops, p] if isinstance(fp, list) else [fp, *nops, p]
-                if _partitions_sequential(candidate, node_order):
+
+                candidate = [*nodes, *nop_nodes, output_node]
+                if _nodes_sequential(candidate, node_order):
                     matched = True
                     fusion_candidates.append(candidate)
-                    for c in candidate:
-                        fused_nodes[c.output_nodes[0]] = None
+                    for n in candidate:
+                        nodes_fused[n] = None
+                    if [output_node] in fused_nodes_list:
+                        fused_nodes_list.remove([output_node])
                     break
-            if not matched:
-                fusion_candidates.append(fp)
 
-        fused_partitions = [
-            p for p in fusion_candidates + partitions
-            if not (isinstance(p, SourcePartition) and p.output_nodes[0] in fused_nodes)
-        ]
+            if matched:
+                partitions.remove(p)
+            else:
+                fusion_candidates.append(nodes)
 
-    fused_partitions = [
-        [p.output_nodes[0] for p in fp] for fp in fused_partitions if isinstance(fp, list)
-    ]
+        fused_nodes_list = fusion_candidates + [[p.output_nodes[0]] for p in partitions]
+
+    return [fn for fn in fused_nodes_list if len(fn) > 1]
+
+
+def fuse_operator(model: GraphModule, mapping=None):
+    """
+    The logic for fusing reshape operations is that we first trace up the graph
+    until we reach a GEMM or elementwise operation. If we encounter a reshape operation
+    or a node that has either multiple inputs or users along the way, we stop and
+    try to fuse the node with its immediate user. For fusing a node with its user,
+    we trace down the graph until we reach a GEMM or elementwise operation. If we
+    encounter a node with multiple users, we duplicate all the elements on the path
+    and perform fusion on each branch.
+    """
+    graph = model.graph
+    named_modules = dict(model.named_modules(remove_duplicate=False))
+
+    if mapping is None:
+        mapping = {}
+
+    fused_nodes_list = find_sequential_nodes(model, mapping.values())
 
     def search_group(node):
-        for g in fused_partitions:
+        for g in fused_nodes_list:
             if node in g:
                 return g
         return None
@@ -431,19 +438,13 @@ def fuse_operator(model: GraphModule, mapping=None):
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
-        partition = partitions.pop(0)
-        output_node = partition.output_nodes[0]
+        output_node = partitions.pop(0).output_nodes[0]
 
-        # The logic for fusing reshape operations is that we first trace up the graph
-        # until we reach a GEMM or elementwise operation. If we encounter a reshape operation
-        # or a node that has either multiple inputs or users along the way, we stop and
-        # try to fuse the node with its immediate user. For fusing a node with its user,
-        # we trace down the graph until we reach a GEMM or elementwise operation. If we
-        # encounter a node with multiple users, we duplicate all the elements on the path
-        # and perform fusion on each branch.
+        match_found = True
+
         reshape_nodes = [output_node]
         prev_node = output_node.all_input_nodes[0]
-        fused = True
+
         while not (_is_gemm_op(prev_node) or _is_elementwise_op(prev_node)):
             # Reshape cannot be fused with a node that has multiple users or inputs
             if (
@@ -451,150 +452,148 @@ def fuse_operator(model: GraphModule, mapping=None):
                 len(prev_node.all_input_nodes) != 1 or
                 _is_reshape_op(prev_node)
             ):
-                fused = False
+                match_found = False
                 break
 
             if not (_is_nop(prev_node) or _is_indexing_or_concatenation_op(prev_node)):
                 logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
-                fused = False
+                match_found = False
                 break
 
             reshape_nodes.insert(0, prev_node)
             prev_node = prev_node.all_input_nodes[0]
 
         # We don't support fusing more than one reshape operation.
-        if fused and len(prev_node.users) == 1:
-            if prev_node in fused_nodes:
-                group = search_group(prev_node)
+        if match_found and len(prev_node.users) == 1:
+            if (group := search_group(prev_node)) is not None:
                 group.extend(reshape_nodes)
             else:
                 reshape_nodes.insert(0, prev_node)
-                fused_partitions.append(reshape_nodes)
-
-            for n in reshape_nodes:
-                fused_nodes[n] = None
+                fused_nodes_list.append(reshape_nodes)
             continue
+
+        match_found = True
 
         reshape_nodes = []
         next_node = output_node
-        fused = True
+
         while not (_is_gemm_op(next_node) or _is_elementwise_op(next_node)):
             if id(next_node) != id(output_node):
                 if _is_reshape_op(next_node):
-                    fused = False
+                    match_found = False
                     break
 
                 if not (_is_nop(next_node) or _is_indexing_or_concatenation_op(next_node)):
                     logger.warning(f"Cannot fuse reshape operation with {next_node.target}")
-                    fused = False
+                    match_found = False
                     break
 
             reshape_nodes.append(next_node)
 
             # If the node is the last node, stop.
             if len(next_node.users) == 0:
-                fused = False
+                match_found = False
                 break
 
             # If there is a divergence in the graph, duplicate the path
             # and perform fusion on each branch
             if len(next_node.users) != 1:
-                fused = False
-                groups = split_nodes_on_path(graph, reshape_nodes)
-                for g in groups:
-                    partitions.insert(0, make_partition(g[0]))
+                match_found = False
+                paths = split_nodes_on_path(graph, reshape_nodes)
+                for p in paths:
+                    partitions.insert(0, make_partition(p[0]))
                 break
 
             next_node = next(iter(next_node.users))
 
-        if not fused:
+        if not match_found:
             continue
 
-        if next_node in fused_nodes:
-            group = search_group(next_node)
+        if (group := search_group(next_node)) is not None:
             for n in reversed(reshape_nodes):
                 group.insert(0, n)
         else:
             reshape_nodes.append(next_node)
-            fused_partitions.append(reshape_nodes)
-            group = reshape_nodes
-
-        for n in reshape_nodes:
-            fused_nodes[n] = None
+            fused_nodes_list.append(reshape_nodes)
 
         # Switch order of transpose and select nodes
-        reshape_node = group[0]
-        if reshape_node.target == torch.ops.aten.transpose.int:
-            ndim = reshape_node.args[0].meta['val'].ndim
-            axes = [x if x >= 0 else x + ndim for x in reshape_node.args[1:]]
-            unfused_nodes = []
-            next_node = next(iter(reshape_node.users))
+        if output_node.target == torch.ops.aten.transpose.int:
+            ndim = output_node.args[0].meta['val'].ndim
+            axes = [x if x >= 0 else x + ndim for x in output_node.args[1:]]
+
+            select_nodes = []
+            next_node = next(iter(output_node.users))
+
             while (
                 next_node.target == torch.ops.aten.select.int
                 and next_node.args[1] == 0
                 and next_node.args[1] not in axes
             ):
-                unfused_nodes.append(next_node)
+                select_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
                 axes = [x - 1 for x in axes]
 
-            if len(unfused_nodes) > 0:
+            if len(select_nodes) > 0:
                 with graph.inserting_before(next_node):
-                    new_node = graph.node_copy(reshape_node, lambda _: unfused_nodes[-1])
-                next_node.replace_input_with(unfused_nodes[-1], new_node)
-                unfused_nodes[0].replace_input_with(reshape_node, reshape_node.args[0])
+                    new_node = graph.node_copy(output_node, lambda _: select_nodes[-1])
 
-                graph.erase_node(reshape_node)
+                next_node.replace_input_with(select_nodes[-1], new_node)
+                select_nodes[0].replace_input_with(output_node, output_node.args[0])
 
-                for n in unfused_nodes:
+                graph.erase_node(output_node)
+
+                group = search_group(output_node)
+                for n in select_nodes:
                     group.remove(n)
-                group.remove(reshape_node)
+                group.remove(output_node)
                 group.insert(0, new_node)
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
-        p = partitions.pop(0)
-        node = p.output_nodes[0]
+        dequantized_node = partitions.pop(0).output_nodes[0]
+
         # If the node is already fused, skip it
-        if search_group(node) is not None:
+        if search_group(dequantized_node) is not None:
             continue
-        # Fuse the dequantize node with its user
-        fused_nodes = []
-        next_node = node
-        fused = True
+
+        match_found = True
+
+        input_nodes = []
+        next_node = dequantized_node
+
+        # Find the immediate user of the dequantized node
         while (
-            id(next_node) == id(node) or
+            id(next_node) == id(dequantized_node) or
             _is_nop(next_node) or
             _is_indexing_or_concatenation_op(next_node)
         ):
-            fused_nodes.append(next_node)
+            input_nodes.append(next_node)
             if len(next_node.users) != 1:
-                fused = False
-                groups = split_nodes_on_path(graph, fused_nodes)
-                for g in groups:
-                    partitions.insert(0, make_partition(g[0]))
+                match_found = False
+                paths = split_nodes_on_path(graph, input_nodes)
+                for p in paths:
+                    partitions.insert(0, make_partition(p[0]))
                 break
             next_node = next(iter(next_node.users))
 
-        if not fused:
+        if not match_found:
             continue
 
         if (group := search_group(next_node)) is not None:
-            for n in reversed(fused_nodes):
-                if n not in group:
-                    user_node = next(iter(n.users))
-                    group.insert(group.index(user_node), n)
+            group.extend([n for n in input_nodes if n not in group])
         else:
-            fused_nodes.append(next_node)
-            fused_partitions.append(fused_nodes)
+            input_nodes.append(next_node)
+            fused_nodes_list.append(input_nodes)
 
     # Fuse nodes that appear earlier in the graph first
     node_order = {node: idx for idx, node in enumerate(graph.nodes)}
-    fused_partitions.sort(key=lambda x: node_order[x[0]])
+    for nodes in fused_nodes_list:
+        nodes.sort(key=lambda n: node_order[n])
+    fused_nodes_list.sort(key=lambda fn: node_order[fn[-1]])
 
-    for partition in fused_partitions:
-        node = _create_and_insert_subgraph(partition, model, named_modules)
+    for nodes in fused_nodes_list:
+        node = _create_and_insert_subgraph(nodes, model, named_modules)
         named_modules = dict(model.named_modules(remove_duplicate=False))
         gm = named_modules[node.target]
 

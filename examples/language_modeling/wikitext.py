@@ -77,9 +77,9 @@ def main(args):
         model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
     if args.gpu is None:
-        # Reserve 8 GB for activations
+        # Reserve 12 GB for activations
         max_memory = {
-            k: max(v - 8 * 1024 ** 3, 0)
+            k: max(v - 12 * 1024 ** 3, 0)
             for k, v in get_max_memory().items() if isinstance(k, int)
         }
         max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))

@@ -3,6 +3,7 @@ import copy
 import operator
 import os
 import logging
+from typing import List
 
 import torch
 from datasets import load_dataset
@@ -31,6 +32,7 @@ from quantized_training import (
     allocate_activations,
     allocate_weights,
     convert_pt2e,
+    get_aten_graph_module,
     fuse_operator,
     gen_code,
     gen_compute_graph,
@@ -59,11 +61,7 @@ task_to_keys = {
 
 quantized_ops = torch.ops.quantized_ops
 OPERATOR_MAPPINGS = {
-    "gemm": [
-        torch.nn.Conv2d, torch.nn.Linear, torch.matmul, operator.matmul,
-        quantized_ops.conv2d_mx.default,  quantized_ops.linear_mx.default,
-        quantized_ops.matmul_mx.default,
-    ],
+    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul, operator.matmul],
     "add": ["add", "add_", operator.add, torch.add, operator.iadd],
     "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
     "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
@@ -576,11 +574,55 @@ if __name__ == "__main__":
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
         convert_pt2e(gm)
 
+        # Replace LLaMA RMSNorm with ATen layer_norm
+        original_graph = gm.graph
+
+        from transformers.models.llama.modeling_llama import LlamaRMSNorm
+        layer_norm = LlamaRMSNorm(2048).bfloat16()
+
+        layer_norm_args = (torch.randn(1, 128, 2048, dtype=torch.bfloat16),)
+        pattern = get_aten_graph_module(layer_norm, layer_norm_args)
+        pattern = quantizer.transform_for_annotation(pattern)
+        pattern_graph = pattern.graph
+
+        from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
+
+        matcher = SubgraphMatcher(
+            pattern_graph,
+            match_output=False,
+            match_placeholder=False,
+            remove_overlapping_matches=True,
+            ignore_literals=False,
+        )
+        _matches: List[InternalMatch] = matcher.match(original_graph)
+        print(f"Found {len(_matches)} matches")
+
+        param_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
+
+        for match in _matches:
+            mapped_param_node = match.nodes_map[param_node]
+            layer_norm_inputs = [match.placeholder_nodes[0], [2048], mapped_param_node]
+            output_node = match.returning_nodes[0]
+            with original_graph.inserting_before(output_node):
+                new_node = original_graph.call_function(
+                    torch.ops.aten.layer_norm.default,
+                    tuple(layer_norm_inputs),
+                    {}
+                )
+            output_node.replace_all_uses_with(new_node)
+            original_graph.erase_node(output_node)
+ 
+        original_graph.lint()
+        original_graph.eliminate_dead_code()
+        gm.recompile()
+
         pt_out, gm_out = transform(
             gm,
             example_args,
             output_dir=args.output_dir,
         )
+    elif args.model == "llama_encoder":
+        pass
     elif args.model == "test":
         class TestModel(torch.nn.Module):
             def forward(self, x):
