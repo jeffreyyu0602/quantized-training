@@ -111,6 +111,53 @@ def get_conv_bn_layers(model):
     return layers
 
 
+def replace_rmsnorm_with_layer_norm(model):
+    """Replace LLaMA RMSNorm with ATen layer_norm
+    """
+    original_graph = model.graph
+
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    layer_norm = LlamaRMSNorm(2048).bfloat16()
+
+    example_args = (torch.randn(1, 128, 2048, dtype=torch.bfloat16),)
+    pattern = get_aten_graph_module(layer_norm, example_args)
+    pattern = quantizer.transform_for_annotation(pattern)
+    pattern_graph = pattern.graph
+
+    from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
+
+    matcher = SubgraphMatcher(
+        pattern_graph,
+        match_output=False,
+        match_placeholder=False,
+        remove_overlapping_matches=True,
+        ignore_literals=False,
+    )
+    _matches: List[InternalMatch] = matcher.match(original_graph)
+    print(f"Found {len(_matches)} matches")
+
+    param_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
+
+    for match in _matches:
+        mapped_param_node = match.nodes_map[param_node]
+        input_node = match.placeholder_nodes[0]
+        output_node = match.returning_nodes[0]
+        input_shape = input_node.meta["val"].shape
+        layer_norm_inputs = [input_node, [input_shape[-1]], mapped_param_node]
+        with original_graph.inserting_before(output_node):
+            new_node = original_graph.call_function(
+                torch.ops.aten.layer_norm.default,
+                tuple(layer_norm_inputs),
+                {}
+            )
+        output_node.replace_all_uses_with(new_node)
+        original_graph.erase_node(output_node)
+
+    original_graph.lint()
+    original_graph.eliminate_dead_code()
+    model.recompile()
+
+
 def transform(
     model: torch.fx.GraphModule,
     example_args,
@@ -220,6 +267,7 @@ TORCHVISION_MODELS = {
 if __name__ == "__main__":
     torch.manual_seed(0)
     torch.set_printoptions(precision=10)
+    torch.set_num_threads(32)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("model", default="resnet50")
@@ -539,8 +587,6 @@ if __name__ == "__main__":
         )
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
-        target_ids = input_ids.clone()
-
         inputs_embeds = model.model.embed_tokens(input_ids)
         cache_position = torch.arange(0, inputs_embeds.shape[1])
         position_ids = cache_position.unsqueeze(0)
@@ -574,47 +620,7 @@ if __name__ == "__main__":
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
         convert_pt2e(gm)
 
-        # Replace LLaMA RMSNorm with ATen layer_norm
-        original_graph = gm.graph
-
-        from transformers.models.llama.modeling_llama import LlamaRMSNorm
-        layer_norm = LlamaRMSNorm(2048).bfloat16()
-
-        layer_norm_args = (torch.randn(1, 128, 2048, dtype=torch.bfloat16),)
-        pattern = get_aten_graph_module(layer_norm, layer_norm_args)
-        pattern = quantizer.transform_for_annotation(pattern)
-        pattern_graph = pattern.graph
-
-        from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
-
-        matcher = SubgraphMatcher(
-            pattern_graph,
-            match_output=False,
-            match_placeholder=False,
-            remove_overlapping_matches=True,
-            ignore_literals=False,
-        )
-        _matches: List[InternalMatch] = matcher.match(original_graph)
-        print(f"Found {len(_matches)} matches")
-
-        param_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
-
-        for match in _matches:
-            mapped_param_node = match.nodes_map[param_node]
-            layer_norm_inputs = [match.placeholder_nodes[0], [2048], mapped_param_node]
-            output_node = match.returning_nodes[0]
-            with original_graph.inserting_before(output_node):
-                new_node = original_graph.call_function(
-                    torch.ops.aten.layer_norm.default,
-                    tuple(layer_norm_inputs),
-                    {}
-                )
-            output_node.replace_all_uses_with(new_node)
-            original_graph.erase_node(output_node)
- 
-        original_graph.lint()
-        original_graph.eliminate_dead_code()
-        gm.recompile()
+        replace_rmsnorm_with_layer_norm(gm)
 
         pt_out, gm_out = transform(
             gm,
@@ -622,7 +628,58 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
         )
     elif args.model == "llama_encoder":
-        pass
+        from transformers import AutoModelForCausalLM
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "meta-llama/Llama-3.2-1B"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="eager", # turn off flash attention
+        )
+
+        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        inputs_embeds = model.model.embed_tokens(input_ids)
+        cache_position = torch.arange(0, inputs_embeds.shape[1])
+        position_ids = cache_position.unsqueeze(0)
+        causal_mask = model.model._update_causal_mask(
+            None, inputs_embeds, cache_position, None, None
+        )
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+
+        class LlamaEncoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = model.model
+
+            def forward(self, hidden_states, causal_mask, position_embeddings):
+                layer_outputs = self.model.layers[0](
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_embeddings=position_embeddings,
+                )
+                return layer_outputs[0]
+
+        # Generate float32 model
+        position_embeddings = tuple(t.float() for t in position_embeddings)
+        example_args = (hidden_states.float(), causal_mask.float(), position_embeddings)
+
+        model = LlamaEncoder().float()
+
+        gm = prepare_pt2e(model, quantizer, example_args)
+        convert_pt2e(gm)
+
+        replace_rmsnorm_with_layer_norm(gm)
+
+        pt_out, gm_out = transform(
+            gm,
+            example_args,
+            output_dir=args.output_dir,
+        )
     elif args.model == "test":
         class TestModel(torch.nn.Module):
             def forward(self, x):
