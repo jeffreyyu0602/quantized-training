@@ -196,7 +196,7 @@ def transform(
 
     _fuse_quantize_dequantize_with_previous_op(gm)
 
-    pipeline = {
+    hardware_mapping = {
         0: ["gemm"],
         1: ["dequantize"],
         2: ["add", "sub", "mul", "div"],
@@ -207,17 +207,16 @@ def transform(
     }
 
     # If there is no corresponding mapping, we directly append the op string
-    pipeline = {
+    hardware_mapping = {
         stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
-        for stage, ops in pipeline.items()
+        for stage, ops in hardware_mapping.items()
     }
 
     from quantized_training.codegen.mapping import replace_elementwise_with_vmap
 
-    custom_mapping = [torch.ops.aten.softmax.int]
-    replace_elementwise_with_vmap(gm, pipeline, custom_mapping)
+    replace_elementwise_with_vmap(gm, hardware_mapping)
 
-    fuse_operator(gm, pipeline)
+    fuse_operator(gm, hardware_mapping)
     gm.graph.print_tabular()
 
     pt_out = model(*example_args, **example_kwargs)

@@ -49,11 +49,8 @@ DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 def replace_elementwise_with_vmap(
     model: GraphModule,
     mapping: Dict[str, Callable],
-    custom_mapping : Dict[str, Callable] = None
 ) -> GraphModule:
     mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
-    if custom_mapping is not None:
-        mapped_sources.extend(custom_mapping)
 
     mapped_ops = set()
     unknown_ops = set()
@@ -555,7 +552,10 @@ def fuse_operator(model: GraphModule, mapping=None):
 
             if len(select_nodes) > 0:
                 with graph.inserting_before(next_node):
-                    new_node = graph.node_copy(output_node, lambda _: select_nodes[-1])
+                    new_node = graph.call_function(
+                        torch.ops.aten.transpose.int,
+                        (select_nodes[-1], *axes),
+                    )
 
                 next_node.replace_input_with(select_nodes[-1], new_node)
                 select_nodes[0].replace_input_with(output_node, output_node.args[0])

@@ -461,8 +461,6 @@ def _is_nop(node: Node) -> bool:
         torch.ops.aten.clone.default,
         torch.ops.aten.contiguous.default,
         torch.ops.aten.dropout.default,
-        # TODO: remove?
-        torch.ops.aten.expand.default,
         torch.ops.aten.flatten.using_ints,
         torch.ops.aten.reshape.default,
         torch.ops.aten.squeeze.dim,
