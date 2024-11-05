@@ -736,15 +736,16 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
-        maybe_stack_node = next(iter(node.users))
-        if maybe_stack_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            first_node = maybe_stack_node.args[0][0]
-            tensor_sizes = [n.value.numel() * get_node_byte_size(n) for n in maybe_stack_node.args[0]]
+        # TODO: this is only ok for stacking/concatenating on the first dimension
+        next_node = next(iter(node.users))
+        if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            first_node = next_node.args[0][0]
+            tensor_sizes = [n.value.numel() * get_node_byte_size(n) for n in next_node.args[0]]
             if (memory := first_node.meta.get("memory", None)) is None:
                 memory = manager.allocate_memory(first_node, sum(tensor_sizes))
                 first_node.meta["memory"] = memory
 
-            index = maybe_stack_node.args[0].index(node)
+            index = next_node.args[0].index(node)
             if index > 0:
                 start_offset = memory.start + sum(tensor_sizes[:index])
                 size = tensor_sizes[index]

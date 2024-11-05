@@ -85,7 +85,6 @@ def main(args):
         max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))
         device_map = get_device_map(model, max_memory=max_memory)
         dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
-        model.graph.print_tabular()
 
     def calibrate(model):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")

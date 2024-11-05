@@ -160,10 +160,12 @@ def replace_rmsnorm_with_layer_norm(model):
 
 def eliminate_dtype_conversion(model: torch.fx.GraphModule):
     for node in list(model.graph.nodes):
-        if node.op != "call_function" or node.target != torch.ops.aten.to.dtype:
-            continue
-        node.replace_all_uses_with(node.args[0])
-        model.graph.erase_node(node)
+        if node.target == torch.ops.aten.to.dtype:
+            node.replace_all_uses_with(node.args[0])
+            model.graph.erase_node(node)
+
+        if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
+            node.args = node.args[:-1]
 
     model.graph.lint()
     model.recompile()
@@ -689,28 +691,6 @@ if __name__ == "__main__":
 
             position_embeddings = tuple(t.float() for t in position_embeddings)
             example_args = (hidden_states.float(), causal_mask.float(), position_embeddings)
-
-        pt_out, gm_out = transform(
-            gm,
-            example_args,
-            output_dir=args.output_dir,
-        )
-    elif args.model == "test":
-        class TestModel(torch.nn.Module):
-            def forward(self, x):
-                # outputs = torch.split_with_sizes(x, (5, 5))
-                # outputs = torch.ops.aten.split.sizes(x, (5, 5))
-                outputs = torch.split(x, (5, 5))
-                print(outputs)
-                outputs = torch.median(outputs[0])
-                return outputs
-
-        example_args = (torch.randn(10),)
-
-        TestModel()(*example_args)
-
-        gm = prepare_pt2e(TestModel(), quantizer, example_args)
-        convert_pt2e(gm)
 
         pt_out, gm_out = transform(
             gm,
