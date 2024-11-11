@@ -462,32 +462,39 @@ def fuse_operator(model: GraphModule, mapping=None):
         reshape_nodes = [output_node]
         prev_node = output_node.all_input_nodes[0]
 
-        while not (_is_gemm_op(prev_node) or _is_elementwise_op(prev_node)):
-            # Reshape cannot be fused with a node that has multiple users or inputs
-            if (
-                len(prev_node.users) > 1 or
-                len(prev_node.all_input_nodes) != 1 or
-                _is_reshape_op(prev_node)
-            ):
-                match_found = False
-                break
+        is_tranpose = False
 
-            if not (_is_nop(prev_node) or _is_indexing_or_concatenation_op(prev_node)):
-                logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
-                match_found = False
-                break
+        if output_node.target == torch.ops.aten.transpose.int:
+            ndim = output_node.args[0].meta['val'].ndim
+            axes = {x if x >= 0 else x + ndim for x in output_node.args[1:]}
+            is_tranpose = (axes == {ndim - 2, ndim - 1})
 
-            reshape_nodes.insert(0, prev_node)
-            prev_node = prev_node.all_input_nodes[0]
+        if not is_tranpose:
+            while not (_is_gemm_op(prev_node) or _is_elementwise_op(prev_node)):
+                # Reshape cannot be fused with a node that has multiple users or inputs
+                if (
+                    len(prev_node.users) > 1 or
+                    len(prev_node.all_input_nodes) != 1 or
+                    _is_reshape_op(prev_node)
+                ):
+                    match_found = False
+                    break
 
-        # We don't support fusing more than one reshape operation.
-        if match_found and len(prev_node.users) == 1:
-            if (group := search_group(prev_node)) is not None:
-                group.extend(reshape_nodes)
-            else:
+                if not (_is_nop(prev_node) or _is_indexing_or_concatenation_op(prev_node)):
+                    logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
+                    match_found = False
+                    break
+
                 reshape_nodes.insert(0, prev_node)
-                fused_nodes_list.append(reshape_nodes)
-            continue
+                prev_node = prev_node.all_input_nodes[0]
+
+            if match_found and len(prev_node.users) == 1:
+                if (group := search_group(prev_node)) is not None:
+                    group.extend(reshape_nodes)
+                else:
+                    reshape_nodes.insert(0, prev_node)
+                    fused_nodes_list.append(reshape_nodes)
+                continue
 
         match_found = True
 
