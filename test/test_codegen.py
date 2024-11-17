@@ -1,15 +1,9 @@
 import argparse
-import copy
-import operator
-import os
 import logging
 from typing import List
 
 import torch
 from datasets import load_dataset
-from google.protobuf import text_format
-from google.protobuf.json_format import MessageToJson
-from torch._export import capture_pre_autograd_graph
 from torch.utils.data import DataLoader
 from torchvision import models
 from transformers import (
@@ -24,25 +18,15 @@ from tqdm import tqdm
 from quantized_training import (
     DerivedQuantizationSpec,
     FusedAmaxObsFakeQuantize,
-    MemoryManager,
     QuantizationConfig,
     QuantizationSpec,
-    ShapeProp,
     add_qspec_args,
-    allocate_activations,
-    allocate_weights,
     convert_pt2e,
     get_aten_graph_module,
-    fuse_operator,
-    gen_code,
-    gen_compute_graph,
     get_default_quantizer,
     prepare_pt2e,
-    split_multi_head_attention,
-    visualize_memory_layout,
+    transform,
 )
-from quantized_training.quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
-from quantized_training.quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +41,6 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
-}
-
-quantized_ops = torch.ops.quantized_ops
-OPERATOR_MAPPINGS = {
-    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul, operator.matmul],
-    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
-    "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
-    "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
-    "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
-    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
-    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
-    "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
-    "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
-    "quantize": [quantized_ops.quantize],
-    "dequantize": [quantized_ops.dequantize],
 }
 
 
@@ -169,104 +138,6 @@ def eliminate_dtype_conversion(model: torch.fx.GraphModule):
 
     model.graph.lint()
     model.recompile()
-
-
-def transform(
-    model: torch.fx.GraphModule,
-    example_args,
-    example_kwargs=None,
-    *,
-    output_file="compute_graph",
-    output_dir=None
-):
-    if example_kwargs is None:
-        example_kwargs = {}
-
-    if isinstance(model, torch.fx.GraphModule):
-        gm = copy.deepcopy(model)
-    else:
-        gm = capture_pre_autograd_graph(model, example_args, example_kwargs)
-        _convert_scalars_to_attrs(gm)
-
-    from torch.utils._pytree import tree_flatten
-    flatten_args, spec = tree_flatten((example_args, example_kwargs))
-
-    ShapeProp(gm).propagate(*flatten_args)
-    split_multi_head_attention(gm)
-
-    ShapeProp(gm).propagate(*flatten_args)
-
-    _fuse_quantize_dequantize_with_previous_op(gm)
-
-    hardware_mapping = {
-        0: ["gemm"],
-        1: ["dequantize"],
-        2: ["add", "sub", "mul", "div"],
-        3: ["exp"],
-        4: ["add", "mul", "div"],
-        5: ["relu"],
-        7: ["quantize"],
-    }
-
-    # If there is no corresponding mapping, we directly append the op string
-    hardware_mapping = {
-        stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
-        for stage, ops in hardware_mapping.items()
-    }
-
-    from quantized_training.codegen.mapping import replace_elementwise_with_vmap
-
-    replace_elementwise_with_vmap(gm, hardware_mapping)
-
-    fuse_operator(gm, hardware_mapping)
-    gm.graph.print_tabular()
-
-    pt_out = model(*example_args, **example_kwargs)
-    gm_out = gm(*example_args, *list(example_kwargs.values()))
-
-    ShapeProp(gm).propagate(*flatten_args)
-
-    try:
-        manager = MemoryManager(1024 ** 4)
-        allocate_weights(gm, manager)
-        manager = MemoryManager(1024 ** 4)
-        allocate_activations(gm, manager)
-    except RuntimeError:
-        manager.print_partitions()
-        filename = os.path.join(output_dir, "memory_layout.png")
-        visualize_memory_layout(manager.snapshots, filename)
-        logger.error(f"Memory allocation failed. Memory layout saved to {filename}")
-
-    manager.print_partitions()
-    print("\nMemory allocated to tensors:")
-    for node in gm.graph.nodes:
-        if (partition := node.meta.get('memory', None)) is None:
-            print(f"Node {node.name} does not have memory allocated")
-            continue
-        print(f"{node.name}: {partition.start}, {partition.end}")
-
-    params = gen_code(
-        gm,
-        flatten_args,
-        os.path.join(output_dir, "tensor_files")
-    )
-
-    with open(os.path.join(output_dir, 'params.pb'), 'wb') as f:
-        f.write(params.SerializeToString())
-
-    with open(os.path.join(output_dir, 'params.txt'), "w") as f:
-        f.write(text_format.MessageToString(params))
-
-    with open(os.path.join(output_dir, 'params.json'), "w") as f:
-        f.write(MessageToJson(params))
-
-    layers = [p.name for p in params.params if p.WhichOneof("param_type") != "nop"]
-    with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
-        f.write('\n'.join(layers))
-
-    gen_compute_graph(gm, os.path.join(output_dir, output_file))
-
-    return pt_out, gm_out
 
 
 TORCHVISION_MODELS = {
