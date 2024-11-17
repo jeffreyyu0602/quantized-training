@@ -295,7 +295,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
     model: torch.fx.GraphModule,
     node: Node,
     modules: Dict[str, torch.nn.Module],
-    accumulation_dtype: str = None
+    output_dtype: str = None
 ):
     graph = model.graph
     assert modules is not None
@@ -364,13 +364,6 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
 
     for user_node in orig_fq_users:
         if _is_gemm_op(user_node):
-            # Infer the output data type from the bias data type
-            output_dtype = accumulation_dtype
-            if len(user_node.args) > 2 and (bias_node := user_node.args[2]) is not None:
-                if bias_node.op == 'get_attr':
-                    output_dtype = bias_node.meta.get("dtype", None)
-                elif bias_node.op == 'call_module':
-                    output_dtype = modules[bias_node.target].dtype
             user_node.meta["dtype"] = output_dtype
 
             # Insert dequantize node before the node that appear the earlist in the graph
@@ -706,7 +699,7 @@ def eliminate_dead_code(self):
     return changed
 
 
-def convert_pt2e(model: GraphModule, accumulation_dtype: str = None):
+def convert_pt2e(model: GraphModule, output_dtype: str = None):
     modules = dict(model.named_modules(remove_duplicate=False))
 
     eliminate_dead_code(model.graph)
@@ -720,7 +713,7 @@ def convert_pt2e(model: GraphModule, accumulation_dtype: str = None):
                     _replace_observer_with_quantize_mx_node_decomposed(model, node, modules)
                 else:
                     _replace_observer_with_quantize_dequantize_node_decomposed(
-                        model, node, modules, accumulation_dtype)
+                        model, node, modules, output_dtype)
 
     _eliminate_dequantize_with_no_effect(model)
     _fuse_quantize_dequantize_with_previous_op(model)
