@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from torch import nn
 from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize
+from quantized_training.quantizer import QuantizationSpec
 
 __all__ = [
     "QConfig",
@@ -36,7 +37,7 @@ def _create_fake_quant(quantization_spec, record_histogram, force_scale_power_of
     if quantization_spec is None:
         return nn.Identity
 
-    kwargs_dict = asdict(quantization_spec)
+    kwargs_dict = asdict(QuantizationSpec.from_str(quantization_spec))
     kwargs = copy.deepcopy(kwargs_dict)
     return FusedAmaxObsFakeQuantize.with_args(
         **kwargs,

@@ -80,6 +80,12 @@ def quantize(model, args, inplace=True):
     if getattr(args, 'bf16', False):
         model.bfloat16()
 
+    if args.activation is None:
+        args.quantize_forward = None
+
+    if args.error is None:
+        args.quantize_backprop = None
+
     qconfig = get_qconfig(
         args.activation,
         args.weight,
@@ -88,27 +94,10 @@ def quantize(model, args, inplace=True):
         args.force_scale_power_of_two,
     )
 
+    # TODO convert QAT modules to float modules after training
     propagate_config(model, 'qconfig', qconfig)
-
-    for name, param in model.named_parameters():
-        if 'bias' in name:
-            continue
-        obs_or_fq = qconfig.weight(device=param.device)
-        if getattr(obs_or_fq, 'qscheme', None) is not None:
-            obs_or_fq(param.data)
-        param.data = obs_or_fq(param.data)
-
-    # If doing quantization aware training, swap QAT modules. LoRA has custom
-    # implementation, so it needs to be swapped to match the training behavior.
-    if args.weight is not None and (args.do_train or args.lora_rank > 0):
-        convert(model, DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
-
-    if args.activation is None:
-        args.quantize_forward = None
-    if args.error is None:
-        args.quantize_backprop = None
+    convert(model, mapping=DEFAULT_QAT_MODULE_MAPPINGS, inplace=True)
     prepare(model, True, args.quantize_forward, args.quantize_backprop, args.op_fusion)
-
     return model
 
 def _parse_ops(op_str):

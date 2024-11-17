@@ -94,13 +94,11 @@ parser.add_argument('--max_pool2x2', action="store_true",
                     help="Whether to replace 3x3 maxpool with 2x2.")
 parser.add_argument('--bn_folding', action="store_true",
                     help="Whether to fold batch normalization into conv.")
-parser.add_argument('--model_id', default=None, help="Model checkpoint for evaluation.")
+parser.add_argument('--qat_model_id', default=None, help="Model checkpoint for evaluation.")
 parser.add_argument('--save_val_dataset', action="store_true",
                     help="Whether to save the validation dataset.")
 parser.add_argument('--output_dir', default=None,
                     help="Directory to save model checkpoints.")
-parser.add_argument('--convert', action="store_true",
-                    help="Convert intrinsic modules to float counterparts.")
 add_qspec_args(parser)
 
 best_acc1 = 0
@@ -219,53 +217,9 @@ def main_worker(gpu, ngpus_per_node, args):
         model.maxpool.stride = 2
         model.maxpool.padding = 0
 
-    if args.bn_folding:
-        from utils import get_conv_bn_layers
-        conv_bn_pairs = get_conv_bn_layers(model)
-        print(conv_bn_pairs)
-        # TODO there are two cases here: 1. Evaluate a QAT model trained with batch
-        # norm folded. 2. Evaluate a pretrained model and fold batch norm. We need
-        # to fuse models differently in these two cases.
-        model = torch.ao.quantization.fuse_modules_qat(model, conv_bn_pairs)
-
-    # If we are doing QAT or inference with batch norm folded, we need to swap
-    # the intrinsic modules with their quantized counterparts.
-    # args.do_train = True
-    # quantize(model, args)
-
-    # example_inputs = torch.randn(1, 3, 224, 224).to(device)
-    # if args.bf16:
-    #     example_inputs = example_inputs.bfloat16()
-    # with torch.no_grad():
-    #     model(example_inputs)
-
-    from utils import get_conv_bn_layers
-    conv_bn_pairs = get_conv_bn_layers(model)
-    model = torch.ao.quantization.fuse_modules(model.eval(), conv_bn_pairs)
-
-    quantizer = get_default_quantizer(
-        input_activation=args.activation,
-        output_activation=args.output_activation,
-        weight=args.weight,
-        bias=args.bias,
-        force_scale_power_of_two=args.force_scale_power_of_two,
-    )
-
     torch_dtype = torch.bfloat16 if args.bf16 else None
 
-    example_args = (torch.randn(args.batch_size, 3, 224, 224, dtype=torch_dtype, device=device),)
-    bs = torch.export.Dim("bs", min=1, max=args.batch_size)
-    dynamic_shapes = {"x": {0: bs}}
-    model = prepare_pt2e(model, quantizer, example_args, dynamic_shapes=dynamic_shapes)
-
-    import types
-
-    def _eval(self, mode: bool = True):
-        pass
-
-    model.eval = types.MethodType(_eval, model)
-
-    calibrate_dataset = datasets.ImageFolder(
+    calib_dataset = datasets.ImageFolder(
         os.path.join(args.data, 'train'),
         transforms.Compose([
             transforms.RandomResizedCrop(224),
@@ -273,46 +227,97 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
-        ]))
-    calibrate_dataset = Subset(calibrate_dataset, range(args.calibration_steps * args.batch_size))
-    data_loader = torch.utils.data.DataLoader(
-        calibrate_dataset, batch_size=args.batch_size, num_workers=args.workers,
-        pin_memory=True)
+        ])
+    )
+    calib_dataset = Subset(calib_dataset, range(max(args.calibration_steps, 1) * args.batch_size))
+    calib_loader = torch.utils.data.DataLoader(
+        calib_dataset, batch_size=args.batch_size, num_workers=args.workers, pin_memory=True)
 
     def calibrate(model):
         with torch.no_grad():
-            for images, target in tqdm(data_loader):
-                model(images.to(device))
+            for images, target in tqdm(calib_loader):
+                model(images.to(device, dtype=torch_dtype))
 
-    if args.calibration_steps > 0:
-        calibrate(model)
-        for module in model.modules():
-            if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
-                module.disable_observer()
+    example_inputs = next(iter(calib_loader))[0].to(device, dtype=torch_dtype)
 
-    convert_pt2e(model, args.bias)
+    from utils import get_conv_bn_layers
+    conv_bn_pairs = get_conv_bn_layers(model)
 
-    if args.model_id is not None:
-        checkpoint = torch.load(args.model_id, map_location=device)
-        model.load_state_dict(checkpoint['state_dict'])
-        print(f"best acc1: {checkpoint['best_acc1']}")
+    # Use eager mode quantization for QAT or when evaluating a QAT model.
+    # Use PT2E for post-training quantization
+    if not args.evaluate or args.qat_model_id is not None:
+        if args.bn_folding:
+            model = torch.ao.quantization.fuse_modules_qat(model, conv_bn_pairs)
 
+        quantize(model, args)
+
+        with torch.no_grad():
+            model(example_inputs)
+
+        # Perform PTQ before QAT and fix the scales
+        if args.calibration_steps > 0:
+            calibrate(model)
+            for module in model.modules():
+                if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                    module.disable_observer()
+
+        if args.qat_model_id is not None:
+            checkpoint = torch.load(args.qat_model_id, map_location=device)
+            model.load_state_dict(checkpoint['state_dict'])
+            print(f"best acc1: {checkpoint['best_acc1']}")
+
+        # Convert intrinsic modules (ConvBn) back to float modules
         def convert_model(module):
             modules = dict(module.named_children())
             for name, child in modules.items():
                 if isinstance(child, torch.ao.nn.intrinsic._FusedModule):
-                    # child._enable_slow_path_for_better_numerical_stability = True
                     new_mod = child.to_float()
                     for pre_hook in child._forward_pre_hooks.values():
                         new_mod.register_forward_pre_hook(pre_hook)
+                    if hasattr(child, 'activation_pre_process'):
+                        new_mod.add_module('activation_pre_process', child.activation_pre_process)
                     if hasattr(child, 'weight_fake_quant'):
                         new_mod.weight.data = child.weight_fake_quant(new_mod.weight.data)
                     module._modules[name] = new_mod
                 else:
                     convert_model(child)
 
-        if args.convert:
+        if args.convert_model:
             convert_model(model)
+    else:
+        if args.bn_folding:
+            model = torch.ao.quantization.fuse_modules(model.eval(), conv_bn_pairs)
+
+        if args.bf16:
+            model.bfloat16()
+
+        quantizer = get_default_quantizer(
+            input_activation=args.activation,
+            output_activation=args.output_activation,
+            weight=args.weight,
+            bias=args.bias,
+            force_scale_power_of_two=args.force_scale_power_of_two,
+        )
+
+        bs = torch.export.Dim("bs", min=1, max=args.batch_size)
+        dynamic_shapes = {"x": {0: bs}}
+        model = prepare_pt2e(model, quantizer, (example_inputs,), dynamic_shapes=dynamic_shapes)
+
+        import types
+
+        def _eval(self, mode: bool = True):
+            pass
+
+        model.eval = types.MethodType(_eval, model)
+
+        if args.calibration_steps > 0:
+            calibrate(model)
+            for module in model.modules():
+                if isinstance(module, torch.ao.quantization.FakeQuantizeBase):
+                    module.disable_observer()
+
+        if args.convert_model:
+            convert_pt2e(model, args.bias)
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
