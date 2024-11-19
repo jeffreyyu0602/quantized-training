@@ -30,7 +30,12 @@ from quantized_training.quantizer.quantizer import QuantizationSpec, DerivedQuan
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
-from .codegen.mapping_utils import _is_nop, _is_gemm_op
+from .codegen.mapping_utils import (
+    _is_gemm_op,
+    _is_indexing_or_concatenation_op,
+    _is_nop,
+    _is_reshape_op,
+)
 from .decomposed import quantized_decomposed_lib
 
 
@@ -336,9 +341,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
             qparam_node = create_getattr_from_value(
                 model, graph, next(iter(node.users)).name + "_scale_", scale)
             # TODO quantization map can be shared among multiple quantize nodes?
-            qmap_node = create_getattr_from_value(
+            get_attr_node = create_getattr_from_value(
                 model, graph, "code_", activation_post_process.code)
-            quantize_op_inputs = [node.args[0], qparam_node, input_dtype, qmap_node]
+            quantize_op_inputs = [node.args[0], qparam_node, input_dtype, get_attr_node]
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize,
                 tuple(quantize_op_inputs),
@@ -383,8 +388,8 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 with graph.inserting_before(maybe_dq_node):
                     qparam_node = create_getattr_from_value(
                         model, graph, user_node.name + "_scale_", scale)
-                    qmap_node = create_getattr_from_value(model, graph, "code_", code)
-                    dq_inputs = [user_node, qparam_node, output_dtype, qmap_node]
+                    get_attr_node = create_getattr_from_value(model, graph, "code_", code)
+                    dq_inputs = [user_node, qparam_node, output_dtype, get_attr_node]
                     dequantized_node = graph.call_function(
                         torch.ops.quantized_ops.dequantize,
                         tuple(dq_inputs),
@@ -491,13 +496,13 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 tuple(calculate_qparam_op_inputs),
                 {}
             )
-            qmap_node = create_getattr_from_value(
+            get_attr_node = create_getattr_from_value(
                 model, model.graph, "code_", activation_post_process.code)
             quantize_op_inputs = [
                 node.args[0],
                 qparam_node_inp,
                 activation_post_process.dtype,
-                qmap_node,
+                get_attr_node,
                 activation_post_process.block_size,
             ]
             quantized_node = model.graph.call_function(
@@ -577,94 +582,250 @@ def _eliminate_dequantize_with_no_effect(model: GraphModule):
 
 
 def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
+    """
+    Move quantize and dequantize nodes up the graph and place them after the
+    previous operation (e.g. matmul, conv2d, etc.), so that the quantize and
+    dequantize can be fused with the previous operation.
+    """
     graph = model.graph
 
-    def find_node_and_insert(node, prev_node=None):
+    def find_prev_op_and_move_node(node, prev_node=None):
         nodes_on_path = []
         prev_node = node.args[0] if prev_node is None else prev_node
         while len(prev_node.users) == 1:
-            if _is_nop(prev_node) or prev_node.target in [
-                torch.ops.aten.permute.default, torch.ops.aten.transpose.int,
+            # If there are multiple input nodes, trace each path separately
+            if prev_node.target in [
+                torch.ops.aten.stack.default, torch.ops.aten.cat.default
             ]:
                 nodes_on_path.append(prev_node)
-                prev_node = prev_node.args[0]
-            elif prev_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-                # If there is a split, trace each branch separately
-                nodes_on_path.append(prev_node)
                 for arg in prev_node.all_input_nodes:
-                    nodes_on_path.extend(find_node_and_insert(node, arg))
+                    nodes_on_path.extend(find_prev_op_and_move_node(node, arg))
                 return nodes_on_path
-            else:
+
+            # stack and cat are handled above, so we can safely assume that
+            # they won't appear here and there is only one input node
+            if (
+                not _is_nop(prev_node)
+                and not _is_reshape_op(prev_node)
+                and not _is_indexing_or_concatenation_op(prev_node)
+            ):
                 break
 
+            assert len(prev_node.all_input_nodes) == 1
+
+            nodes_on_path.append(prev_node)
+            prev_node = prev_node.args[0]
+
+        # Check if the quantize or dq node can be moved. In the case of a recursive
+        # call, nodes_on_path could be empty, so we need to check if prev_node is
+        # the same as the quantize or dq node.
         if id(prev_node) == id(node.args[0]):
             return None
 
         user = next(iter(prev_node.users))
         with model.graph.inserting_before(user):
             qparam_node = graph.node_copy(node.args[1])
-            qmap_node = graph.node_copy(node.args[3])
-            quantize_op_inputs = [prev_node, qparam_node, node.args[2], qmap_node]
+            get_attr_node = graph.node_copy(node.args[3])
+            quantize_op_inputs = [prev_node, qparam_node, node.args[2], get_attr_node]
             new_node = graph.call_function(node.target, tuple(quantize_op_inputs), {})
 
         user.replace_input_with(prev_node, new_node)
 
+        # Copy meta data from the original node, specifically dtype and source_fn_stack
         new_node.meta = {
             k: copy.deepcopy(v) if k != 'val' else v.clone()
             for k, v in node.meta.items()
         }
 
+        # Update source_fn_stack with new node name
         source_fn_stack = new_node.meta.setdefault("source_fn_stack", [])
-        target = new_node.target
-        if len(source_fn_stack) > 0:
-            target = source_fn_stack[-1][1]
+        target = source_fn_stack[-1][1] if len(source_fn_stack) > 0 else new_node.target
         source_fn_stack.append((new_node.name, target))
 
         return nodes_on_path
 
-    # Switch the order of dequantize nodes with stack and view nodes inserted
-    # during MHA splitting.
+    # First, move the dequantize nodes before the stack and view nodes that
+    # are inserted during MHA splitting. Then try to move quantize nodes forward
+    # to immediately after their previous ops (nodes that are not NOP).
+    quantized_ops = torch.ops.quantized_ops
+    partitions = get_source_partitions(
+        model.graph, [quantized_ops.dequantize, quantized_ops.quantize]
+    )
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        output_node = partition.output_nodes[0]
+        nodes_on_path = find_prev_op_and_move_node(output_node)
+        if nodes_on_path is None:
+            continue
+
+        # Update dtype annotation for all nodes on the path.
+        is_dequantize = output_node.target == quantized_ops.dequantize
+        for n in nodes_on_path:
+            if is_dequantize:
+                n.meta.pop("dtype", None)
+            else:
+                n.meta["dtype"] = output_node.meta.get("dtype", None)
+
+        # Remove the nodes from the graph. This has to be done at the end
+        # because we may need to copy and insert the nodes multiple times
+        # if there is stack or cat node in the path.
+        input_nodes = output_node.all_input_nodes
+        output_node.replace_all_uses_with(input_nodes[0])
+        graph.erase_node(output_node)
+        graph.erase_node(input_nodes[1])
+        graph.erase_node(input_nodes[2])
+
+    graph.lint()
+
+    graph.eliminate_dead_code()
+    model.recompile()
+
+    return model
+
+
+def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
+    import operator
+
+    graph = model.graph
+
+    device = assert_and_get_unique_device(model)
+
+    partitions = get_source_partitions(
+        model.graph, [operator.add, torch.add, operator.iadd]
+    )
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        add_node = partition.output_nodes[0]
+        print(f"Add node: {add_node.name}")
+
+        input_act0 = add_node.args[0]
+        dq_scale0 = 1
+        if input_act0.target == torch.ops.quantized_ops.dequantize:
+            dq_scale0 = model._buffers[input_act0.args[1].target].item()
+
+        input_act1 = add_node.args[1]
+        dq_scale1 = 1
+        if input_act1.target == torch.ops.quantized_ops.dequantize:
+            dq_scale1 = model._buffers[input_act1.args[1].target].item()
+
+        # If both inputs are not dequantize nodes, skip
+        if dq_scale0 == 1 and dq_scale1 == 1:
+            continue
+
+        # TODO handle the case where one of the inputs is a dequantize node
+        if dq_scale0 == 1 or dq_scale1 == 1:
+            print("One of the inputs is not a dequantize node")
+            continue
+
+        node_to_keep = input_act0 if dq_scale0 < dq_scale1 else input_act1
+
+        # Add a dequantize node after the add node
+        user = next(iter(add_node.users))
+        with graph.inserting_before(user):
+            new_node = graph.node_copy(
+                node_to_keep,
+                lambda n: add_node if n == node_to_keep.args[0] else n
+            )
+        user.replace_input_with(add_node, new_node)
+
+        node_to_keep.replace_all_uses_with(node_to_keep.args[0])
+        graph.erase_node(node_to_keep)
+        print(f"Move node: {node_to_keep.name} after node: {add_node.name}")
+
+        node_to_remove = input_act1 if node_to_keep == input_act0 else input_act0
+
+        if dq_scale0 == dq_scale1:
+            node_to_remove.replace_all_uses_with(node_to_remove.args[0])
+            graph.erase_node(node_to_remove)
+            print(f"Remove node: {node_to_remove.name}")
+        else:
+            qparam_node = node_to_remove.args[1]
+            new_scale = max(dq_scale0, dq_scale1) / min(dq_scale0, dq_scale1)
+
+            prev_node = node_to_remove.all_input_nodes[0]
+            if prev_node.target == torch.ops.quantized_ops.quantize and len(prev_node.users) == 1:
+                # If the previous node is a quantize node, simply update the dequantize scale.
+                # It will be later merged with the quantize node.
+                model.register_buffer(qparam_node.target, torch.tensor(new_scale, device=device))
+                print(f"Update scale for node: {node_to_remove.name} to {new_scale}\n")
+                continue
+            else:
+                # Else insert a quantize node before the dequantize node with 1 / scale
+                model.register_buffer(qparam_node.target, torch.tensor(1 / new_scale, device=device))
+                print(f"Update scale for node: {node_to_remove.name} to {new_scale}\n")
+
+                with graph.inserting_before(node_to_remove):
+                    get_attr_node = create_getattr_from_value(
+                        model, graph, "code_", get_quantization_map(output_dtype, device))
+                    quantize_op_inputs = [
+                        node_to_remove.args[0], qparam_node, output_dtype, get_attr_node
+                    ]
+                    quantized_node = graph.call_function(
+                        torch.ops.quantized_ops.quantize,
+                        tuple(quantize_op_inputs),
+                        {}
+                    )
+                node_to_remove.replace_all_uses_with(quantized_node)
+
+                graph.erase_node(node_to_remove)
+
     partitions = get_source_partitions(
         model.graph, [torch.ops.quantized_ops.dequantize]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     for partition in partitions:
-        output_node = partition.output_nodes[0]
-        nodes = find_node_and_insert(output_node)
-        if nodes is None:
+        dequantized_node = partition.output_nodes[0]
+        dq_scale = model._buffers[dequantized_node.args[1].target].item()
+        print(f"Dequantize node: {dequantized_node.name}")
+
+        # Try to merge the dequantize node with the previous quantize node
+        prev_node = dequantized_node.all_input_nodes[0]
+        if prev_node.target == torch.ops.quantized_ops.quantize and len(prev_node.users) == 1:
+            qparam_node = prev_node.args[1]
+            q_scale = model._buffers[qparam_node.target].item()
+
+            model.register_buffer(qparam_node.target, torch.tensor(q_scale / dq_scale, device=device))
+            print(f"New quantize scale: {q_scale / dq_scale}\n")
+
+            # Update quantization data type
+            get_attr_node = prev_node.args[3]
+            model.register_buffer(get_attr_node.target, get_quantization_map(output_dtype, device))
+
+            prev_node.args = (prev_node.args[0], qparam_node, output_dtype, get_attr_node)
+
+            dequantized_node.replace_all_uses_with(dequantized_node.args[0])
+            graph.erase_node(dequantized_node)
             continue
 
-        dq_inputs = list(output_node.args)
+        match_found = True
+        next_node = dequantized_node
+        while next_node.target != torch.ops.quantized_ops.quantize:
+            if len(next_node.users) != 1:
+                match_found = False
+                break
 
-        for n in nodes:
-            n.meta.pop("dtype", None)
+            if id(next_node) != id(dequantized_node) and next_node.target not in [
+                torch.ops.aten.adaptive_avg_pool2d.default,
+                torch.ops.aten.max_pool2d.default,
+                torch.ops.aten.relu.default,
+                torch.ops.aten.relu_.default,
+            ]:
+                match_found = False
+                break
 
-        output_node.replace_all_uses_with(dq_inputs[0])
+            next_node = next(iter(next_node.users))
 
-        graph.erase_node(output_node)
-        graph.erase_node(dq_inputs[1])
-        graph.erase_node(dq_inputs[3])
-
-    partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.quantize]
-    )
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
-        output_node = partition.output_nodes[0]
-        nodes = find_node_and_insert(output_node)
-        if nodes is None:
+        if not match_found:
             continue
 
-        quantize_op_inputs = list(output_node.args)
+        qparam_node = next_node.args[1]
+        q_scale = model._buffers[qparam_node.target].item()
 
-        for n in nodes:
-            n.meta["dtype"] = quantize_op_inputs[2]
+        model.register_buffer(qparam_node.target, torch.tensor(q_scale / dq_scale, device=device))
+        print(f"Update scale for node: {next_node.name} to {q_scale / dq_scale}\n")
 
-        output_node.replace_all_uses_with(quantize_op_inputs[0])
-
-        graph.erase_node(output_node)
-        graph.erase_node(quantize_op_inputs[1])
-        graph.erase_node(quantize_op_inputs[3])
+        dequantized_node.replace_all_uses_with(dequantized_node.args[0])
+        graph.erase_node(dequantized_node)
 
     graph.lint()
 
