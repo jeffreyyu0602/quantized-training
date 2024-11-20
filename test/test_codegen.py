@@ -551,6 +551,12 @@ if __name__ == "__main__":
         model = LlamaEncoder()
 
         gm = prepare_pt2e(model, quantizer, example_args)
+
+        # Calibrate using random inputs
+        for i in range(3):
+            calib_input = (torch.randn_like(hidden_states), causal_mask, position_embeddings)
+            gm(*calib_input)
+
         convert_pt2e(gm)
 
         replace_rmsnorm_with_layer_norm(gm)

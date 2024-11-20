@@ -669,11 +669,8 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         # Remove the nodes from the graph. This has to be done at the end
         # because we may need to copy and insert the nodes multiple times
         # if there is stack or cat node in the path.
-        input_nodes = output_node.all_input_nodes
-        output_node.replace_all_uses_with(input_nodes[0])
+        output_node.replace_all_uses_with(output_node.args[0])
         graph.erase_node(output_node)
-        graph.erase_node(input_nodes[1])
-        graph.erase_node(input_nodes[2])
 
     graph.lint()
 
