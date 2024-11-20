@@ -7,28 +7,16 @@ message Memory {
   uint64 offset = 2;
 }
 
-message Dim {
-  uint32 start = 1;
-  uint32 end = 2;
-  uint32 step = 3;
-}
-
-message SlicingOrReshapeOp {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  repeated Dim input_sizes = 4;
-  repeated Dim output_sizes = 5;
-  repeated int32 dims = 6;
-}
-
 message Tensor {
   string node = 1;
   string dtype = 2;
   repeated int32 shape = 3;
-  float scale = 4;
-  Memory memory = 5;
-  SlicingOrReshapeOp slicing_or_reshape = 6;
+  Memory memory = 4;
+  float scale = 5;
+  oneof fusion {
+    ReshapeOp reshape = 6;
+    SlicingOp slicing = 7;
+  }
 }
 
 message TensorArray {
@@ -40,29 +28,29 @@ message MXTensor {
   Tensor scale = 2;
 }
 
-// Define message for elementwise operations
-message VectorParam {
+// Elementwise and nonlinear operations
+message VectorOp {
   string name = 1;
   string opcode = 2;
-  oneof input_type {
+  oneof input_field {
     Tensor input = 3;
     float input_scalar = 4;
   }
-  oneof other_type {
+  oneof other_field {
     Tensor other = 5;
     float other_scalar = 6;
   }
 }
 
-// Define message for GEMM and layer norm
-message MatrixParam {
+// GEMM and layer normalization
+message MatrixOp {
   string name = 1;
   string opcode = 2;
-  oneof input_type {
+  oneof input_field {
     Tensor input = 3;
     MXTensor mx_input = 4;
   }
-  oneof weight_type {
+  oneof weight_field {
     Tensor weight = 5;
     MXTensor mx_weight = 6;
   }
@@ -73,8 +61,8 @@ message MatrixParam {
   int32 groups = 11;
 }
 
-// Define message for pooling operations
-message PoolingParam {
+// Pooling operations
+message PoolingOp {
   string name = 1;
   string opcode = 2;
   Tensor input = 3;
@@ -88,8 +76,8 @@ message PoolingParam {
   repeated int32 output_size = 11;  // for adaptive_avg_pool2d
 }
 
-// Define message for reduction and softmax operations
-message ReduceParam {
+// Reduction and complex operations (e.g. Softmax)
+message ReduceOp {
   string name = 1;
   string opcode = 2;
   Tensor input = 3;
@@ -97,26 +85,48 @@ message ReduceParam {
   bool keepdim = 5;
 }
 
-message NopParam {
+// Permutation and transposition operations
+message ReshapeOp {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  repeated int32 dims = 4;
+  repeated int32 output_sizes = 5;
+}
+
+// Slicing and indexing operations
+message SlicingOp {
+  string name = 1;
+  string opcode = 2;
+  Tensor input = 3;
+  uint32 dim = 4;
+  uint32 start = 5;
+  uint32 end = 6;
+  uint32 step = 7;
+  repeated int32 output_sizes = 8;
+}
+
+// Operations that do not change the underlying data
+message Nop {
   string name = 1;
   string opcode = 2;
   repeated Tensor inputs = 3;
 }
 
-// One of GEMM, reduction, or shape permutation operations
 message AcceleratorParam {
   string name = 1;
-  oneof param_type {
-    MatrixParam matrix_param = 2;
-    PoolingParam pooling_param = 3;
-    ReduceParam reduce_param = 4;
-    SlicingOrReshapeOp reshape_param = 5;
-    NopParam nop = 6;
+  oneof param {
+    MatrixOp matrix_param = 2;
+    PoolingOp pooling_param = 3;
+    ReduceOp reduce_param = 4;
+    ReshapeOp reshape_param = 5;
+    SlicingOp slicing_param = 6;
+    Nop nop_param = 7;
   }
-  repeated VectorParam vector_params = 7;
-  oneof output_type {
-    Tensor output = 8;
-    TensorArray outputs = 9;
+  repeated VectorOp vector_params = 8;
+  oneof output_field {
+    Tensor output = 9;
+    TensorArray outputs = 10;
   }
 }
 

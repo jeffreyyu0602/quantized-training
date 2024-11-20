@@ -8,14 +8,14 @@ import torch
 from torch.fx import Node
 
 from .param_pb2 import (
-    Dim,
-    MatrixParam,
-    NopParam,
-    PoolingParam,
-    ReduceParam,
-    SlicingOrReshapeOp,
+    MatrixOp,
+    Nop,
+    PoolingOp,
+    ReduceOp,
+    ReshapeOp,
+    SlicingOp,
     Tensor,
-    VectorParam,
+    VectorOp,
 )
 from ..pt2e_utils import dtype_byte_size
 
@@ -40,7 +40,7 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
     # of the last operation in the submodule.
     reshape_node = node.meta.get("reshape", None)
     if reshape_node is not None and (node.op != "call_module" or is_output):
-        param = SlicingOrReshapeOp()
+        param = ReshapeOp()
         param.name = reshape_node.name
         param.opcode = reshape_node.target.__name__.split(".")[0]
         param.dims.extend(
@@ -48,16 +48,10 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
             if reshape_node.target == torch.ops.aten.permute.default
             else reshape_node.args[1:]
         )
-        _set_dims(param.input_sizes, reshape_node.args[0].shape)
-        _set_dims(param.output_sizes, node.shape)
-        field.slicing_or_reshape.CopyFrom(param)
+        param.output_sizes.extend(node.shape)
+        field.reshape.CopyFrom(param)
         if not is_output:
             node = reshape_node.args[0]
-
-    # The reshape op can also be fused with a dequantize op.
-    if (dq_scale := node.meta.get("dq_scale", None)) is not None:
-        field.scale = dq_scale
-        node = node.args[0]
 
     if (getitem_node := node.meta.get("indexing", None)) is not None:
         # TODO duplicate logic. Refactor to a function
@@ -66,17 +60,20 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
         dim, start, end, step = list(getitem_node.args[1:]) + default_args
         end = min(end, input_shape[dim])
 
-        param = SlicingOrReshapeOp()
+        param = SlicingOp()
         param.name = getitem_node.name
         param.opcode = getitem_node.target.__name__.split(".")[0]
-        for i, d in enumerate(input_shape):
-            param.input_sizes.append(
-                _create_dim(start, end, step) if i == dim else _create_dim(0, d, 1)
-            )
-        for d in getitem_node.shape:
-            param.output_sizes.append(_create_dim(0, d, 1))
-        field.slicing_or_reshape.CopyFrom(param)
+        param.dim = dim
+        param.start = start
+        param.end = end
+        param.step = step
+        param.output_sizes.extend(node.shape)
+        field.slicing.CopyFrom(param)
         node = getitem_node.args[0]
+
+    if (dq_scale := node.meta.get("dq_scale", None)) is not None:
+        field.scale = dq_scale
+        node = node.args[0]
 
     if (source_node := node.meta.get("source_node", None)) is not None:
         node = source_node
@@ -129,7 +126,7 @@ def map_conv2d(node, output_dir):
         return None
     args = [None, None, None, 1, 0, 1, 1]
     args[:len(node.args)] = node.args
-    param = MatrixParam()
+    param = MatrixOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     if node.target == torch.ops.aten.conv2d.default:
@@ -159,7 +156,7 @@ def map_linear(node, output_dir):
         torch.ops.quantized_ops.linear_mx.default,
     ]:
         return None
-    param = MatrixParam()
+    param = MatrixOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     if node.target == torch.ops.aten.linear.default:
@@ -185,7 +182,7 @@ def map_matmul(node, output_dir):
         torch.ops.quantized_ops.matmul_mx.default,
     ]:
         return None
-    param = MatrixParam()
+    param = MatrixOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     if node.target == torch.ops.aten.matmul.default:
@@ -206,7 +203,7 @@ def map_layer_norm(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.layer_norm.default:
         return None
-    param = MatrixParam()
+    param = MatrixOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -336,7 +333,7 @@ def _is_elementwise_op(node: Node) -> bool:
 def map_elementwise(node, output_dir):
     if node.op != "call_function" or not _is_elementwise_op(node):
         return None
-    param = VectorParam()
+    param = VectorOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     if isinstance(node.args[0], Node):
@@ -381,7 +378,7 @@ def map_reduce(node, output_dir):
         torch.ops.quantized_ops.calculate_mx_qparam,
     ]:
         return None
-    param = ReduceParam()
+    param = ReduceOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -399,7 +396,7 @@ def map_avg_pool2d(node, output_dir):
         return None
     args = [None, None, [], 0, False, True, None]
     args[:len(node.args)] = node.args
-    param = PoolingParam()
+    param = PoolingOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, args[0], output_dir)
@@ -419,7 +416,7 @@ def map_adaptive_avg_pool2d(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.adaptive_avg_pool2d.default:
         return None
-    param = PoolingParam()
+    param = PoolingOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -436,7 +433,7 @@ def map_max_pool2d(node, output_dir):
         return None
     args = [None, None, [], 0, 1, False]
     args[:len(node.args)] = node.args
-    param = PoolingParam()
+    param = PoolingOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, args[0], output_dir)
@@ -455,7 +452,7 @@ def map_permute(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.permute.default:
         return None
-    param = SlicingOrReshapeOp()
+    param = ReshapeOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -470,7 +467,7 @@ def map_transpose(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.transpose.int:
         return None
-    param = SlicingOrReshapeOp()
+    param = ReshapeOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
@@ -515,7 +512,7 @@ def map_getitem(node, output_dir):
         return None
     from_node = node.args[0]
     assert all(isinstance(t, torch.Tensor) for t in from_node.value)
-    param = NopParam()
+    param = Nop()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
 
@@ -544,20 +541,6 @@ def _is_slicing_nop(node: Node) -> bool:
     return start == 0 and end > input_shape[dim] and step == 1
 
 
-def _create_dim(start, end, step):
-    dim = Dim()
-    dim.start = start
-    dim.end = end
-    dim.step = step
-    return dim
-
-
-def _set_dims(field, shape):
-    for d in shape:
-        field.append(_create_dim(0, d, 1))
-    return field
-
-
 @register_annotator("slice")
 def map_slice(node, output_dir):
     if node.op != "call_function" or node.target != torch.ops.aten.slice.Tensor:
@@ -570,16 +553,33 @@ def map_slice(node, output_dir):
     dim, start, end, step = list(node.args[1:]) + default_args[len(node.args) - 1:]
     end = min(end, input_shape[dim])
 
-    param = SlicingOrReshapeOp()
+    param = SlicingOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
-    for i, d in enumerate(input_shape):
-        param.input_sizes.append(
-            _create_dim(start, end, step) if i == dim else _create_dim(0, d, 1)
-        )
-    for d in node.shape:
-        param.output_sizes.append(_create_dim(0, d, 1))
+    param.dim = dim
+    param.start = start
+    param.end = end
+    param.step = step
+    param.output_sizes.extend(node.shape)
+    return param
+
+
+@register_annotator("select")
+def map_select(node, output_dir):
+    if node.op != "call_function" or node.target != torch.ops.aten.select.int:
+        return None
+    if node.args[1] == 0:
+        return None
+    param = SlicingOp()
+    param.name = node.name
+    param.opcode = node.target.__name__.split(".")[0]
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    param.dim = node.args[1]
+    param.start = node.args[2]
+    param.end = node.args[2] + 1
+    param.step = 1
+    param.output_sizes.extend(node.shape)
     return param
 
 
@@ -587,7 +587,7 @@ def map_slice(node, output_dir):
 def map_nop(node, output_dir):
     if not _is_nop(node) and not _is_slicing_nop(node):
         logger.warning(f"Unsupported operation {node.name}: {node.target}")
-    param = NopParam()
+    param = Nop()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     for n in node.all_input_nodes:

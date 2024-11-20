@@ -30,14 +30,15 @@ from .mapping_utils import (
 from .memory import MemoryManager, Partition
 from .param_pb2 import (
     AcceleratorParam,
-    MatrixParam,
+    MatrixOp,
     ModelParams,
-    NopParam,
-    PoolingParam,
-    ReduceParam,
-    SlicingOrReshapeOp,
+    Nop,
+    PoolingOp,
+    ReduceOp,
+    ReshapeOp,
+    SlicingOp,
     Tensor,
-    VectorParam,
+    VectorOp,
 )
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
@@ -822,8 +823,6 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             return dtype_byte_size(n.meta['dtype'])
         return dtype_byte_size(n.value.dtype)
 
-    # Allocate memory for intermediate tensors
-    visited: Dict[Node, None] = {}
     for node in model.graph.nodes:
         if node.op not in ["call_function", "call_module"]:
             continue
@@ -842,8 +841,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
-        if node.target == torch.ops.aten.select.int:
-            assert node.args[1] == 0, "Only support select on the first dimension"
+        if node.target == torch.ops.aten.select.int and node.args[1] == 0:
             size = node.value.numel() * get_node_byte_size(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
@@ -875,7 +873,6 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
                 node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
         else:
             node.meta["memory"] = manager.allocate_memory(node)
-        visited[node] = None
 
         nodes_to_delete = delete_unused_values(node)
         for n in nodes_to_delete:
@@ -913,27 +910,29 @@ def _compose_accelerator_param(node: Node, params: List, output_dir: str):
     else:
         _set_tensor_field(accelerator_param.output, node, output_dir, True)
 
-    if isinstance(params[0], MatrixParam):
+    if isinstance(params[0], MatrixOp):
         accelerator_param.matrix_param.CopyFrom(params[0])
         if len(params) > 1:
             accelerator_param.vector_params.extend(params[1:])
         return accelerator_param
 
-    if isinstance(params[0], VectorParam):
+    if isinstance(params[0], VectorOp):
         accelerator_param.vector_params.extend(params)
         return accelerator_param
 
     assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
     if params[0].opcode == "layer_norm":
         accelerator_param.matrix_param.CopyFrom(params[0])
-    elif isinstance(params[0], PoolingParam):
+    elif isinstance(params[0], PoolingOp):
         accelerator_param.pooling_param.CopyFrom(params[0])
-    elif isinstance(params[0], ReduceParam):
+    elif isinstance(params[0], ReduceOp):
         accelerator_param.reduce_param.CopyFrom(params[0])
-    elif isinstance(params[0], SlicingOrReshapeOp):
+    elif isinstance(params[0], ReshapeOp):
         accelerator_param.reshape_param.CopyFrom(params[0])
-    elif isinstance(params[0], NopParam):
-        accelerator_param.nop.CopyFrom(params[0])
+    elif isinstance(params[0], SlicingOp):
+        accelerator_param.slicing_param.CopyFrom(params[0])
+    elif isinstance(params[0], Nop):
+        accelerator_param.nop_param.CopyFrom(params[0])
     return accelerator_param
 
 
@@ -958,7 +957,7 @@ def gen_code(model, args, output_dir=None):
                 if _is_nop(n) or _is_reshape_op(n) or n.meta.get('fused', False):
                     continue
                 param = _map_operation(n, output_dir)
-                if param is not None and not isinstance(param, NopParam):
+                if param is not None and not isinstance(param, Nop):
                     params.append(param)
 
         if len(params) == 0:

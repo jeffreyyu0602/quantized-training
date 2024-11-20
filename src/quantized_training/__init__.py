@@ -138,7 +138,7 @@ def transform(
     with open(os.path.join(output_dir, 'params.txt'), "w") as f:
         f.write(text_format.MessageToString(params))
 
-    layers = [p.name for p in params.params if p.WhichOneof("param_type") != "nop"]
+    layers = [p.name for p in params.params if p.WhichOneof("param") != "nop_param"]
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(layers))
 
