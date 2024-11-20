@@ -652,7 +652,10 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         model.graph, [quantized_ops.dequantize, quantized_ops.quantize]
     )
     partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
+
+    node_order = {n: i for i, n in enumerate(graph.nodes)}
+    nodes_to_process = sorted(partitions, key=lambda p: node_order[p.output_nodes[0]])
+    for partition in nodes_to_process:
         output_node = partition.output_nodes[0]
         nodes_on_path = find_prev_op_and_move_node(output_node)
         if nodes_on_path is None:
