@@ -24,6 +24,7 @@ from .mapping_utils import (
     _is_indexing_or_concatenation_op,
     _is_nop,
     _is_reshape_op,
+    _is_slicing_nop,
     _set_tensor_field,
 )
 from .memory import MemoryManager, Partition
@@ -34,7 +35,7 @@ from .param_pb2 import (
     NopParam,
     PoolingParam,
     ReduceParam,
-    ReshapeParam,
+    SlicingOrReshapeOp,
     Tensor,
     VectorParam,
 )
@@ -51,25 +52,12 @@ def replace_elementwise_with_vmap(
     mapping: Dict[str, Callable],
 ) -> GraphModule:
     mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
-
-    mapped_ops = set()
-    unknown_ops = set()
-
     for node in list(model.graph.nodes):
-        if (
-            node.op != "call_function" or
-            _is_nop(node) or
-            _is_indexing_or_concatenation_op(node)
-        ):
+        if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
             continue
 
         source_fn_st = node.meta.get("source_fn_stack", [])
         if source_fn_st and source_fn_st[-1][1] in mapped_sources:
-            mapped_ops.add(node.target)
-            continue
-
-        if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
-            unknown_ops.add(node.target)
             continue
 
         logger.info(f"Replace {node.target} with value mapping")
@@ -81,18 +69,15 @@ def replace_elementwise_with_vmap(
         from ..quantize_pt2e import create_getattr_from_value
 
         with model.graph.inserting_before(node):
-            param_node = create_getattr_from_value(
-                model, model.graph, f'{node.name}_vmap_', val_map
+            get_attr_node = create_getattr_from_value(
+                model, model.graph, f'_tensor_constant_', val_map
             )
             new_node = model.graph.call_function(
-                torch.ops.quantized_ops.vmap, (args[0], param_node)
+                torch.ops.quantized_ops.vmap, (args[0], get_attr_node)
             )
 
         node.replace_all_uses_with(new_node)
         model.graph.erase_node(node)
-
-    print("Mapped ops:\n" + '\n'.join(map(str, mapped_ops)))
-    print("Unknown ops:\n" + '\n'.join(map(str, unknown_ops)))
 
     model.graph.lint()
 
@@ -246,6 +231,7 @@ def split_multi_head_attention(model: GraphModule):
         #       ...
         # select -> matmul -> stack -> view -> group N-1 -> select_1 -> select_2
         # select -> matmul /                 \ group N   -> select_1 -> select_2
+        # 
         # We can match the decomposed matmul nodes with a specific path and remove
         # the stack and view nodes. Each group perform a single head attention.
 
@@ -428,8 +414,77 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
     return [fn for fn in fused_nodes_list if len(fn) > 1]
 
 
+def transform_concat_nodes(model: GraphModule):
+    graph = model.graph
+
+    partitions = get_source_partitions(graph, [torch.stack, torch.cat])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    while len(partitions) > 0:
+        cat_node = partitions.pop(0).output_nodes[0]
+        if cat_node.target not in [
+            torch.ops.aten.cat.default, torch.ops.aten.stack.default
+        ]:
+            continue
+
+        input_shape = list(cat_node.args[0][0].shape)
+
+        concat_dim = 0 if len(cat_node.args) == 1 else cat_node.args[1]
+        if concat_dim < 0:
+            concat_dim += len(input_shape)
+
+        if concat_dim == 0:
+            continue
+
+        # Always stack along the first dimension
+        if cat_node.target == torch.ops.aten.stack.default:
+            cat_node.args = (cat_node.args[0], 0)
+            stack_node = cat_node
+        else:
+            with graph.inserting_after(cat_node):
+                stack_node = graph.call_function(
+                    torch.ops.aten.stack.default, (cat_node.args[0], 0)
+                )
+
+        # Permute the concatenated tensor to match the original order
+        dims = list(range(len(input_shape) + 1))[1:]
+        dims.insert(concat_dim, 0)
+
+        with graph.inserting_after(stack_node):
+            permute_node = graph.call_function(
+                torch.ops.aten.permute.default, (stack_node, dims),
+            )
+            # get_source_partitions expects 'permute' as the source function. This is
+            # hacky but there is no other way to set this meta field properly.
+            permute_node.meta['source_fn_stack'] = [(permute_node.name, 'permute')]
+            output_node = permute_node
+
+        # Flatten the permuted tensor if it is a cat operation
+        if cat_node.target == torch.ops.aten.cat.default:
+            with graph.inserting_after(permute_node):
+                output_node = graph.call_function(
+                    torch.ops.aten.flatten.using_ints,
+                    (permute_node, concat_dim, concat_dim + 1),
+                )
+
+        # Replace all use of the cat node with the new node
+        for node in list(cat_node.users):
+            if id(node) == id(output_node):
+                continue
+            node.replace_input_with(cat_node, output_node)
+
+        graph.erase_node(cat_node)
+
+    graph.lint()
+
+    graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
 def fuse_operator(model: GraphModule, mapping=None):
     """
+    Fuse reshape, slicing, and dequantize operations with their immediate users.
+
     The logic for fusing reshape operations is that we first trace up the graph
     until we reach a GEMM or elementwise operation. If we encounter a reshape operation
     or a node that has either multiple inputs or users along the way, we stop and
@@ -438,6 +493,8 @@ def fuse_operator(model: GraphModule, mapping=None):
     encounter a node with multiple users, we duplicate all the elements on the path
     and perform fusion on each branch.
     """
+    transform_concat_nodes(model)
+
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
@@ -445,6 +502,7 @@ def fuse_operator(model: GraphModule, mapping=None):
         mapping = {}
 
     fused_nodes_list = find_sequential_nodes(model, mapping.values())
+    node_map = {}
 
     def search_group(node):
         for g in fused_nodes_list:
@@ -457,11 +515,6 @@ def fuse_operator(model: GraphModule, mapping=None):
     while len(partitions) > 0:
         output_node = partitions.pop(0).output_nodes[0]
 
-        match_found = True
-
-        reshape_nodes = [output_node]
-        prev_node = output_node.all_input_nodes[0]
-
         is_tranpose = False
 
         if output_node.target == torch.ops.aten.transpose.int:
@@ -470,7 +523,16 @@ def fuse_operator(model: GraphModule, mapping=None):
             is_tranpose = (axes == {ndim - 2, ndim - 1})
 
         if not is_tranpose:
-            while not (_is_gemm_op(prev_node) or _is_elementwise_op(prev_node)):
+            match_found = True
+            fused_nodes = [output_node]
+            prev_node = output_node.all_input_nodes[0]
+
+            while not _is_gemm_op(prev_node) and not _is_elementwise_op(prev_node):
+                if not _is_nop(prev_node) and not _is_slicing_nop(prev_node):
+                    logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
+                    match_found = False
+                    break
+
                 # Reshape cannot be fused with a node that has multiple users or inputs
                 if (
                     len(prev_node.users) > 1 or
@@ -480,78 +542,68 @@ def fuse_operator(model: GraphModule, mapping=None):
                     match_found = False
                     break
 
-                if not (_is_nop(prev_node) or _is_indexing_or_concatenation_op(prev_node)):
-                    logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
-                    match_found = False
-                    break
-
-                reshape_nodes.insert(0, prev_node)
+                fused_nodes.insert(0, prev_node)
                 prev_node = prev_node.all_input_nodes[0]
 
             if match_found and len(prev_node.users) == 1:
+                node_map[output_node] = prev_node
                 if (group := search_group(prev_node)) is not None:
-                    group.extend(reshape_nodes)
+                    group.extend(fused_nodes)
                 else:
-                    reshape_nodes.insert(0, prev_node)
-                    fused_nodes_list.append(reshape_nodes)
+                    fused_nodes.insert(0, prev_node)
+                    fused_nodes_list.append(fused_nodes)
                 continue
 
         match_found = True
-
-        reshape_nodes = []
+        fused_nodes = []
         next_node = output_node
 
-        while not (_is_gemm_op(next_node) or _is_elementwise_op(next_node)):
-            if id(next_node) != id(output_node):
-                if _is_reshape_op(next_node):
-                    match_found = False
-                    break
-
-                if not (_is_nop(next_node) or _is_indexing_or_concatenation_op(next_node)):
-                    logger.warning(f"Cannot fuse reshape operation with {next_node.target}")
-                    match_found = False
-                    break
-
-            reshape_nodes.append(next_node)
-
-            # If the node is the last node, stop.
-            if len(next_node.users) == 0:
+        while not _is_gemm_op(next_node) and not _is_elementwise_op(next_node):
+            # Reshape can be fused with aten.select.int if and only if the select index is 0
+            if (
+                id(next_node) != id(output_node)
+                and not _is_nop(next_node)
+                and not _is_slicing_nop(next_node)
+                and not (next_node.target == torch.ops.aten.select.int and next_node.args[1] == 0)
+            ):
+                logger.warning(f"Cannot fuse {next_node} with {output_node}")
                 match_found = False
                 break
 
-            # If there is a divergence in the graph, duplicate the path
+            fused_nodes.append(next_node)
+
+            # If there is a divergent path in the graph, duplicate the node
             # and perform fusion on each branch
             if len(next_node.users) != 1:
                 match_found = False
-                paths = split_nodes_on_path(graph, reshape_nodes)
-                for p in paths:
+                paths = split_nodes_on_path(graph, fused_nodes)
+                for p in reversed(paths):
                     partitions.insert(0, make_partition(p[0]))
                 break
 
+            node_map[output_node] = next_node
             next_node = next(iter(next_node.users))
 
         if not match_found:
+            node_map.pop(output_node, None)
             continue
 
         if (group := search_group(next_node)) is not None:
-            for n in reversed(reshape_nodes):
-                group.insert(0, n)
+            group.extend(fused_nodes)
         else:
-            reshape_nodes.append(next_node)
-            fused_nodes_list.append(reshape_nodes)
+            fused_nodes.append(next_node)
+            fused_nodes_list.append(fused_nodes)
 
         # Switch order of transpose and select nodes
         if output_node.target == torch.ops.aten.transpose.int:
-            ndim = output_node.args[0].meta['val'].ndim
-            axes = [x if x >= 0 else x + ndim for x in output_node.args[1:]]
-
             select_nodes = []
             next_node = next(iter(output_node.users))
+            ndim = output_node.args[0].meta['val'].ndim
+            axes = [x if x >= 0 else x + ndim for x in output_node.args[1:]]
 
             while (
                 next_node.target == torch.ops.aten.select.int
                 and next_node.args[1] == 0
-                and next_node.args[1] not in axes
             ):
                 select_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
@@ -560,20 +612,73 @@ def fuse_operator(model: GraphModule, mapping=None):
             if len(select_nodes) > 0:
                 with graph.inserting_before(next_node):
                     new_node = graph.call_function(
-                        torch.ops.aten.transpose.int,
-                        (select_nodes[-1], *axes),
+                        torch.ops.aten.transpose.int, (select_nodes[-1], *axes),
                     )
 
                 next_node.replace_input_with(select_nodes[-1], new_node)
                 select_nodes[0].replace_input_with(output_node, output_node.args[0])
-
                 graph.erase_node(output_node)
 
                 group = search_group(output_node)
+                group.insert(0, new_node)
+                group.remove(output_node)
                 for n in select_nodes:
                     group.remove(n)
-                group.remove(output_node)
-                group.insert(0, new_node)
+
+                user_node = node_map.pop(output_node, None)
+                node_map[new_node] = new_node if user_node == select_nodes[-1] else user_node
+
+    partitions = get_source_partitions(graph, [operator.getitem])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    while len(partitions) > 0:
+        slice_node = partitions.pop(0).output_nodes[0]
+
+        if slice_node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
+            print(f"Unrecognized getitem operation: {slice_node.target}")
+            continue
+
+        if _is_slicing_nop(slice_node) or (
+            slice_node.target == torch.ops.aten.select.int and slice_node.args[1] == 0
+        ):
+            print(f"Node {slice_node.name} is a nop or can be handled by memory planner.")
+            continue
+
+        match_found = True
+        fused_nodes = []
+        next_node = slice_node
+
+        # Slicing can only be fused with vector operations
+        while not _is_elementwise_op(next_node):
+            if (
+                id(next_node) != id(slice_node)
+                and not _is_nop(next_node)
+                and not _is_slicing_nop(next_node)
+            ):
+                logger.warning(f"Cannot fuse {next_node} with {slice_node}")
+                match_found = False
+                break
+
+            fused_nodes.append(next_node)
+
+            if len(next_node.users) != 1:
+                match_found = False
+                paths = split_nodes_on_path(graph, fused_nodes)
+                for p in reversed(paths):
+                    partitions.insert(0, make_partition(p[0]))
+                break
+
+            node_map[slice_node] = next_node
+            next_node = next(iter(next_node.users))
+
+        if not match_found:
+            node_map.pop(slice_node, None)
+            continue
+
+        if (group := search_group(next_node)) is not None:
+            group.extend(fused_nodes)
+        else:
+            fused_nodes.append(next_node)
+            fused_nodes_list.append(fused_nodes)
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -585,33 +690,40 @@ def fuse_operator(model: GraphModule, mapping=None):
             continue
 
         match_found = True
-
-        input_nodes = []
+        fused_nodes = []
         next_node = dequantized_node
 
-        # Find the immediate user of the dequantized node
-        while (
-            id(next_node) == id(dequantized_node) or
-            _is_nop(next_node) or
-            _is_indexing_or_concatenation_op(next_node)
-        ):
-            input_nodes.append(next_node)
+        while not _is_elementwise_op(next_node) or id(next_node) == id(dequantized_node):
+            if (
+                id(next_node) != id(dequantized_node)
+                and not _is_nop(next_node)
+                and not _is_slicing_nop(next_node)
+            ):
+                logger.warning(f"Cannot fuse {next_node} with {dequantized_node}")
+                match_found = False
+                break
+
+            fused_nodes.append(next_node)
+
             if len(next_node.users) != 1:
                 match_found = False
-                paths = split_nodes_on_path(graph, input_nodes)
-                for p in paths:
+                paths = split_nodes_on_path(graph, fused_nodes)
+                for p in reversed(paths):
                     partitions.insert(0, make_partition(p[0]))
                 break
+
+            node_map[dequantized_node] = next_node
             next_node = next(iter(next_node.users))
 
         if not match_found:
+            node_map.pop(dequantized_node, None)
             continue
 
         if (group := search_group(next_node)) is not None:
-            group.extend([n for n in input_nodes if n not in group])
+            group.extend([n for n in fused_nodes if n not in group])
         else:
-            input_nodes.append(next_node)
-            fused_nodes_list.append(input_nodes)
+            fused_nodes.append(next_node)
+            fused_nodes_list.append(fused_nodes)
 
     # Fuse nodes that appear earlier in the graph first
     node_order = {node: idx for idx, node in enumerate(graph.nodes)}
@@ -619,29 +731,36 @@ def fuse_operator(model: GraphModule, mapping=None):
         nodes.sort(key=lambda n: node_order[n])
     fused_nodes_list.sort(key=lambda fn: node_order[fn[-1]])
 
-    for nodes in fused_nodes_list:
-        node = _create_and_insert_subgraph(nodes, model, named_modules)
+    node_map = {v.name: k.name for k, v in node_map.items()}
+
+    for fused_nodes in fused_nodes_list:
+        node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
         named_modules = dict(model.named_modules(remove_duplicate=False))
         gm = named_modules[node.target]
 
-        # If a permute operation is at the output, annotate the output node.
-        # Otherwise, annotate the immediate user of the permute operation.
-        for n in gm.graph.nodes:
-            if n.op != 'call_function' or n.target not in [
-                torch.ops.aten.permute.default,
-                torch.ops.aten.transpose.int,
-            ]:
-                continue
+        buffers = dict(model.named_buffers())
 
-            user = next(iter(n.users))
-            if user.op == 'output':
-                node.meta['reshape'] = n
-            else:
-                input_node = n
-                while _is_nop(user):
-                    input_node = user
-                    user = next(iter(user.users))
-                input_node.meta['reshape'] = n
+        nodes = list(gm.graph.nodes)
+        for n in nodes:
+            if (name := node_map.get(n.name, None)) is None:
+                continue
+            source_node = next(iter(n for n in nodes if n.name == name))
+
+            # A small trick to skip generating the param for this node
+            source_node.meta['fused'] = True
+
+            if _is_reshape_op(source_node):
+                if next(iter(source_node.users)).op == 'output':
+                    node.meta['reshape'] = source_node
+                else:
+                    n.meta['reshape'] = source_node
+            elif source_node.target == torch.ops.quantized_ops.dequantize:
+                get_attr_node = source_node.args[1]
+                # get_attr_node is a placeholder node. We assume that the attribute
+                # name is equal to the placeholder name.
+                n.meta['dq_scale'] = buffers[get_attr_node.target]
+            elif _is_indexing_or_concatenation_op(source_node):
+                n.meta['indexing'] = source_node
 
     graph.lint()
 
@@ -677,7 +796,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
     node_to_last_use : Dict[Node, Node] = {}
     user_to_last_uses : Dict[Node, List[Node]] = {}
 
-    def register_last_uses(n : Node, user : Node):
+    def register_last_uses(n: Node, user: Node):
         if n.op != 'get_attr' and n not in node_to_last_use:
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
@@ -686,7 +805,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         map_arg(node.args, lambda n: register_last_uses(n, node))
         map_arg(node.kwargs, lambda n: register_last_uses(n, node))
 
-    def delete_unused_values(user : Node):
+    def delete_unused_values(user: Node):
         """
         Delete values after their last use. This ensures that values that are
         not used in the remainder of the code are freed and the memory usage
@@ -697,6 +816,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
                 nodes_to_delete.extend(delete_unused_values(n))
         return nodes_to_delete
+    
+    def get_node_byte_size(n: Node):
+        if n.meta.get('dtype', None) is not None:
+            return dtype_byte_size(n.meta['dtype'])
+        return dtype_byte_size(n.value.dtype)
 
     # Allocate memory for intermediate tensors
     visited: Dict[Node, None] = {}
@@ -705,19 +829,9 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             continue
 
         # Propagate memory metadata for nop nodes
-        # TODO: slice op and non-zero select op should be handled separately
-        if (
-            _is_nop(node)
-            or node.target == torch.ops.aten.slice.Tensor
-            or node.target == torch.ops.aten.select.int and node.args[1] != 0
-        ):
+        if _is_nop(node) or _is_slicing_nop(node):
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             continue
-
-        def get_node_byte_size(n):
-            if n.meta.get('dtype', None) is not None:
-                return dtype_byte_size(n.meta['dtype'])
-            return dtype_byte_size(n.value.dtype)
 
         if node.target == operator.getitem:
             sizes = [t.numel() * dtype_byte_size(t.dtype) for t in node.args[0].value]
@@ -738,12 +852,14 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # We use the partition of the first input tensor since it preallocates
         # memory for all the tensors in the stack operation (read below)
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            assert len(node.args) == 1 or node.args[1] == 0, (
+                "Only support stack/cat on the first dimension"
+            )
             node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
             continue
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
-        # TODO: this is only ok for stacking/concatenating on the first dimension
         next_node = next(iter(node.users))
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = next_node.args[0][0]
@@ -814,7 +930,7 @@ def _compose_accelerator_param(node: Node, params: List, output_dir: str):
         accelerator_param.pooling_param.CopyFrom(params[0])
     elif isinstance(params[0], ReduceParam):
         accelerator_param.reduce_param.CopyFrom(params[0])
-    elif isinstance(params[0], ReshapeParam):
+    elif isinstance(params[0], SlicingOrReshapeOp):
         accelerator_param.reshape_param.CopyFrom(params[0])
     elif isinstance(params[0], NopParam):
         accelerator_param.nop.CopyFrom(params[0])
@@ -826,7 +942,6 @@ def gen_code(model, args, output_dir=None):
         os.makedirs(output_dir, exist_ok=True)
 
     named_modules = dict(model.named_modules(remove_duplicate=False))
-    buffers = dict(model.named_buffers())
 
     ShapeProp(model).propagate(*args)
     model_params = ModelParams()
@@ -840,24 +955,13 @@ def gen_code(model, args, output_dir=None):
             n_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
             ShapeProp(gm).propagate(*n_args)
             for n in gm.graph.nodes:
-                if _is_nop(n) or _is_reshape_op(n):
+                if _is_nop(n) or _is_reshape_op(n) or n.meta.get('fused', False):
                     continue
-
-                # Skip dequantize nodes that are fused with inputs
-                if (
-                    n.target == torch.ops.quantized_ops.dequantize
-                    and n.args[0].op == 'placeholder'
-                ):
-                    qparam_node = n.args[1]
-                    if qparam_node.op == 'placeholder':
-                        qparam_node = qparam_node.meta['source_node']
-                    n.meta['dq_scale'] = buffers[qparam_node.target]
-                    continue
-
                 param = _map_operation(n, output_dir)
                 if param is not None and not isinstance(param, NopParam):
                     params.append(param)
-        else:
+
+        if len(params) == 0:
             continue
 
         param = _compose_accelerator_param(node, params, output_dir)

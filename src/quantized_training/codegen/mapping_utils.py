@@ -8,13 +8,14 @@ import torch
 from torch.fx import Node
 
 from .param_pb2 import (
+    Dim,
     MatrixParam,
-    VectorParam,
+    NopParam,
     PoolingParam,
     ReduceParam,
-    ReshapeParam,
-    NopParam,
+    SlicingOrReshapeOp,
     Tensor,
+    VectorParam,
 )
 from ..pt2e_utils import dtype_byte_size
 
@@ -31,7 +32,7 @@ def _save_tensor(tensor, filename):
 
 def _set_tensor_field(field, node, output_dir=None, is_output=False):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
-        f"Expected node {node} has value attribute. Make sure ShapeProp is called before mapping."
+        f"Expected node {node} has value attribute."
     )
 
     # Reshape can be fused at the input or output of an operation/submodule.
@@ -39,22 +40,43 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
     # of the last operation in the submodule.
     reshape_node = node.meta.get("reshape", None)
     if reshape_node is not None and (node.op != "call_module" or is_output):
-        field.permutation.node = reshape_node.name
-        field.permutation.opcode = reshape_node.target.__name__.split(".")[0]
-        field.permutation.dims.extend(
+        param = SlicingOrReshapeOp()
+        param.name = reshape_node.name
+        param.opcode = reshape_node.target.__name__.split(".")[0]
+        param.dims.extend(
             reshape_node.args[1]
             if reshape_node.target == torch.ops.aten.permute.default
             else reshape_node.args[1:]
         )
-        field.permutation.input_shape.extend(reshape_node.args[0].shape)
-        field.permutation.output_shape.extend(node.shape)
+        _set_dims(param.input_sizes, reshape_node.args[0].shape)
+        _set_dims(param.output_sizes, node.shape)
+        field.slicing_or_reshape.CopyFrom(param)
         if not is_output:
             node = reshape_node.args[0]
 
-    # The reshape op can be further fused with a dequantize op.
+    # The reshape op can also be fused with a dequantize op.
     if (dq_scale := node.meta.get("dq_scale", None)) is not None:
         field.scale = dq_scale
         node = node.args[0]
+
+    if (getitem_node := node.meta.get("indexing", None)) is not None:
+        # TODO duplicate logic. Refactor to a function
+        input_shape = getitem_node.args[0].shape
+        default_args = [0, None, None, 1][len(getitem_node.args) - 1:]
+        dim, start, end, step = list(getitem_node.args[1:]) + default_args
+        end = min(end, input_shape[dim])
+
+        param = SlicingOrReshapeOp()
+        param.name = getitem_node.name
+        param.opcode = getitem_node.target.__name__.split(".")[0]
+        for i, d in enumerate(input_shape):
+            param.input_sizes.append(
+                _create_dim(start, end, step) if i == dim else _create_dim(0, d, 1)
+            )
+        for d in getitem_node.shape:
+            param.output_sizes.append(_create_dim(0, d, 1))
+        field.slicing_or_reshape.CopyFrom(param)
+        node = getitem_node.args[0]
 
     if (source_node := node.meta.get("source_node", None)) is not None:
         node = source_node
@@ -433,11 +455,11 @@ def map_permute(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.permute.default:
         return None
-    param = ReshapeParam()
+    param = SlicingOrReshapeOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
-    _set_repeated_field(param.dims, node.args[1])
+    param.dims.extend(node.args[1])
     return param
 
 
@@ -448,11 +470,11 @@ def map_transpose(node, output_dir):
     """
     if node.op != "call_function" or node.target != torch.ops.aten.transpose.int:
         return None
-    param = ReshapeParam()
+    param = SlicingOrReshapeOp()
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
-    _set_repeated_field(param.dims, node.args[1:])
+    param.dims.extend(node.args[1:])
     return param
 
 
@@ -513,12 +535,57 @@ def map_getitem(node, output_dir):
     return param
 
 
+def _is_slicing_nop(node: Node) -> bool:
+    if node.target != torch.ops.aten.slice.Tensor:
+        return False
+    input_shape = node.args[0].shape
+    default_args = [0, None, None, 1]
+    dim, start, end, step = list(node.args[1:]) + default_args[len(node.args) - 1:]
+    return start == 0 and end > input_shape[dim] and step == 1
+
+
+def _create_dim(start, end, step):
+    dim = Dim()
+    dim.start = start
+    dim.end = end
+    dim.step = step
+    return dim
+
+
+def _set_dims(field, shape):
+    for d in shape:
+        field.append(_create_dim(0, d, 1))
+    return field
+
+
+@register_annotator("slice")
+def map_slice(node, output_dir):
+    if node.op != "call_function" or node.target != torch.ops.aten.slice.Tensor:
+        return None
+    if _is_slicing_nop(node):
+        return None
+
+    input_shape = node.args[0].shape
+    default_args = [0, None, None, 1]
+    dim, start, end, step = list(node.args[1:]) + default_args[len(node.args) - 1:]
+    end = min(end, input_shape[dim])
+
+    param = SlicingOrReshapeOp()
+    param.name = node.name
+    param.opcode = node.target.__name__.split(".")[0]
+    _set_tensor_field(param.input, node.args[0], output_dir)
+    for i, d in enumerate(input_shape):
+        param.input_sizes.append(
+            _create_dim(start, end, step) if i == dim else _create_dim(0, d, 1)
+        )
+    for d in node.shape:
+        param.output_sizes.append(_create_dim(0, d, 1))
+    return param
+
+
 @register_annotator("nop")
 def map_nop(node, output_dir):
-    if (
-        node.op != "call_function" or
-        not (_is_nop(node) or _is_indexing_or_concatenation_op(node))
-    ):
+    if not _is_nop(node) and not _is_slicing_nop(node):
         logger.warning(f"Unsupported operation {node.name}: {node.target}")
     param = NopParam()
     param.name = node.name

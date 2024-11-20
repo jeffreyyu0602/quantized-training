@@ -7,12 +7,19 @@ message Memory {
   uint64 offset = 2;
 }
 
-message Permutation {
-  string node = 1;
+message Dim {
+  uint32 start = 1;
+  uint32 end = 2;
+  uint32 step = 3;
+}
+
+message SlicingOrReshapeOp {
+  string name = 1;
   string opcode = 2;
-  repeated int32 dims = 3;
-  repeated int32 input_shape = 4;
-  repeated int32 output_shape = 5;
+  Tensor input = 3;
+  repeated Dim input_sizes = 4;
+  repeated Dim output_sizes = 5;
+  repeated int32 dims = 6;
 }
 
 message Tensor {
@@ -21,7 +28,7 @@ message Tensor {
   repeated int32 shape = 3;
   float scale = 4;
   Memory memory = 5;
-  Permutation permutation = 6;
+  SlicingOrReshapeOp slicing_or_reshape = 6;
 }
 
 message TensorArray {
@@ -90,14 +97,6 @@ message ReduceParam {
   bool keepdim = 5;
 }
 
-// Define message for transpose and permute operations
-message ReshapeParam {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  repeated int32 dims = 4;
-}
-
 message NopParam {
   string name = 1;
   string opcode = 2;
@@ -111,7 +110,7 @@ message AcceleratorParam {
     MatrixParam matrix_param = 2;
     PoolingParam pooling_param = 3;
     ReduceParam reduce_param = 4;
-    ReshapeParam reshape_param = 5;
+    SlicingOrReshapeOp reshape_param = 5;
     NopParam nop = 6;
   }
   repeated VectorParam vector_params = 7;

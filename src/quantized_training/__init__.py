@@ -109,7 +109,9 @@ def transform(
 
     replace_elementwise_with_vmap(model, vector_stages)
 
+    ShapeProp(model).propagate(*flatten_args)
     fuse_operator(model, vector_stages)
+
     model.graph.print_tabular()
 
     ShapeProp(model).propagate(*flatten_args)
