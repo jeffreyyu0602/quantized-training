@@ -48,6 +48,7 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
             if reshape_node.target == torch.ops.aten.permute.default
             else reshape_node.args[1:]
         )
+        param.input_sizes.extend(reshape_node.args[0].shape)
         param.output_sizes.extend(node.shape)
         field.reshape.CopyFrom(param)
         if not is_output:

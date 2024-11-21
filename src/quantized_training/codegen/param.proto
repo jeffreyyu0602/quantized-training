@@ -91,7 +91,8 @@ message ReshapeOp {
   string opcode = 2;
   Tensor input = 3;
   repeated int32 dims = 4;
-  repeated int32 output_sizes = 5;
+  repeated int32 input_sizes = 5;
+  repeated int32 output_sizes = 6;
 }
 
 // Slicing and indexing operations
