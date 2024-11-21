@@ -19,13 +19,13 @@ message Tensor {
   }
 }
 
-message TensorArray {
-  repeated Tensor tensors = 1;
-}
-
 message MXTensor {
   Tensor input = 1;
   Tensor scale = 2;
+}
+
+message TensorArray {
+  repeated Tensor tensors = 1;
 }
 
 // Elementwise and nonlinear operations
