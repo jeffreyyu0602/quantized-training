@@ -531,6 +531,9 @@ if __name__ == "__main__":
         )
         hidden_states = inputs_embeds
 
+        # no matter the length, we just slice it
+        causal_mask = causal_mask[:, :, :, : input_ids.shape[-1]]
+
         # create position embeddings to be shared across the decoder layers
         position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
 
