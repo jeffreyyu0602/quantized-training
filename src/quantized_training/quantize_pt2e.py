@@ -608,6 +608,10 @@ def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
                 not _is_nop(prev_node)
                 and not _is_reshape_op(prev_node)
                 and not _is_indexing_or_concatenation_op(prev_node)
+                and prev_node.target not in [
+                    torch.ops.aten.expand.default,
+                    torch.ops.aten.repeat.default,
+                ]
             ):
                 break
 

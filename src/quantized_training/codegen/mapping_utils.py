@@ -584,9 +584,27 @@ def map_select(node, output_dir):
     return param
 
 
+def _can_be_handled_by_mp(node: Node) -> bool:
+    """
+    The following operations are handled by the memory placement and
+    thus require no additional handling:
+    """
+    if node.target == torch.ops.aten.select.int:
+        return node.args[1] == 0
+
+    if node.target == torch.ops.aten.stack.default:
+        return len(node.args) == 1 or node.args[1] == 0
+
+    return False
+
+
 @register_annotator("nop")
 def map_nop(node, output_dir):
-    if not _is_nop(node) and not _is_slicing_nop(node):
+    if (
+        not _is_nop(node) and
+        not _is_slicing_nop(node) and
+        not _can_be_handled_by_mp(node)
+    ):
         logger.warning(f"Unsupported operation {node.name}: {node.target}")
     param = Nop()
     param.name = node.name

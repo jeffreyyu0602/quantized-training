@@ -4,7 +4,7 @@ import logging
 import operator
 import os
 from collections import defaultdict
-from typing import List, Dict, Type, Callable
+from typing import List, Dict, Callable
 
 import graphviz
 import torch
@@ -12,10 +12,7 @@ from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
-from torch.fx.passes.utils.source_matcher_utils import (
-    get_source_partitions,
-    SourcePartition,
-)
+from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping_utils import (
     OP_TO_MAPPING_FUNC,
@@ -325,37 +322,6 @@ def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
     return True
 
 
-def make_partition(nodes: List[Node], module_type: Type = None) -> SourcePartition:
-    if isinstance(nodes, Node):
-        nodes = [nodes]
-        source_fn_st = nodes[0].meta.get("source_fn_stack", None)
-        if module_type is None and source_fn_st is not None:
-            module_type = source_fn_st[-1][1]
-
-    input_nodes = set()
-    output_nodes = set()
-    params = set()
-    for node in nodes:
-        for arg in node.args:
-            if isinstance(arg, Node) and arg not in nodes:
-                input_nodes.add(arg)
-
-        if node.op == "get_attr":
-            params.add(node)
-
-        for user in node.users.keys():
-            if user not in nodes:
-                output_nodes.add(node)
-
-    return SourcePartition(
-        nodes,
-        module_type,
-        list(input_nodes),
-        list(output_nodes),
-        list(params),  # type: ignore[arg-type]
-    )
-
-
 def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
     graph = model.graph
 
@@ -473,13 +439,188 @@ def transform_concat_nodes(model: GraphModule):
                 continue
             node.replace_input_with(cat_node, output_node)
 
-        graph.erase_node(cat_node)
+        if cat_node.target == torch.ops.aten.cat.default:
+            graph.erase_node(cat_node)
 
     graph.lint()
 
     graph.eliminate_dead_code()
     model.recompile()
     return model
+
+
+def is_tranpose(node: Node):
+    if node.target == torch.ops.aten.transpose.int:
+        ndim = node.args[0].meta['val'].ndim
+        axes = {x if x >= 0 else x + ndim for x in node.args[1:]}
+        return (axes == {ndim - 2, ndim - 1})
+    return False
+
+
+def check_branch_independence(graph: torch.fx.Graph, nodes: List[Node]):
+    node_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    nodes = sorted(nodes, key=lambda n: node_order[n])
+
+    for i in range(len(nodes) - 2, -1, -1):
+        node = nodes[i]
+
+        if len(node.users) == 1:
+            continue
+
+        user = nodes[i + 1]
+        with graph.inserting_before(user):
+            new_node = graph.node_copy(node, lambda n: n)
+        user.replace_input_with(node, new_node)
+
+        nodes[i] = new_node
+
+        # Copy and update the source_fn_stack
+        source_fn_st = node.meta.get('source_fn_stack', [])
+        source_fn = source_fn_st[-1] if source_fn_st else new_node.target
+        new_node.meta['source_fn_stack'] = [(new_node.name, source_fn[1])]
+
+    return nodes
+
+
+def search_group(node, node_lists):
+    for l in node_lists:
+        if node in l:
+            return l
+    return None
+
+
+def fuse_reshape_with_input(
+    graph: torch.fx.Graph,
+    candidates: List[List[Node]],
+    node_dict: Dict[Node, Node],
+    reshape_node: Node,
+    node: Node = None,
+    fused_nodes=None,
+):
+    if node is None:
+        node = reshape_node
+
+    if fused_nodes is None:
+        fused_nodes = []
+
+    fused_nodes.append(node)
+
+    # Base case: encountered a GEMM or elementwise operation
+    if _is_gemm_op(node) or _is_elementwise_op(node):
+        fused_nodes = check_branch_independence(graph, fused_nodes)
+        if (group := search_group(node, candidates)) is not None:
+            group.extend(n for n in fused_nodes if n not in group)
+        else:
+            candidates.append(fused_nodes)
+        node_dict[fused_nodes[0]] = fused_nodes[-2]
+        return [fused_nodes[0]]
+
+    is_select_after_tranpose = (
+        is_tranpose(reshape_node)
+        and node.target == torch.ops.aten.select.int
+        and node.args[1] == 0
+    )
+
+    # Reshape can be fused with aten.select.int if and only if the select index is 0
+    if (
+        id(node) != id(reshape_node)
+        and not _is_nop(node)
+        and not _is_slicing_nop(node)
+        and not is_select_after_tranpose
+    ):
+        logger.warning(f"Cannot fuse {reshape_node} with {node}")
+        return []
+
+    # If there is a divergent point in the graph, perform fusion on each branch
+    all_reshape_nodes = []
+    for user in list(node.users):
+        nodes = fuse_reshape_with_input(
+            graph, candidates, node_dict, reshape_node, user, fused_nodes.copy()
+        )
+        all_reshape_nodes.extend(nodes)
+    return all_reshape_nodes
+
+
+def swap_tranpose_and_select(
+    graph: torch.fx.Graph,
+    candidates: List[List[Node]],
+    node_dict: Dict[Node, Node],
+    node: Node,
+):
+    ndim = node.args[0].meta['val'].ndim
+    dims = [x if x >= 0 else x + ndim for x in node.args[1:]]
+
+    select_nodes = []
+
+    user_node = next(iter(node.users))
+    while (
+        user_node.target == torch.ops.aten.select.int
+        and user_node.args[1] == 0
+    ):
+        select_nodes.append(user_node)
+        user_node = next(iter(user_node.users))
+        dims = [x - 1 for x in dims]
+
+    if len(select_nodes) > 0:
+        with graph.inserting_before(user_node):
+            new_node = graph.call_function(
+                torch.ops.aten.transpose.int, (select_nodes[-1], *dims),
+            )
+
+        user_node.replace_input_with(select_nodes[-1], new_node)
+        select_nodes[0].replace_input_with(node, node.args[0])
+        graph.erase_node(node)
+
+        group = search_group(node, candidates)
+
+        group.remove(node)
+        for n in select_nodes:
+            group.remove(n)
+        group.append(new_node)
+
+        user_node = node_dict.pop(node, None)
+        node_dict[new_node] = (
+            new_node if user_node == select_nodes[-1] else user_node
+        )
+
+
+def fuse_op_with_input(
+    graph: torch.fx.Graph,
+    candidates: List[List[Node]],
+    node_dict: Dict[Node, Node],  # use a better name
+    node_to_fuse: Node,
+    node: Node = None,
+    fused_nodes=None,
+):
+    if node is None:
+        node = node_to_fuse
+
+    if fused_nodes is None:
+        fused_nodes = []
+
+    fused_nodes.append(node)
+
+    if id(node) != id(node_to_fuse) and _is_elementwise_op(node):
+        fused_nodes = check_branch_independence(graph, fused_nodes)
+        if (group := search_group(node, candidates)) is not None:
+            group.extend(n for n in fused_nodes if n not in group)
+        else:
+            candidates.append(fused_nodes)
+        node_dict[fused_nodes[0]] = fused_nodes[-2]
+        return
+
+    if (
+        id(node) != id(node_to_fuse)
+        and not _is_nop(node)
+        and not _is_slicing_nop(node)
+    ):
+        logger.warning(f"Cannot fuse {node_to_fuse} with {node}")
+        return
+
+    for user in list(node.users):
+        fuse_op_with_input(
+            graph, candidates, node_dict, node_to_fuse, user, fused_nodes.copy()
+        )
 
 
 def fuse_operator(model: GraphModule, mapping=None):
@@ -505,129 +646,48 @@ def fuse_operator(model: GraphModule, mapping=None):
     fused_nodes_list = find_sequential_nodes(model, mapping.values())
     node_map = {}
 
-    def search_group(node):
-        for g in fused_nodes_list:
-            if node in g:
-                return g
-        return None
-
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
-        output_node = partitions.pop(0).output_nodes[0]
+        reshape_node = partitions.pop(0).output_nodes[0]
 
-        is_tranpose = False
-
-        if output_node.target == torch.ops.aten.transpose.int:
-            ndim = output_node.args[0].meta['val'].ndim
-            axes = {x if x >= 0 else x + ndim for x in output_node.args[1:]}
-            is_tranpose = (axes == {ndim - 2, ndim - 1})
-
-        if not is_tranpose:
+        if not is_tranpose(reshape_node):
             match_found = True
-            fused_nodes = [output_node]
-            prev_node = output_node.all_input_nodes[0]
+            fused_nodes = [reshape_node]
+            input_node = reshape_node.all_input_nodes[0]
 
-            while not _is_gemm_op(prev_node) and not _is_elementwise_op(prev_node):
-                if not _is_nop(prev_node) and not _is_slicing_nop(prev_node):
-                    logger.warning(f"Cannot fuse reshape operation with {prev_node.target}")
+            while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
+                if not _is_nop(input_node) and not _is_slicing_nop(input_node):
+                    logger.warning(f"Cannot fuse {reshape_node} with {input_node}")
                     match_found = False
                     break
 
                 # Reshape cannot be fused with a node that has multiple users or inputs
                 if (
-                    len(prev_node.users) > 1 or
-                    len(prev_node.all_input_nodes) != 1 or
-                    _is_reshape_op(prev_node)
+                    len(input_node.users) > 1 or
+                    len(input_node.all_input_nodes) != 1 or
+                    _is_reshape_op(input_node)
                 ):
                     match_found = False
                     break
 
-                fused_nodes.insert(0, prev_node)
-                prev_node = prev_node.all_input_nodes[0]
+                fused_nodes.insert(0, input_node)
+                input_node = input_node.all_input_nodes[0]
 
-            if match_found and len(prev_node.users) == 1:
-                node_map[output_node] = prev_node
-                if (group := search_group(prev_node)) is not None:
-                    group.extend(fused_nodes)
+            if match_found and len(input_node.users) == 1:
+                node_map[reshape_node] = input_node
+                if (group := search_group(input_node, fused_nodes_list)) is not None:
+                    group.extend(n for n in fused_nodes if n not in group)
                 else:
-                    fused_nodes.insert(0, prev_node)
+                    fused_nodes.insert(0, input_node)
                     fused_nodes_list.append(fused_nodes)
                 continue
 
-        match_found = True
-        fused_nodes = []
-        next_node = output_node
+        nodes = fuse_reshape_with_input(graph, fused_nodes_list, node_map, reshape_node)
 
-        while not _is_gemm_op(next_node) and not _is_elementwise_op(next_node):
-            # Reshape can be fused with aten.select.int if and only if the select index is 0
-            if (
-                id(next_node) != id(output_node)
-                and not _is_nop(next_node)
-                and not _is_slicing_nop(next_node)
-                and not (next_node.target == torch.ops.aten.select.int and next_node.args[1] == 0)
-            ):
-                logger.warning(f"Cannot fuse {next_node} with {output_node}")
-                match_found = False
-                break
-
-            fused_nodes.append(next_node)
-
-            # If there is a divergent path in the graph, duplicate the node
-            # and perform fusion on each branch
-            if len(next_node.users) != 1:
-                match_found = False
-                paths = split_nodes_on_path(graph, fused_nodes)
-                for p in reversed(paths):
-                    partitions.insert(0, make_partition(p[0]))
-                break
-
-            node_map[output_node] = next_node
-            next_node = next(iter(next_node.users))
-
-        if not match_found:
-            node_map.pop(output_node, None)
-            continue
-
-        if (group := search_group(next_node)) is not None:
-            group.extend(fused_nodes)
-        else:
-            fused_nodes.append(next_node)
-            fused_nodes_list.append(fused_nodes)
-
-        # Switch order of transpose and select nodes
-        if output_node.target == torch.ops.aten.transpose.int:
-            select_nodes = []
-            next_node = next(iter(output_node.users))
-            ndim = output_node.args[0].meta['val'].ndim
-            axes = [x if x >= 0 else x + ndim for x in output_node.args[1:]]
-
-            while (
-                next_node.target == torch.ops.aten.select.int
-                and next_node.args[1] == 0
-            ):
-                select_nodes.append(next_node)
-                next_node = next(iter(next_node.users))
-                axes = [x - 1 for x in axes]
-
-            if len(select_nodes) > 0:
-                with graph.inserting_before(next_node):
-                    new_node = graph.call_function(
-                        torch.ops.aten.transpose.int, (select_nodes[-1], *axes),
-                    )
-
-                next_node.replace_input_with(select_nodes[-1], new_node)
-                select_nodes[0].replace_input_with(output_node, output_node.args[0])
-                graph.erase_node(output_node)
-
-                group = search_group(output_node)
-                group.insert(0, new_node)
-                group.remove(output_node)
-                for n in select_nodes:
-                    group.remove(n)
-
-                user_node = node_map.pop(output_node, None)
-                node_map[new_node] = new_node if user_node == select_nodes[-1] else user_node
+        for n in nodes:
+            if n.target == torch.ops.aten.transpose.int:
+                swap_tranpose_and_select(graph, fused_nodes_list, node_map, n)
 
     partitions = get_source_partitions(graph, [operator.getitem])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -635,51 +695,16 @@ def fuse_operator(model: GraphModule, mapping=None):
         slice_node = partitions.pop(0).output_nodes[0]
 
         if slice_node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
-            print(f"Unrecognized getitem operation: {slice_node.target}")
+            logger.warning(f"Unrecognized getitem operation: {slice_node.target}")
             continue
 
         if _is_slicing_nop(slice_node) or (
             slice_node.target == torch.ops.aten.select.int and slice_node.args[1] == 0
         ):
-            print(f"Node {slice_node.name} is a nop or can be handled by memory planner.")
+            logger.info(f"Node {slice_node} is a nop or can be handled by memory planner.")
             continue
 
-        match_found = True
-        fused_nodes = []
-        next_node = slice_node
-
-        # Slicing can only be fused with vector operations
-        while not _is_elementwise_op(next_node):
-            if (
-                id(next_node) != id(slice_node)
-                and not _is_nop(next_node)
-                and not _is_slicing_nop(next_node)
-            ):
-                logger.warning(f"Cannot fuse {next_node} with {slice_node}")
-                match_found = False
-                break
-
-            fused_nodes.append(next_node)
-
-            if len(next_node.users) != 1:
-                match_found = False
-                paths = split_nodes_on_path(graph, fused_nodes)
-                for p in reversed(paths):
-                    partitions.insert(0, make_partition(p[0]))
-                break
-
-            node_map[slice_node] = next_node
-            next_node = next(iter(next_node.users))
-
-        if not match_found:
-            node_map.pop(slice_node, None)
-            continue
-
-        if (group := search_group(next_node)) is not None:
-            group.extend(fused_nodes)
-        else:
-            fused_nodes.append(next_node)
-            fused_nodes_list.append(fused_nodes)
+        fuse_op_with_input(graph, fused_nodes_list, node_map, slice_node)
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -687,44 +712,10 @@ def fuse_operator(model: GraphModule, mapping=None):
         dequantized_node = partitions.pop(0).output_nodes[0]
 
         # If the node is already fused, skip it
-        if search_group(dequantized_node) is not None:
+        if search_group(dequantized_node, fused_nodes_list) is not None:
             continue
 
-        match_found = True
-        fused_nodes = []
-        next_node = dequantized_node
-
-        while not _is_elementwise_op(next_node) or id(next_node) == id(dequantized_node):
-            if (
-                id(next_node) != id(dequantized_node)
-                and not _is_nop(next_node)
-                and not _is_slicing_nop(next_node)
-            ):
-                logger.warning(f"Cannot fuse {next_node} with {dequantized_node}")
-                match_found = False
-                break
-
-            fused_nodes.append(next_node)
-
-            if len(next_node.users) != 1:
-                match_found = False
-                paths = split_nodes_on_path(graph, fused_nodes)
-                for p in reversed(paths):
-                    partitions.insert(0, make_partition(p[0]))
-                break
-
-            node_map[dequantized_node] = next_node
-            next_node = next(iter(next_node.users))
-
-        if not match_found:
-            node_map.pop(dequantized_node, None)
-            continue
-
-        if (group := search_group(next_node)) is not None:
-            group.extend([n for n in fused_nodes if n not in group])
-        else:
-            fused_nodes.append(next_node)
-            fused_nodes_list.append(fused_nodes)
+        fuse_op_with_input(graph, fused_nodes_list, node_map, dequantized_node)
 
     # Fuse nodes that appear earlier in the graph first
     node_order = {node: idx for idx, node in enumerate(graph.nodes)}
@@ -851,7 +842,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # memory for all the tensors in the stack operation (read below)
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             assert len(node.args) == 1 or node.args[1] == 0, (
-                "Only support stack/cat on the first dimension"
+                "Only support stacking or concatenating on the first dimension"
             )
             node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
             continue

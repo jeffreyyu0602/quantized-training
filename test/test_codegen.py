@@ -4,6 +4,7 @@ from typing import List
 
 import torch
 from datasets import load_dataset
+from torch._export import capture_pre_autograd_graph
 from torch.utils.data import DataLoader
 from torchvision import models
 from transformers import (
@@ -27,6 +28,7 @@ from quantized_training import (
     prepare_pt2e,
     transform,
 )
+from quantized_training.codegen.mapping import _decompose_node
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,48 @@ def eliminate_dtype_conversion(model: torch.fx.GraphModule):
 
         if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
             node.args = node.args[:-1]
+
+    model.graph.lint()
+    model.recompile()
+
+
+def convert_expand(model: torch.fx.GraphModule):
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.expand.default:
+            continue
+
+        input_node = node.args[0]
+        sizes = node.args[1]
+        original_shape = input_node.meta["val"].shape
+        assert len(sizes) >= len(original_shape), (
+            "Sizes must have at least as many dimensions as the original tensor."
+        )
+
+        # Add singleton dimensions to match the size length
+        while len(original_shape) < len(sizes):
+            input = input.unsqueeze(0)
+            original_shape = input.shape
+
+        class Expand(torch.nn.Module):
+            def forward(self, input):
+                # Stack along the first dimension repeatedly to create the expanded shape
+                for dim, size in enumerate(sizes):
+                    if input.shape[dim] == 1 and size > 1:
+                        stacked_tensors = []
+                        for _ in range(size):
+                            stacked_tensors.append(input.squeeze(dim) * 1)
+                        input = torch.stack(stacked_tensors, dim=dim)
+                    elif input.shape[dim] != size:
+                        raise ValueError(f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}.")
+
+                return input
+
+        gm: torch.fx.GraphModule = capture_pre_autograd_graph(
+            Expand(), (input_node.meta["val"],)
+        )
+
+        _decompose_node(model, gm, node)
+        model.graph.erase_node(node)
 
     model.graph.lint()
     model.recompile()
@@ -564,6 +608,7 @@ if __name__ == "__main__":
 
         replace_rmsnorm_with_layer_norm(gm)
         eliminate_dtype_conversion(gm)
+        convert_expand(gm)
 
         # Generate float32 model
         if not args.bf16:
