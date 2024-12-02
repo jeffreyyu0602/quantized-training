@@ -458,6 +458,8 @@ def map_permute(node, output_dir):
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
     param.dims.extend(node.args[1])
+    param.input_sizes.extend(node.args[0].shape)
+    param.output_sizes.extend(node.shape)
     return param
 
 
@@ -473,6 +475,8 @@ def map_transpose(node, output_dir):
     param.opcode = node.target.__name__.split(".")[0]
     _set_tensor_field(param.input, node.args[0], output_dir)
     param.dims.extend(node.args[1:])
+    param.input_sizes.extend(node.args[0].shape)
+    param.output_sizes.extend(node.shape)
     return param
 
 
