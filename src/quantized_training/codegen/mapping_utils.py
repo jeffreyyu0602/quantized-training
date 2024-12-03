@@ -615,6 +615,6 @@ def map_nop(node, output_dir):
     param.opcode = node.target.__name__.split(".")[0]
     for n in node.all_input_nodes:
         tensor = Tensor()
-        _set_tensor_field(tensor, n)
+        _set_tensor_field(tensor, n, output_dir)
         param.inputs.append(tensor)
     return param
