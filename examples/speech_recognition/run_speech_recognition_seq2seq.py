@@ -531,6 +531,8 @@ def main():
         # we do not want to group tokens when computing the metrics
         label_str = tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)
 
+        # EDIT: the original text contains a lot of capitalized characters. Normalize
+        # the strings before computing WER.
         pred_str = [tokenizer._normalize(ps) for ps in pred_str]
         label_str = [tokenizer._normalize(ls) for ls in label_str]
 

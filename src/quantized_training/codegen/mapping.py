@@ -74,6 +74,8 @@ def replace_elementwise_with_vmap(
                 torch.ops.quantized_ops.vmap, (args[0], get_attr_node)
             )
 
+        new_node.meta["source_fn_stack"] = [(new_node.name, "vmap")]
+
         node.replace_all_uses_with(new_node)
         model.graph.erase_node(node)
 

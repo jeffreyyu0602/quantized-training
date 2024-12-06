@@ -97,7 +97,7 @@ def transform(
         2: ["add", "sub", "mul", "div"],
         3: ["exp"],
         4: ["add", "mul", "div"],
-        5: ["relu"],
+        5: ["relu", "vmap"],
         7: ["quantize"],
     }
 

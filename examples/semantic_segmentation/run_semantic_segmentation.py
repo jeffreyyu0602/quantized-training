@@ -382,6 +382,7 @@ def main():
         #     align_corners=False,
         # ).argmax(dim=1)
 
+        # EDIT: running the interpolation in chunks to avoid OOM errors
         outputs = []
         for i in range(0, len(logits), 100):
             upsampled_logits = nn.functional.interpolate(
@@ -394,6 +395,11 @@ def main():
         logits_tensor = torch.stack(outputs)
 
         pred_labels = logits_tensor.detach().cpu().numpy()
+
+        # EDIT: metric.compute is very slow on semantic segmentation tasks. A workaround is to use _compute instead:
+        # https://discuss.huggingface.co/t/metric-compute-tediously-slow-when-applied-to-semantic-segmentation/56566
+        # We need to ignore 255 in the labels instead of 0. Since the labels are already reduced by 1, reduce_labels
+        # should always be set to False.
         metrics = metric._compute(
             predictions=pred_labels,
             references=labels,
