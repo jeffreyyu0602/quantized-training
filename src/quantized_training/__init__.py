@@ -109,8 +109,7 @@ def transform(
 
     replace_elementwise_with_vmap(model, vector_stages)
 
-    ShapeProp(model).propagate(*flatten_args)
-    fuse_operator(model, vector_stages)
+    fuse_operator(model, flatten_args, vector_stages)
 
     model.graph.print_tabular()
 
@@ -126,19 +125,11 @@ def transform(
         visualize_memory_layout(manager.snapshots, filename)
         logger.error(f"Memory allocation failed. Memory layout saved to {filename}")
 
-    manager.print_partitions()
-    print("\nMemory allocated to tensors:")
-    for node in model.graph.nodes:
-        if (partition := node.meta.get('memory', None)) is None:
-            print(f"Node {node.name} does not have memory allocated")
-            continue
-        print(f"{node.name}: {partition.start}, {partition.end}")
+    model_ir = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
+    with open(os.path.join(output_dir, 'model.txt'), "w") as f:
+        f.write(text_format.MessageToString(model_ir))
 
-    params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
-    with open(os.path.join(output_dir, 'params.txt'), "w") as f:
-        f.write(text_format.MessageToString(params))
-
-    layers = [p.name for p in params.params if p.WhichOneof("param") != "nop_param"]
+    layers = [p.name for p in model_ir.ops if p.WhichOneof("op") != "nop"]
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(layers))
 

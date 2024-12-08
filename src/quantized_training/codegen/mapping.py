@@ -9,7 +9,10 @@ from typing import List, Dict, Callable
 import graphviz
 import torch
 from torch._export import capture_pre_autograd_graph
-from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
+from torch.ao.quantization.fx.utils import (
+    assert_and_get_unique_device,
+    get_new_attr_name_with_prefix,
+)
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
@@ -26,10 +29,10 @@ from .mapping_utils import (
 )
 from .memory import MemoryManager, Partition
 from .param_pb2 import (
-    AcceleratorParam,
     MatrixOp,
-    ModelParams,
+    Model,
     Nop,
+    Operator,
     PoolingOp,
     ReduceOp,
     ReshapeOp,
@@ -39,6 +42,7 @@ from .param_pb2 import (
 )
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
+from ..quantize_pt2e import create_getattr_from_value
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,8 @@ def replace_elementwise_with_vmap(
     model: GraphModule,
     mapping: Dict[str, Callable],
 ) -> GraphModule:
+    device = assert_and_get_unique_device(model)
+
     mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
     for node in list(model.graph.nodes):
         if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
@@ -60,18 +66,16 @@ def replace_elementwise_with_vmap(
 
         logger.info(f"Replace {node.target} with value mapping")
 
-        values = torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16)
-        args = list(node.args)
-        val_map = node.target(values, *args[1:])
-
-        from ..quantize_pt2e import create_getattr_from_value
+        values = (torch.arange(2 ** 16, dtype=torch.int16, device=device)
+                  .view(torch.bfloat16))
+        val_map = node.target(values, *node.args[1:])
 
         with model.graph.inserting_before(node):
             get_attr_node = create_getattr_from_value(
                 model, model.graph, f'_tensor_constant_', val_map
             )
             new_node = model.graph.call_function(
-                torch.ops.quantized_ops.vmap, (args[0], get_attr_node)
+                torch.ops.quantized_ops.vmap, (node.args[0], get_attr_node)
             )
 
         new_node.meta["source_fn_stack"] = [(new_node.name, "vmap")]
@@ -88,7 +92,7 @@ def replace_elementwise_with_vmap(
 
 
 def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
-    args_iter = iter(source_node.args)
+    args_iter = iter(source_node.all_input_nodes)
     value_remap = {}
     for node in list(gm.graph.nodes):
         if node.op == 'placeholder':
@@ -109,8 +113,8 @@ def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> L
 
 def _decompose_bmm(model: GraphModule, node: Node):
     assert node.op == 'call_function' and node.target == torch.ops.aten.matmul.default
-    input1 = node.args[0].meta['val']
-    input2 = node.args[1].meta['val']
+    input1 = node.args[0].value
+    input2 = node.args[1].value
 
     input1_dims = sum(1 for d in input1.shape if d > 1)
     input2_dims = sum(1 for d in input2.shape if d > 1)
@@ -383,7 +387,44 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
     return [fn for fn in fused_nodes_list if len(fn) > 1]
 
 
-def transform_concat_nodes(model: GraphModule):
+def transform_cat_nodes(model: GraphModule):
+    partitions = get_source_partitions(model.graph, [torch.cat])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        node = partition.output_nodes[0]
+        if node.target != torch.ops.aten.cat.default:
+            continue
+
+        input_shape = list(node.args[0][0].shape)
+        if all(list(n.shape) == input_shape for n in node.args[0][1:]):
+            continue
+
+        logger.info(f"Node {node} has different input shapes")
+        dim = node.args[1]
+
+        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+        shape = list(args[0][0].shape[:dim])
+
+        class Concat(torch.nn.Module):
+            def forward(self, *inputs):
+                result = []
+                for idx in itertools.product(*[range(dim) for dim in shape]):
+                    tensor = torch.cat([x[idx] for x in inputs], dim=0)
+                    result.append(tensor)
+                output = torch.stack(result, dim=0)
+                return output.reshape(*shape, *output.shape[1:])
+
+        gm = capture_pre_autograd_graph(Concat(), (*args[0],))
+        _decompose_node(model, gm, node)
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def transform_stack_nodes(model: GraphModule):
     graph = model.graph
 
     partitions = get_source_partitions(graph, [torch.stack, torch.cat])
@@ -397,12 +438,21 @@ def transform_concat_nodes(model: GraphModule):
 
         input_shape = list(cat_node.args[0][0].shape)
 
-        concat_dim = 0 if len(cat_node.args) == 1 else cat_node.args[1]
+        if not all(list(n.shape) == input_shape for n in cat_node.args[0][1:]):
+            shapes = [n.shape for n in cat_node.args[0]]
+            logger.warning(
+                "Concatenated tensors have different shapes in node %s. Shapes: %s",
+                cat_node,
+                shapes
+            )
+            continue
+
+        if len(cat_node.args) == 1 or cat_node.args[1] == 0:
+            continue
+
+        concat_dim = cat_node.args[1]
         if concat_dim < 0:
             concat_dim += len(input_shape)
-
-        if concat_dim == 0:
-            continue
 
         # Always stack along the first dimension
         if cat_node.target == torch.ops.aten.stack.default:
@@ -453,7 +503,7 @@ def transform_concat_nodes(model: GraphModule):
 
 def is_tranpose(node: Node):
     if node.target == torch.ops.aten.transpose.int:
-        ndim = node.args[0].meta['val'].ndim
+        ndim = node.args[0].value.ndim
         axes = {x if x >= 0 else x + ndim for x in node.args[1:]}
         return (axes == {ndim - 2, ndim - 1})
     return False
@@ -549,7 +599,7 @@ def swap_tranpose_and_select(
     node_dict: Dict[Node, Node],
     node: Node,
 ):
-    ndim = node.args[0].meta['val'].ndim
+    ndim = node.args[0].value.ndim
     dims = [x if x >= 0 else x + ndim for x in node.args[1:]]
 
     select_nodes = []
@@ -625,7 +675,7 @@ def fuse_op_with_input(
         )
 
 
-def fuse_operator(model: GraphModule, mapping=None):
+def fuse_operator(model: GraphModule, example_inputs, mapping=None):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
 
@@ -637,16 +687,23 @@ def fuse_operator(model: GraphModule, mapping=None):
     encounter a node with multiple users, we duplicate all the elements on the path
     and perform fusion on each branch.
     """
-    transform_concat_nodes(model)
+    if mapping is None:
+        mapping = {}
+
+    node_map = {}
+
+    ShapeProp(model).propagate(*example_inputs)
+    transform_cat_nodes(model)
+
+    ShapeProp(model).propagate(*example_inputs)
+    transform_stack_nodes(model)
+
+    ShapeProp(model).propagate(*example_inputs)
 
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
-    if mapping is None:
-        mapping = {}
-
     fused_nodes_list = find_sequential_nodes(model, mapping.values())
-    node_map = {}
 
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -843,11 +900,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # We use the partition of the first input tensor since it preallocates
         # memory for all the tensors in the stack operation (read below)
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            assert len(node.args) == 1 or node.args[1] == 0, (
-                "Only support stacking or concatenating on the first dimension"
-            )
-            node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
-            continue
+            if len(node.args) != 1 and node.args[1] != 0:
+                logger.warning("Only support stacking or concatenating on the first dimension")
+            else:
+                node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
+                continue
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
@@ -885,10 +942,13 @@ def _map_operation(node: Node, output_dir: str):
     raise NotImplementedError(f"Unsupported operation: {node.target}")
 
 
-def _compose_accelerator_param(node: Node, params: List, output_dir: str):
-    accelerator_param = AcceleratorParam()
-    accelerator_param.name = node.name
-    if isinstance(node.value, (tuple, list)):
+def _compose_operator(node: Node, params: List, output_dir: str):
+    op = Operator()
+    op.name = node.name
+
+    if isinstance(node.value, torch.Tensor):
+         _set_tensor_field(op.output, node, output_dir, True)
+    elif isinstance(node.value, (tuple, list)):
         partition = node.meta["memory"]
         offset = partition.start
         for i, tensor in enumerate(node.value):
@@ -899,34 +959,35 @@ def _compose_accelerator_param(node: Node, params: List, output_dir: str):
             tensor_param.memory.partition = partition.partition_id
             tensor_param.memory.offset = offset
             offset += tensor.numel() * dtype_byte_size(tensor.dtype)
-            accelerator_param.outputs.tensors.append(tensor_param)
+            op.outputs.tensors.append(tensor_param)
     else:
-        _set_tensor_field(accelerator_param.output, node, output_dir, True)
+        raise ValueError(f"Unsupported output type: {type(node.value)}")
 
     if isinstance(params[0], MatrixOp):
-        accelerator_param.matrix_param.CopyFrom(params[0])
+        op.matrix_op.CopyFrom(params[0])
         if len(params) > 1:
-            accelerator_param.vector_params.extend(params[1:])
-        return accelerator_param
+            op.vector_ops.extend(params[1:])
+        return op
 
     if isinstance(params[0], VectorOp):
-        accelerator_param.vector_params.extend(params)
-        return accelerator_param
+        op.vector_ops.extend(params)
+        return op
 
     assert len(params) == 1, f"{str(params[0].opcode)} does not support fusion"
+
     if params[0].opcode == "layer_norm":
-        accelerator_param.matrix_param.CopyFrom(params[0])
+        op.matrix_op.CopyFrom(params[0])
     elif isinstance(params[0], PoolingOp):
-        accelerator_param.pooling_param.CopyFrom(params[0])
+        op.pooling_op.CopyFrom(params[0])
     elif isinstance(params[0], ReduceOp):
-        accelerator_param.reduce_param.CopyFrom(params[0])
+        op.reduce_op.CopyFrom(params[0])
     elif isinstance(params[0], ReshapeOp):
-        accelerator_param.reshape_param.CopyFrom(params[0])
+        op.reshape_op.CopyFrom(params[0])
     elif isinstance(params[0], SlicingOp):
-        accelerator_param.slicing_param.CopyFrom(params[0])
+        op.slicing_op.CopyFrom(params[0])
     elif isinstance(params[0], Nop):
-        accelerator_param.nop_param.CopyFrom(params[0])
-    return accelerator_param
+        op.nop.CopyFrom(params[0])
+    return op
 
 
 def gen_code(model, args, output_dir=None):
@@ -936,30 +997,35 @@ def gen_code(model, args, output_dir=None):
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
     ShapeProp(model).propagate(*args)
-    model_params = ModelParams()
+    model_ir = Model()
     for node in model.graph.nodes:
-        params = []
-        if node.op == 'call_function':
-            params.append(_map_operation(node, output_dir))
+        operations = []
+        if node.op == 'placeholder':
+            tensor = Tensor()
+            _set_tensor_field(tensor, node, output_dir)
+            model_ir.inputs.append(tensor)
+        elif node.op == 'get_attr' and "memory" in node.meta:
+            tensor = Tensor()
+            _set_tensor_field(tensor, node, output_dir)
+            model_ir.parameters.append(tensor)
+        elif node.op == 'call_function':
+            operations.append(_map_operation(node, output_dir))
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
-            n_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
-            ShapeProp(gm).propagate(*n_args)
+            submodule_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+            ShapeProp(gm).propagate(*submodule_args)
             for n in gm.graph.nodes:
                 if _is_nop(n) or _is_reshape_op(n) or n.meta.get('fused', False):
                     continue
-                param = _map_operation(n, output_dir)
-                if param is not None and not isinstance(param, Nop):
-                    params.append(param)
+                op = _map_operation(n, output_dir)
+                if op is not None and not isinstance(op, Nop):
+                    operations.append(op)
 
-        if len(params) == 0:
-            continue
+        if len(operations) and isinstance(getattr(node, 'value', None), torch.Tensor):
+            model_ir.ops.append(_compose_operator(node, operations, output_dir))
 
-        param = _compose_accelerator_param(node, params, output_dir)
-        model_params.params.append(param)
-
-    return model_params
+    return model_ir
 
 
 def gen_compute_graph(model, output_file="compute_graph", max_users=10):

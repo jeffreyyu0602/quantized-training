@@ -401,6 +401,11 @@ def add_qspec_args(parser=None):
         help='Whether to convert the model to quantized model.',
     )
     parser.add_argument(
+        '--compile',
+        action='store_true',
+        help='Whether to generate accelerator program for the given model.',
+    )
+    parser.add_argument(
         "--op_fusion",
         type=lambda x: x.split(','),
         default=None,

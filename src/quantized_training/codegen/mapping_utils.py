@@ -614,6 +614,8 @@ def map_nop(node, output_dir):
     param.name = node.name
     param.opcode = node.target.__name__.split(".")[0]
     for n in node.all_input_nodes:
+        if not isinstance(getattr(n, 'value', None), torch.Tensor):
+            continue
         tensor = Tensor()
         _set_tensor_field(tensor, n, output_dir)
         param.inputs.append(tensor)

@@ -114,23 +114,25 @@ message Nop {
   repeated Tensor inputs = 3;
 }
 
-message AcceleratorParam {
+message Operator {
   string name = 1;
-  oneof param {
-    MatrixOp matrix_param = 2;
-    PoolingOp pooling_param = 3;
-    ReduceOp reduce_param = 4;
-    ReshapeOp reshape_param = 5;
-    SlicingOp slicing_param = 6;
-    Nop nop_param = 7;
+  oneof op {
+    MatrixOp matrix_op = 2;
+    PoolingOp pooling_op = 3;
+    ReduceOp reduce_op = 4;
+    ReshapeOp reshape_op = 5;
+    SlicingOp slicing_op = 6;
+    Nop nop = 7;
   }
-  repeated VectorOp vector_params = 8;
+  repeated VectorOp vector_ops = 8;
   oneof output_field {
     Tensor output = 9;
     TensorArray outputs = 10;
   }
 }
 
-message ModelParams {
-    repeated AcceleratorParam params = 1;
+message Model {
+  repeated Tensor inputs = 1;
+  repeated Tensor parameters = 2;
+  repeated Operator ops = 3;
 }

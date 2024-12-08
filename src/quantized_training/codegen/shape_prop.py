@@ -1,11 +1,9 @@
 import logging
+from typing import Dict, List
 
 import torch
-import torch.fx
+from torch.fx.graph import map_arg
 from torch.fx.node import Node
-from torch._subclasses.fake_tensor import FakeTensorMode
-
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +23,6 @@ class ShapeProp:
         self.mod = mod
         self.graph = mod.graph
         self.modules = dict(self.mod.named_modules())
-        self.fake_mode = FakeTensorMode()
 
     def propagate(self, *args):
         args_iter = iter(args)
@@ -42,6 +39,32 @@ class ShapeProp:
                     raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
                 attr_itr = getattr(attr_itr, atom)
             return attr_itr
+
+        # Run through reverse nodes and record the first instance of a use
+        # of a given node. This represents the *last* use of the node in the
+        # execution order of the program, which we will use to free unused
+        # values
+        node_to_last_use : Dict[Node, Node] = {}
+        user_to_last_uses : Dict[Node, List[Node]] = {}
+
+        def register_last_uses(n: Node, user: Node):
+            if n.op != 'get_attr' and n not in node_to_last_use:
+                node_to_last_use[n] = user
+                user_to_last_uses.setdefault(user, []).append(n)
+
+        for node in reversed(self.graph.nodes):
+            map_arg(node.args, lambda n: register_last_uses(n, node))
+            map_arg(node.kwargs, lambda n: register_last_uses(n, node))
+
+        def delete_unused_values(user : Node):
+            """
+            Delete values after their last use. This ensures that values that are
+            not used in the remainder of the code are freed and the memory usage
+            of the code is optimal.
+            """
+            nodes_to_delete = user_to_last_uses.get(user, [])
+            for n in nodes_to_delete:
+                env.pop(n.name)
 
         for node in self.graph.nodes:
             if node.op == 'placeholder':
@@ -63,12 +86,14 @@ class ShapeProp:
             if isinstance(result, torch.Tensor):
                 node.shape = result.shape
                 node.value = result.cpu().clone()
-                node.meta['val'] = self.fake_mode.from_tensor(result)
-            elif isinstance(result, (tuple, list)) and all(isinstance(x, torch.Tensor) for x in result):
-                node.value = [x.cpu().clone() for x in result]
+            elif isinstance(result, (tuple, list)):
+                node.value = [x.cpu().clone() if isinstance(x, torch.Tensor) else x for x in result]
             else:
+                node.value = result
                 logger.warning(f"Node {node} produced non-tensor output {result}")
 
             env[node.name] = result
+
+            delete_unused_values(node)
 
         return load_arg(list(self.graph.nodes)[-1])
