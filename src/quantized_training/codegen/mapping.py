@@ -182,7 +182,7 @@ def split_multi_head_attention(model: GraphModule):
         key = matmul_1.args[1]
         value = matmul_2.args[1]
 
-        # Find all the nodes between two matmul operations
+        # Find all the nodes between two matmul nodes
         nodes_in_path = []
         next_node = next(iter(matmul_1.users))
         while len(next_node.users) == 1 and next_node.target != torch.ops.aten.matmul.default:
@@ -999,7 +999,11 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     model_ir = Model()
     for node in model.graph.nodes:
-        operations = []
+        node_value = getattr(node, 'value', None)
+        if not isinstance(node_value, (torch.Tensor, tuple, list)):
+            continue
+
+        operators = []
         if node.op == 'placeholder':
             tensor = Tensor()
             _set_tensor_field(tensor, node, output_dir)
@@ -1009,7 +1013,7 @@ def gen_code(model, args, output_dir=None):
             _set_tensor_field(tensor, node, output_dir)
             model_ir.parameters.append(tensor)
         elif node.op == 'call_function':
-            operations.append(_map_operation(node, output_dir))
+            operators.append(_map_operation(node, output_dir))
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
@@ -1020,10 +1024,10 @@ def gen_code(model, args, output_dir=None):
                     continue
                 op = _map_operation(n, output_dir)
                 if op is not None and not isinstance(op, Nop):
-                    operations.append(op)
+                    operators.append(op)
 
-        if len(operations) and isinstance(getattr(node, 'value', None), torch.Tensor):
-            model_ir.ops.append(_compose_operator(node, operations, output_dir))
+        if len(operators) > 0:
+            model_ir.ops.append(_compose_operator(node, operators, output_dir))
 
     return model_ir
 
