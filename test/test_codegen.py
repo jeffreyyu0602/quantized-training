@@ -247,6 +247,8 @@ if __name__ == "__main__":
         qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
         quantizer.set_module_name("conv1", qconfig)
 
+    torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
+
     if args.model in TORCHVISION_MODELS:
         model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
 
@@ -256,7 +258,6 @@ if __name__ == "__main__":
 
         if args.bf16:
             model.bfloat16()
-        torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
         modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
@@ -416,7 +417,6 @@ if __name__ == "__main__":
 
         if args.bf16:
             model.bfloat16()
-        torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
         example_args = (
             torch.randn(1, 128, 512, dtype=torch_dtype),
@@ -620,6 +620,42 @@ if __name__ == "__main__":
         pt_out, gm_out = transform(
             gm,
             example_args,
+            output_dir=args.output_dir,
+        )
+    elif args.model == "vit":
+        from transformers import ViTForImageClassification
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "google/vit-base-patch16-224"
+
+        model = ViTForImageClassification.from_pretrained(
+            args.model_name_or_path,
+            attn_implementation="eager",
+            torch_dtype=torch.bfloat16 if args.bf16 else None,
+        )
+
+        modules_to_fuse = get_conv_bn_layers(model)
+        if len(modules_to_fuse) > 0:
+            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
+
+        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
+        model = prepare_pt2e(model, quantizer, example_args)
+
+        dataset = load_dataset("zh-plus/tiny-imagenet")
+
+        image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
+
+        for i in tqdm(range(10)):
+            inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
+            with torch.no_grad():
+                model(inputs.pixel_values.to(torch_dtype))
+
+        convert_pt2e(model)
+
+        pt_out, gm_out = transform(
+            model,
+            example_args,
+            output_file=args.model,
             output_dir=args.output_dir,
         )
     else:
