@@ -622,29 +622,6 @@ if __name__ == "__main__":
             example_args,
             output_dir=args.output_dir,
         )
-    elif args.model == "mcunet":
-        import sys
-        sys.path.append("mcunet")
-        from mcunet.model_zoo import net_id_list, build_model
-        print(net_id_list)  # the list of models in the model zoo
-
-        # pytorch fp32 model
-        model, image_size, description = build_model(net_id="mcunet-in4", pretrained=True)  # you can replace net_id with any other option from net_id_list
-
-        sys.path.append(".")
-        from bn_folder import bn_folding_model
-        model = bn_folding_model(model.eval())
-        model.bfloat16()
-        example_args = (torch.randn(1, 3, 160, 160, dtype=torch.bfloat16),)
-
-        gm = prepare_pt2e(model, quantizer, example_args)
-        convert_pt2e(gm)
-
-        pt_out, gm_out = transform(
-            gm,
-            example_args,
-            output_dir=args.output_dir,
-        )
     else:
         raise ValueError(f"Model {args.model} not supported")
 

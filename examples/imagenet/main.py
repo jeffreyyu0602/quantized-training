@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR', default='imagenet',
                     help='path to dataset (default: imagenet)')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
-                    choices=model_names,
+                    # choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
@@ -160,7 +160,14 @@ def main_worker(gpu, ngpus_per_node, args):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
     # create model
-    if args.pretrained:
+    if 'vit' in args.arch:
+        from transformers import ViTForImageClassification
+        model = ViTForImageClassification.from_pretrained(
+            "google/vit-base-patch16-224",
+            attn_implementation="eager",
+            torch_dtype=torch.bfloat16 if args.bf16 else None,
+        )
+    elif args.pretrained:
         print("=> using pre-trained model '{}'".format(args.arch))
         model = models.__dict__[args.arch](pretrained=True)
     else:
@@ -246,7 +253,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # Use eager mode quantization for QAT or when evaluating a QAT model.
     # Use PT2E for post-training quantization
     if not args.evaluate or args.qat_model_id is not None:
-        if args.bn_folding:
+        if args.bn_folding and len(conv_bn_pairs) > 0:
             model = torch.ao.quantization.fuse_modules_qat(model, conv_bn_pairs)
 
         quantize(model, args)
@@ -285,7 +292,7 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.convert_model:
             convert_model(model)
     else:
-        if args.bn_folding:
+        if args.bn_folding and len(conv_bn_pairs) > 0:
             model = torch.ao.quantization.fuse_modules(model.eval(), conv_bn_pairs)
 
         if args.bf16:
@@ -300,7 +307,8 @@ def main_worker(gpu, ngpus_per_node, args):
         )
 
         bs = torch.export.Dim("bs", min=1, max=args.batch_size)
-        dynamic_shapes = {"x": {0: bs}}
+        arg_name = "x" if args.arch in model_names else "pixel_values"
+        dynamic_shapes = {arg_name: {0: bs}}
         model = prepare_pt2e(model, quantizer, (example_inputs,), dynamic_shapes=dynamic_shapes)
 
         import types
@@ -318,6 +326,25 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if args.convert_model:
             convert_pt2e(model, args.bias)
+
+        if args.compile:
+            import copy
+            from quantized_training import transform
+
+            # We perform transformation specifically for compilation
+            model_to_compile = copy.deepcopy(model)
+
+            # FIXME this is not a proper use of replace_all_uses_with
+            for n in list(model_to_compile.graph.nodes):
+                if n.target == torch.ops.aten.sym_size.int:
+                    n.replace_all_uses_with(1)
+
+            transform(
+                model_to_compile,
+                example_args=(example_inputs[:1],),
+                output_file=args.arch,
+                output_dir=args.output_dir,
+            )
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
@@ -531,6 +558,9 @@ def validate(val_loader, model, criterion, args):
 
                 # compute output
                 output = model(images)
+                # ViTForImageClassification returns a tuple
+                if not isinstance(output, torch.Tensor):
+                    output = output.logits
                 loss = criterion(output, target)
 
                 # measure accuracy and record loss
