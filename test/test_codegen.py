@@ -286,7 +286,7 @@ if __name__ == "__main__":
 
         convert_pt2e(model)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             model,
             example_args,
             output_file=args.model,
@@ -308,14 +308,14 @@ if __name__ == "__main__":
         model = prepare_pt2e(model, quantizer, example_args)
         convert_pt2e(model)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             model,
             example_args,
             output_file="segformer",
             output_dir=args.output_dir,
         )
-        pt_out = pt_out.logits
-        gm_out = gm_out.logits
+        orig_output = orig_output.logits
+        new_output = new_output.logits
     elif args.model == "mobilebert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "google/mobilebert-uncased"
@@ -404,7 +404,7 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             gm,
             example_args,
             output_file="mobilebert",
@@ -441,15 +441,15 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             gm,
             example_args,
             output_file="mobilebert",
             output_dir=args.output_dir,
         )
 
-        pt_out = pt_out[0]
-        gm_out = gm_out[0]
+        orig_output = orig_output[0]
+        new_output = new_output[0]
     elif args.model == "bert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "bert-base-uncased"
@@ -495,7 +495,7 @@ if __name__ == "__main__":
         gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
         convert_pt2e(gm)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             gm,
             example_args,
             output_file="bert",
@@ -549,7 +549,7 @@ if __name__ == "__main__":
 
         replace_rmsnorm_with_layer_norm(gm)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             gm,
             example_args,
             output_dir=args.output_dir,
@@ -617,7 +617,7 @@ if __name__ == "__main__":
             position_embeddings = tuple(t.float() for t in position_embeddings)
             example_args = (hidden_states.float(), causal_mask.float(), position_embeddings)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             gm,
             example_args,
             output_dir=args.output_dir,
@@ -652,19 +652,22 @@ if __name__ == "__main__":
 
         convert_pt2e(model)
 
-        pt_out, gm_out = transform(
+        orig_output, new_output = transform(
             model,
             example_args,
             output_file=args.model,
             output_dir=args.output_dir,
         )
+
+        orig_output = orig_output.logits
+        new_output = new_output.logits
     else:
         raise ValueError(f"Model {args.model} not supported")
 
     try:
-        assert torch.all(pt_out == gm_out)
+        assert torch.all(orig_output == new_output)
         print("Results match")
     except Exception as e:
         print(e)
-        print(pt_out)
-        print(gm_out)
+        print(orig_output)
+        print(new_output)
