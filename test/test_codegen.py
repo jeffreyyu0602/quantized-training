@@ -141,7 +141,7 @@ if __name__ == "__main__":
         quantizer.set_module_name("fc", None)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-        model = prepare_pt2e(model, quantizer, example_args)
+        gm = prepare_pt2e(model, quantizer, example_args)
 
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
@@ -150,12 +150,12 @@ if __name__ == "__main__":
         for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
             with torch.no_grad():
-                model(inputs.pixel_values.to(torch_dtype))
+                gm(inputs.pixel_values.to(torch_dtype))
 
-        convert_pt2e(model)
+        convert_pt2e(gm)
 
         orig_output, new_output = transform(
-            model,
+            gm,
             example_args,
             output_file=args.model,
             output_dir=args.output_dir,
@@ -173,11 +173,11 @@ if __name__ == "__main__":
 
         example_args = (torch.randn(1, 3, 512, 672),)
 
-        model = prepare_pt2e(model, quantizer, example_args)
-        convert_pt2e(model)
+        gm = prepare_pt2e(model, quantizer, example_args)
+        convert_pt2e(gm)
 
         orig_output, new_output = transform(
-            model,
+            gm,
             example_args,
             output_file="segformer",
             output_dir=args.output_dir,
@@ -474,8 +474,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        layer_norm_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
-        replace_rmsnorm_with_layer_norm(gm, layer_norm_input)
+        example_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
+        replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
         eliminate_dtype_conversion(gm)
         convert_expand(gm)
 
@@ -502,14 +502,13 @@ if __name__ == "__main__":
             attn_implementation="eager",
             torch_dtype=torch.bfloat16 if args.bf16 else None,
         )
-        embeddings = model.vit.embeddings
 
         modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-        model = prepare_pt2e(model, quantizer, example_args)
+        gm = prepare_pt2e(model, quantizer, example_args)
 
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
@@ -518,18 +517,16 @@ if __name__ == "__main__":
         for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
             with torch.no_grad():
-                model(inputs.pixel_values.to(torch_dtype))
+                gm(inputs.pixel_values.to(torch_dtype))
 
-        convert_pt2e(model)
-
-        # pad_matmul_to_multiples_of_unroll_dim(model)
+        convert_pt2e(gm)
 
         from quantized_training.codegen.utils import pad_vit
 
-        pad_vit(model, embeddings, example_args)
+        pad_vit(gm, model.vit.embeddings, example_args)
 
         orig_output, new_output = transform(
-            model,
+            gm,
             example_args,
             output_file=args.model,
             output_dir=args.output_dir,

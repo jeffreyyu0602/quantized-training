@@ -3,6 +3,7 @@ from typing import List
 
 import torch
 from torch._export import capture_pre_autograd_graph
+from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 
 from .mapping import _decompose_node
 from ..pt2e_utils import get_aten_graph_module
@@ -47,19 +48,14 @@ def replace_interpolate():
     torch.nn.functional.interpolate = torch.ops.custom.interpolate
 
 
-def replace_rmsnorm_with_layer_norm(model, example_input):
+def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
     """Replace LLaMA RMSNorm with ATen layer_norm
     """
     original_graph = model.graph
 
-    from transformers.models.llama.modeling_llama import LlamaRMSNorm
-    layer_norm = LlamaRMSNorm(example_input.shape[-1]).bfloat16()
-
-    pattern = get_aten_graph_module(layer_norm, (example_input,))
+    pattern = get_aten_graph_module(layer_norm, example_input)
     _convert_scalars_to_attrs(pattern)
     pattern_graph = pattern.graph
-
-    from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 
     matcher = SubgraphMatcher(
         pattern_graph,
@@ -226,8 +222,6 @@ def pad_vit(model, embeddings, example_inputs, array_size = 32):
 
     pattern = get_aten_graph_module(embeddings, example_inputs)
     pattern_graph = pattern.graph
-
-    from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 
     matcher = SubgraphMatcher(
         pattern_graph,
