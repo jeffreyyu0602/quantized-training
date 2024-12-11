@@ -198,11 +198,11 @@ def pad_matmul_to_multiples_of_unroll_dim(
                     torch.ops.aten.slice.Tensor,
                     (node, -2, 0, input1.meta["val"].shape[-2]),
                 )
-                for user in list(node.users):
-                    if id(user) != id(output_node):
-                        user.replace_input_with(node, output_node)
-                if (dtype := node.meta.get("dtype")) is not None:
-                    output_node.meta["dtype"] = dtype
+            for user in list(node.users):
+                if id(user) != id(output_node):
+                    user.replace_input_with(node, output_node)
+            if (dtype := node.meta.get("dtype")) is not None:
+                output_node.meta["dtype"] = dtype
 
         if oc_pad:
             with model.graph.inserting_before(user_node):
@@ -210,11 +210,55 @@ def pad_matmul_to_multiples_of_unroll_dim(
                     torch.ops.aten.slice.Tensor,
                     (output_node, -1, 0, input2.meta["val"].shape[-1]),
                 )
-                for user in list(output_node.users):
-                    if id(user) != id(slice_node):
-                        user.replace_input_with(output_node, slice_node)
-                if (dtype := output_node.meta.get("dtype")) is not None:
-                    slice_node.meta["dtype"] = dtype
+            for user in list(output_node.users):
+                if id(user) != id(slice_node):
+                    user.replace_input_with(output_node, slice_node)
+            if (dtype := output_node.meta.get("dtype")) is not None:
+                slice_node.meta["dtype"] = dtype
+
+    model.graph.lint()
+    model.recompile()
+    return model
+
+
+def pad_vit(model, embeddings, example_inputs, array_size = 32):
+    original_graph = model.graph
+
+    pattern = get_aten_graph_module(embeddings, example_inputs)
+    pattern_graph = pattern.graph
+
+    from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
+
+    matcher = SubgraphMatcher(
+        pattern_graph,
+        match_output=False,
+        match_placeholder=False,
+        remove_overlapping_matches=True,
+        ignore_literals=False,
+    )
+    _matches: List[InternalMatch] = matcher.match(original_graph)
+    print(f"Found {len(_matches)} matches")
+
+    vit_embed_out = _matches[0].returning_nodes[0]\
+
+    orig_dim = vit_embed_out.meta["val"].shape[-2]
+    pad = (array_size - (orig_dim % array_size)) % array_size
+    print(f"Padding {vit_embed_out} with {pad}")
+
+    with model.graph.inserting_after(vit_embed_out):
+        pad_node = model.graph.call_function(
+            torch.ops.aten.pad.default,
+            (vit_embed_out, [0, 0, 0, pad]),
+        )
+
+    for user in list(vit_embed_out.users):
+        if id(user) != id(pad_node):
+            user.replace_input_with(vit_embed_out, pad_node)
+
+    for node in model.graph.nodes:
+        if node.target == torch.ops.aten.view.default:
+            new_size = [x if x != orig_dim else x + pad for x in node.args[1]]
+            node.args = (node.args[0], new_size)
 
     model.graph.lint()
     model.recompile()

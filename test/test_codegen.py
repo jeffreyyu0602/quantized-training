@@ -502,6 +502,7 @@ if __name__ == "__main__":
             attn_implementation="eager",
             torch_dtype=torch.bfloat16 if args.bf16 else None,
         )
+        embeddings = model.vit.embeddings
 
         modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
@@ -521,7 +522,11 @@ if __name__ == "__main__":
 
         convert_pt2e(model)
 
-        pad_matmul_to_multiples_of_unroll_dim(model)
+        # pad_matmul_to_multiples_of_unroll_dim(model)
+
+        from quantized_training.codegen.utils import pad_vit
+
+        pad_vit(model, embeddings, example_args)
 
         orig_output, new_output = transform(
             model,
