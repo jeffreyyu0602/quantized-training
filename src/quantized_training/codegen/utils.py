@@ -159,35 +159,34 @@ def pad_matmul_to_multiples_of_unroll_dim(
 
         input1 = node.args[0]
         input2 = node.args[1]
-        input1_dims = sum(1 for d in input1.meta["val"].shape if d > 1)
-        input2_dims = sum(1 for d in input2.meta["val"].shape if d > 1)
-        if input1_dims < 3 and input2_dims < 3:
+        input1_ndim = sum(1 for d in input1.meta["val"].shape if d > 1)
+        input2_ndim = sum(1 for d in input2.meta["val"].shape if d > 1)
+        if input1_ndim < 3 and input2_ndim < 3:
             continue
-
-        print(f"Found matmul {node}")
-        print(input1.meta["val"].shape, input2.meta["val"].shape)
 
         input_pad = (ic_unroll - (input1.meta["val"].shape[-2] % ic_unroll)) % ic_unroll
         ic_pad = (ic_unroll - (input1.meta["val"].shape[-1] % ic_unroll)) % ic_unroll
         oc_pad = (oc_unroll - (input2.meta["val"].shape[-1] % oc_unroll)) % oc_unroll
 
         if input_pad or ic_pad:
-            print(f"Pad input1 with ({input_pad}, {ic_pad})")
             with model.graph.inserting_before(node):
                 pad_node = model.graph.call_function(
                     torch.ops.aten.pad.default,
                     (input1, [0, ic_pad, 0, input_pad]),
                 )
                 node.replace_input_with(input1, pad_node)
+            if (dtype := input1.meta.get("dtype")) is not None:
+                pad_node.meta["dtype"] = dtype
 
         if ic_pad or oc_pad:
-            print(f"Pad input2 with ({ic_pad}, {oc_pad})")
             with model.graph.inserting_before(node):
                 pad_node = model.graph.call_function(
                     torch.ops.aten.pad.default,
                     (input2, [0, oc_pad, 0, ic_pad]),
                 )
                 node.replace_input_with(input2, pad_node)
+            if (dtype := input2.meta.get("dtype")) is not None:
+                pad_node.meta["dtype"] = dtype
 
         # TODO insert the slicing node after the softmax and elementwise operations
 
@@ -202,6 +201,8 @@ def pad_matmul_to_multiples_of_unroll_dim(
                 for user in list(node.users):
                     if id(user) != id(output_node):
                         user.replace_input_with(node, output_node)
+                if (dtype := node.meta.get("dtype")) is not None:
+                    output_node.meta["dtype"] = dtype
 
         if oc_pad:
             with model.graph.inserting_before(user_node):
@@ -212,8 +213,8 @@ def pad_matmul_to_multiples_of_unroll_dim(
                 for user in list(output_node.users):
                     if id(user) != id(slice_node):
                         user.replace_input_with(output_node, slice_node)
-
-    model.graph.print_tabular()
+                if (dtype := output_node.meta.get("dtype")) is not None:
+                    slice_node.meta["dtype"] = dtype
 
     model.graph.lint()
     model.recompile()
