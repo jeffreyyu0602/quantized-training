@@ -31,7 +31,7 @@ from quantized_training.codegen.utils import (
     convert_expand,
     eliminate_dtype_conversion,
     get_conv_bn_layers,
-    pad_matmul_to_multiples_of_unroll_dim,
+    pad_vit_embeddings_output,
     replace_interpolate,
     replace_rmsnorm_with_layer_norm,
 )
@@ -521,9 +521,7 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        from quantized_training.codegen.utils import pad_vit
-
-        pad_vit(gm, model.vit.embeddings, example_args)
+        pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
 
         orig_output, new_output = transform(
             gm,

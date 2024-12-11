@@ -184,8 +184,6 @@ def pad_matmul_to_multiples_of_unroll_dim(
             if (dtype := input2.meta.get("dtype")) is not None:
                 pad_node.meta["dtype"] = dtype
 
-        # TODO insert the slicing node after the softmax and elementwise operations
-
         user_node = next(iter(node.users))
         output_node = node
         if input_pad:
@@ -217,10 +215,18 @@ def pad_matmul_to_multiples_of_unroll_dim(
     return model
 
 
-def pad_vit(model, embeddings, example_inputs, array_size = 32):
+def pad_vit_embeddings_output(
+    model,
+    embeddings,
+    example_inputs,
+    dynamic_shapes=None,
+    array_size=32
+):
     original_graph = model.graph
 
-    pattern = get_aten_graph_module(embeddings, example_inputs)
+    pattern = get_aten_graph_module(
+        embeddings, example_inputs, dynamic_shapes=dynamic_shapes
+    )
     pattern_graph = pattern.graph
 
     matcher = SubgraphMatcher(
@@ -232,6 +238,9 @@ def pad_vit(model, embeddings, example_inputs, array_size = 32):
     )
     _matches: List[InternalMatch] = matcher.match(original_graph)
     print(f"Found {len(_matches)} matches")
+
+    if not _matches:
+        return model
 
     vit_embed_out = _matches[0].returning_nodes[0]\
 

@@ -331,7 +331,7 @@ def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
 def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
     graph = model.graph
 
-    node_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
     nodes_fused: Dict[Node, None] = {}
 
     fused_nodes_list = []
@@ -368,7 +368,7 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
                     continue
 
                 candidate = [*nodes, *nop_nodes, output_node]
-                if _nodes_sequential(candidate, node_order):
+                if _nodes_sequential(candidate, nodes_order):
                     matched = True
                     fusion_candidates.append(candidate)
                     for n in candidate:
@@ -510,8 +510,8 @@ def is_tranpose(node: Node):
 
 
 def check_branch_independence(graph: torch.fx.Graph, nodes: List[Node]):
-    node_order = {node: idx for idx, node in enumerate(graph.nodes)}
-    nodes = sorted(nodes, key=lambda n: node_order[n])
+    nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    nodes = sorted(nodes, key=lambda n: nodes_order[n])
 
     for i in range(len(nodes) - 2, -1, -1):
         node = nodes[i]
@@ -544,7 +544,7 @@ def search_group(node, node_lists):
 def fuse_reshape_with_input(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
-    node_dict: Dict[Node, Node],
+    nodes_map: Dict[Node, Node],
     reshape_node: Node,
     node: Node = None,
     fused_nodes=None,
@@ -564,7 +564,7 @@ def fuse_reshape_with_input(
             group.extend(n for n in fused_nodes if n not in group)
         else:
             candidates.append(fused_nodes)
-        node_dict[fused_nodes[0]] = fused_nodes[-2]
+        nodes_map[fused_nodes[0]] = fused_nodes[-2]
         return [fused_nodes[0]]
 
     is_select_after_tranpose = (
@@ -587,7 +587,7 @@ def fuse_reshape_with_input(
     all_reshape_nodes = []
     for user in list(node.users):
         nodes = fuse_reshape_with_input(
-            graph, candidates, node_dict, reshape_node, user, fused_nodes.copy()
+            graph, candidates, nodes_map, reshape_node, user, fused_nodes.copy()
         )
         all_reshape_nodes.extend(nodes)
     return all_reshape_nodes
@@ -596,7 +596,7 @@ def fuse_reshape_with_input(
 def swap_tranpose_and_select(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
-    node_dict: Dict[Node, Node],
+    nodes_map: Dict[Node, Node],
     node: Node,
 ):
     ndim = node.args[0].value.ndim
@@ -630,8 +630,8 @@ def swap_tranpose_and_select(
             group.remove(n)
         group.append(new_node)
 
-        user_node = node_dict.pop(node, None)
-        node_dict[new_node] = (
+        user_node = nodes_map.pop(node, None)
+        nodes_map[new_node] = (
             new_node if user_node == select_nodes[-1] else user_node
         )
 
@@ -639,7 +639,7 @@ def swap_tranpose_and_select(
 def fuse_op_with_input(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
-    node_dict: Dict[Node, Node],  # use a better name
+    nodes_map: Dict[Node, Node],  # use a better name
     node_to_fuse: Node,
     node: Node = None,
     fused_nodes=None,
@@ -658,7 +658,7 @@ def fuse_op_with_input(
             group.extend(n for n in fused_nodes if n not in group)
         else:
             candidates.append(fused_nodes)
-        node_dict[fused_nodes[0]] = fused_nodes[-2]
+        nodes_map[fused_nodes[0]] = fused_nodes[-2]
         return
 
     if (
@@ -671,7 +671,7 @@ def fuse_op_with_input(
 
     for user in list(node.users):
         fuse_op_with_input(
-            graph, candidates, node_dict, node_to_fuse, user, fused_nodes.copy()
+            graph, candidates, nodes_map, node_to_fuse, user, fused_nodes.copy()
         )
 
 
@@ -690,7 +690,7 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
     if mapping is None:
         mapping = {}
 
-    node_map = {}
+    nodes_map = {}
 
     ShapeProp(model).propagate(*example_inputs)
     transform_cat_nodes(model)
@@ -734,7 +734,7 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
                 input_node = input_node.all_input_nodes[0]
 
             if match_found and len(input_node.users) == 1:
-                node_map[reshape_node] = input_node
+                nodes_map[reshape_node] = input_node
                 if (group := search_group(input_node, fused_nodes_list)) is not None:
                     group.extend(n for n in fused_nodes if n not in group)
                 else:
@@ -742,11 +742,11 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
                     fused_nodes_list.append(fused_nodes)
                 continue
 
-        nodes = fuse_reshape_with_input(graph, fused_nodes_list, node_map, reshape_node)
+        nodes = fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, reshape_node)
 
         for n in nodes:
             if n.target == torch.ops.aten.transpose.int:
-                swap_tranpose_and_select(graph, fused_nodes_list, node_map, n)
+                swap_tranpose_and_select(graph, fused_nodes_list, nodes_map, n)
 
     partitions = get_source_partitions(graph, [operator.getitem])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -763,7 +763,7 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
             logger.info(f"Node {slice_node} is a nop or can be handled by memory planner.")
             continue
 
-        fuse_op_with_input(graph, fused_nodes_list, node_map, slice_node)
+        fuse_op_with_input(graph, fused_nodes_list, nodes_map, slice_node)
 
     partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -774,15 +774,15 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
         if search_group(dequantized_node, fused_nodes_list) is not None:
             continue
 
-        fuse_op_with_input(graph, fused_nodes_list, node_map, dequantized_node)
+        fuse_op_with_input(graph, fused_nodes_list, nodes_map, dequantized_node)
 
     # Fuse nodes that appear earlier in the graph first
-    node_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
     for nodes in fused_nodes_list:
-        nodes.sort(key=lambda n: node_order[n])
-    fused_nodes_list.sort(key=lambda fn: node_order[fn[-1]])
+        nodes.sort(key=lambda n: nodes_order[n])
+    fused_nodes_list.sort(key=lambda fn: nodes_order[fn[-1]])
 
-    node_map = {v.name: k.name for k, v in node_map.items()}
+    nodes_map = {v.name: k.name for k, v in nodes_map.items()}
 
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
@@ -793,7 +793,7 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
 
         nodes = list(gm.graph.nodes)
         for n in nodes:
-            if (name := node_map.get(n.name, None)) is None:
+            if (name := nodes_map.get(n.name, None)) is None:
                 continue
             source_node = next(iter(n for n in nodes if n.name == name))
 

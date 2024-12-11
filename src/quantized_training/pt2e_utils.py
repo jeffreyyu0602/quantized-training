@@ -1,6 +1,6 @@
 import re
 from collections import defaultdict
-from typing import Dict, Tuple, Callable, Any
+from typing import Dict, Tuple, Callable, Any, Union
 
 import torch
 from torch._export import capture_pre_autograd_graph
@@ -181,6 +181,7 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
 def get_aten_graph_module(
     pattern: Callable,
     example_inputs: Tuple[Any, ...],
+    dynamic_shapes: Union[Dict[str, Any], Tuple[Any], None] = None,
     is_cuda: bool = False,
     **kwargs,
 ) -> GraphModule:
@@ -193,6 +194,7 @@ def get_aten_graph_module(
         pattern,
         example_inputs,
         kwargs,
+        dynamic_shapes=dynamic_shapes,
     )
     aten_pattern.graph.eliminate_dead_code()
     aten_pattern.recompile()
