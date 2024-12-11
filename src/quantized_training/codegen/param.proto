@@ -3,7 +3,7 @@ syntax = "proto3";
 package codegen;
 
 message Memory {
-  uint32 partition = 1;
+  int32 partition = 1;
   uint64 offset = 2;
 }
 
@@ -100,10 +100,10 @@ message SlicingOp {
   string name = 1;
   string opcode = 2;
   Tensor input = 3;
-  uint32 dim = 4;
-  uint32 start = 5;
-  uint32 end = 6;
-  uint32 step = 7;
+  int32 dim = 4;
+  int32 start = 5;
+  int32 end = 6;
+  int32 step = 7;
   repeated int32 output_sizes = 8;
 }
 

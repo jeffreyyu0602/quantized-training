@@ -23,12 +23,18 @@ from quantized_training import (
     QuantizationSpec,
     add_qspec_args,
     convert_pt2e,
-    get_aten_graph_module,
     get_default_quantizer,
     prepare_pt2e,
     transform,
 )
-from quantized_training.codegen.mapping import _decompose_node
+from quantized_training.codegen.utils import (
+    convert_expand,
+    eliminate_dtype_conversion,
+    get_conv_bn_layers,
+    pad_matmul_to_multiples_of_unroll_dim,
+    replace_interpolate,
+    replace_rmsnorm_with_layer_norm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,144 +50,6 @@ task_to_keys = {
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
-
-
-def replace_interpolate():
-    from torch.library import Library, impl
-
-    template = (
-        "interpolate(Tensor input, SymInt[] size, float[]? scale_factor = None,"
-        "str mode = 'nearest', bool? align_corners = None, "
-        "bool? recompute_scale_factor = None, bool antialias = False) -> Tensor"
-    )
-
-    global m
-    m = Library("custom", "DEF")
-    m.define(template)
-
-    orig_interpolate = torch.nn.functional.interpolate
-
-    @impl(m, "interpolate", "CompositeExplicitAutograd")
-    def interpolate(*args, **kwargs):
-        return orig_interpolate(*args, **kwargs)
-
-    torch.nn.functional.interpolate = torch.ops.custom.interpolate
-
-
-def get_conv_bn_layers(model):
-    layers = []
-    module_names = list(model._modules)
-    for k, name in enumerate(module_names):
-        if len(list(model._modules[name]._modules)) > 0:
-            conv_bn_pairs = get_conv_bn_layers(model._modules[name])
-            layers.extend([[f'{name}.{conv}', f'{name}.{bn}'] for conv, bn in conv_bn_pairs])
-        else:
-            if isinstance(model._modules[name], torch.nn.BatchNorm2d):
-                if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
-                    layers.append([module_names[k-1], name])
-    return layers
-
-
-def replace_rmsnorm_with_layer_norm(model):
-    """Replace LLaMA RMSNorm with ATen layer_norm
-    """
-    original_graph = model.graph
-
-    from transformers.models.llama.modeling_llama import LlamaRMSNorm
-    layer_norm = LlamaRMSNorm(2048).bfloat16()
-
-    example_args = (torch.randn(1, 128, 2048, dtype=torch.bfloat16),)
-    pattern = get_aten_graph_module(layer_norm, example_args)
-    pattern = quantizer.transform_for_annotation(pattern)
-    pattern_graph = pattern.graph
-
-    from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
-
-    matcher = SubgraphMatcher(
-        pattern_graph,
-        match_output=False,
-        match_placeholder=False,
-        remove_overlapping_matches=True,
-        ignore_literals=False,
-    )
-    _matches: List[InternalMatch] = matcher.match(original_graph)
-    print(f"Found {len(_matches)} matches")
-
-    param_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
-
-    for match in _matches:
-        mapped_param_node = match.nodes_map[param_node]
-        input_node = match.placeholder_nodes[0]
-        output_node = match.returning_nodes[0]
-        input_shape = input_node.meta["val"].shape
-        layer_norm_inputs = [input_node, [input_shape[-1]], mapped_param_node]
-        with original_graph.inserting_before(output_node):
-            new_node = original_graph.call_function(
-                torch.ops.aten.layer_norm.default,
-                tuple(layer_norm_inputs),
-                {}
-            )
-        output_node.replace_all_uses_with(new_node)
-        original_graph.erase_node(output_node)
-
-    original_graph.lint()
-    original_graph.eliminate_dead_code()
-    model.recompile()
-
-
-def eliminate_dtype_conversion(model: torch.fx.GraphModule):
-    for node in list(model.graph.nodes):
-        if node.target == torch.ops.aten.to.dtype:
-            node.replace_all_uses_with(node.args[0])
-            model.graph.erase_node(node)
-
-        if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
-            node.args = node.args[:-1]
-
-    model.graph.lint()
-    model.recompile()
-
-
-def convert_expand(model: torch.fx.GraphModule):
-    for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.expand.default:
-            continue
-
-        input_node = node.args[0]
-        sizes = node.args[1]
-        original_shape = input_node.meta["val"].shape
-        assert len(sizes) >= len(original_shape), (
-            "Sizes must have at least as many dimensions as the original tensor."
-        )
-
-        # Add singleton dimensions to match the size length
-        while len(original_shape) < len(sizes):
-            input = input.unsqueeze(0)
-            original_shape = input.shape
-
-        class Expand(torch.nn.Module):
-            def forward(self, input):
-                # Stack along the first dimension repeatedly to create the expanded shape
-                for dim, size in enumerate(sizes):
-                    if input.shape[dim] == 1 and size > 1:
-                        stacked_tensors = []
-                        for _ in range(size):
-                            stacked_tensors.append(input.squeeze(dim) * 1)
-                        input = torch.stack(stacked_tensors, dim=dim)
-                    elif input.shape[dim] != size:
-                        raise ValueError(f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}.")
-
-                return input
-
-        gm: torch.fx.GraphModule = capture_pre_autograd_graph(
-            Expand(), (input_node.meta["val"],)
-        )
-
-        _decompose_node(model, gm, node)
-        model.graph.erase_node(node)
-
-    model.graph.lint()
-    model.recompile()
 
 
 TORCHVISION_MODELS = {
@@ -606,7 +474,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        replace_rmsnorm_with_layer_norm(gm)
+        layer_norm_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
+        replace_rmsnorm_with_layer_norm(gm, layer_norm_input)
         eliminate_dtype_conversion(gm)
         convert_expand(gm)
 
@@ -651,6 +520,8 @@ if __name__ == "__main__":
                 model(inputs.pixel_values.to(torch_dtype))
 
         convert_pt2e(model)
+
+        pad_matmul_to_multiples_of_unroll_dim(model)
 
         orig_output, new_output = transform(
             model,
