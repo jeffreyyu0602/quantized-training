@@ -507,6 +507,8 @@ if __name__ == "__main__":
         if len(modules_to_fuse) > 0:
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
+        quantizer.set_module_name("classifier", None)
+
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
 
