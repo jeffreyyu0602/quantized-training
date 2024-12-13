@@ -55,6 +55,8 @@ def replace_elementwise_with_vmap(
 ) -> GraphModule:
     device = assert_and_get_unique_device(model)
 
+    nodes_map = {}
+
     mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
     for node in list(model.graph.nodes):
         if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
@@ -66,18 +68,24 @@ def replace_elementwise_with_vmap(
 
         logger.info(f"Replace {node.target} with value mapping")
 
-        values = (torch.arange(2 ** 16, dtype=torch.int16, device=device)
-                  .view(torch.bfloat16))
-        val_map = node.target(values, *node.args[1:])
+        if (get_attr_node := nodes_map.get(node.target, None)) is None:
+            values = (torch.arange(2 ** 16, dtype=torch.int16, device=device)
+                    .view(torch.bfloat16))
+            val_map = node.target(values, *node.args[1:])
+
+            with model.graph.inserting_before(node):
+                get_attr_node = create_getattr_from_value(
+                    model, model.graph, f'_tensor_constant_', val_map
+                )
+
+            nodes_map[node.target] = get_attr_node
 
         with model.graph.inserting_before(node):
-            get_attr_node = create_getattr_from_value(
-                model, model.graph, f'_tensor_constant_', val_map
-            )
             new_node = model.graph.call_function(
                 torch.ops.quantized_ops.vmap, (node.args[0], get_attr_node)
             )
 
+        new_node.meta = node.meta
         new_node.meta["source_fn_stack"] = [(new_node.name, "vmap")]
 
         node.replace_all_uses_with(new_node)
@@ -87,7 +95,6 @@ def replace_elementwise_with_vmap(
 
     model.graph.eliminate_dead_code()
     model.recompile()
-
     return model
 
 
@@ -506,6 +513,13 @@ def is_tranpose(node: Node):
         ndim = node.args[0].value.ndim
         axes = {x if x >= 0 else x + ndim for x in node.args[1:]}
         return (axes == {ndim - 2, ndim - 1})
+
+    if node.target == torch.ops.aten.permute.default:
+        permute_dims = node.args[1]
+        tranpose_dims = list(range(len(permute_dims)))
+        tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
+        return permute_dims == tranpose_dims
+
     return False
 
 

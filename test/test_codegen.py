@@ -34,6 +34,7 @@ from quantized_training.codegen.utils import (
     pad_vit_embeddings_output,
     replace_interpolate,
     replace_rmsnorm_with_layer_norm,
+    replace_permute_with_transpose,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,11 +172,33 @@ if __name__ == "__main__":
         modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
         model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
-        example_args = (torch.randn(1, 3, 512, 672),)
+        if args.bf16:
+            model.bfloat16()
 
+        example_args = (torch.randn(1, 3, 512, 672, dtype=torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
+
+        dataset = load_dataset("zh-plus/tiny-imagenet")
+
+        import torchvision.transforms as transforms
+        preprocess = transforms.Compose([
+            transforms.RandomResizedCrop((512, 672)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+
+        for i in tqdm(range(10)):
+            inputs = preprocess(dataset['train'][i]["image"])
+            with torch.no_grad():
+                gm(inputs.unsqueeze(0).to(torch_dtype))
+
         convert_pt2e(gm)
 
+        replace_permute_with_transpose(gm)
+
+        # TODO why the output is different after replacing gelu with vmap
         orig_output, new_output = transform(
             gm,
             example_args,

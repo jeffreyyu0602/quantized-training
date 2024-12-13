@@ -266,3 +266,34 @@ def pad_vit_embeddings_output(
     model.graph.lint()
     model.recompile()
     return model
+
+
+def replace_permute_with_transpose(model: torch.fx.GraphModule):
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.permute.default:
+            continue
+
+        # if permuted dims is the last two dims
+        permute_dims = node.args[1]
+        tranpose_dims = list(range(len(permute_dims)))
+        tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
+        if permute_dims != tranpose_dims:
+            continue
+
+        with model.graph.inserting_before(node):
+            transpose_node = model.graph.call_function(
+                torch.ops.aten.transpose.int,
+                (node.args[0], -1, -2),
+            )
+
+        # Since we are doing a 1 to 1 replacement, we can copy over the meta data
+        transpose_node.meta = node.meta
+
+        node.replace_all_uses_with(transpose_node)
+        model.graph.erase_node(node)
+
+        logger.info(f"Replaced permute with transpose: {node} -> {transpose_node}")
+
+    model.graph.lint()
+    model.recompile()
+    return model
