@@ -175,9 +175,6 @@ if __name__ == "__main__":
         if args.bf16:
             model.bfloat16()
 
-        example_args = (torch.randn(1, 3, 512, 672, dtype=torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
-
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
         import torchvision.transforms as transforms
@@ -188,6 +185,10 @@ if __name__ == "__main__":
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
         ])
+
+        inputs = preprocess(dataset['train'][0]["image"])
+        example_args = (inputs.unsqueeze(0).to(torch_dtype),)
+        gm = prepare_pt2e(model, quantizer, example_args)
 
         for i in tqdm(range(10)):
             inputs = preprocess(dataset['train'][i]["image"])
@@ -532,12 +533,13 @@ if __name__ == "__main__":
 
         quantizer.set_module_name("classifier", None)
 
-        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
-
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
         image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
+
+        inputs = image_processor(dataset['train'][0]["image"], return_tensors="pt")
+        example_args = (inputs.pixel_values.to(torch_dtype),)
+        gm = prepare_pt2e(model, quantizer, example_args)
 
         for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
