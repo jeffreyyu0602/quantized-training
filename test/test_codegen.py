@@ -347,6 +347,9 @@ if __name__ == "__main__":
             args.model_name_or_path = "bert-base-uncased"
         model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
+        if args.bf16:
+            model.bfloat16()
+
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
         input_shape = input_ids.size()
         attention_mask = torch.ones(input_shape)
