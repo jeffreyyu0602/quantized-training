@@ -390,6 +390,8 @@ if __name__ == "__main__":
         )
         example_args = (embedding_output, extended_attention_mask, head_mask)
 
+        quantizer.set_module_name("classifier", None)
+
         gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
         convert_pt2e(gm)
 
