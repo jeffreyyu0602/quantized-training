@@ -345,7 +345,10 @@ if __name__ == "__main__":
     elif args.model == "bert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "bert-base-uncased"
-        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
+        model = AutoModelForSequenceClassification.from_pretrained(
+            args.model_name_or_path,
+            attn_implementation="eager",
+        ).eval()
 
         if args.bf16:
             model.bfloat16()
