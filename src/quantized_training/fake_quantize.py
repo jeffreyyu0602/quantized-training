@@ -96,14 +96,17 @@ class MXFakeQuantFunction(torch.autograd.Function):
         if fake_quant_enabled[0] == 0:
             return input
 
+        assert block_size > 0
+
+        # Make sure axes is a list of non-negative numbers
         axes = [axes] if type(axes) == int else axes
         axes = [x + input.ndim if x < 0 else x for x in axes]
 
         # Perform tiling to the hardware vector size
-        assert block_size > 0
         input, axes, orig_shape, padded_shape = _reshape_to_blocks(
             input, axes, block_size
         )
+
         shared_exp_axes = [x + 1 for x in axes]
 
         if force_scale_power_of_two:
@@ -180,7 +183,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
             sf = torch.where(amax > 0.0, sf, scale)
             sf = torch.where(torch.isfinite(amax), sf, scale)
             if force_scale_power_of_two:
-                sf = torch.pow(2, torch.floor(torch.log2(sf)))
+                sf = torch.pow(2, torch.ceil(torch.log2(sf)))
             scale.copy_(sf)
 
         if fake_quant_enabled[0] == 1:

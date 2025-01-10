@@ -60,6 +60,7 @@ def main(args):
     quantizer = get_default_quantizer(
         input_activation=args.activation,
         weight=args.weight,
+        bias=args.bias,
         record_histogram=args.record_histogram,
         force_scale_power_of_two=args.force_scale_power_of_two,
         outlier_threshold=args.outlier_threshold,
@@ -70,6 +71,12 @@ def main(args):
     example_kwargs = {"labels": input_ids.clone()}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
+
+    # from quantized_training import print_node_scope_tabular, get_aten_graph_module
+    # gm = get_aten_graph_module(model, example_args)
+    # print_node_scope_tabular(gm)
+
+    quantizer.set_module_name_object_type_order("model.rotary_emb", torch.ops.aten.matmul.default, 0, None)
 
     # New LLaMA implementation includes @torch.no_grad() statement, which will turn
     # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().
@@ -147,7 +154,7 @@ def main(args):
 
     for name, module in model.named_modules():
         if hasattr(module, "max_outlier_pct"):
-            print(f"{name}: {module.max_outlier_pct:.2%} outliers")
+            logger.info(f"{name}: {module.max_outlier_pct:.2%} outliers")
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
