@@ -61,6 +61,8 @@ OPERATOR_MAPPINGS = {
     "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
     "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
     "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
+    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
+    "silu": [torch.nn.SiLU, torch.nn.functional.silu],
     "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
     "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
     "quantize": [torch.ops.quantized_ops.quantize],
@@ -97,7 +99,7 @@ def transform(
         2: ["add", "sub", "mul", "div"],
         3: ["exp"],
         4: ["add", "mul", "div"],
-        5: ["relu", "vmap"],
+        5: ["relu", "gelu", "silu", "vmap"],
         7: ["quantize"],
     }
 

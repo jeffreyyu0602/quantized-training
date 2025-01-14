@@ -447,14 +447,15 @@ if __name__ == "__main__":
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
         convert_pt2e(gm)
 
-        replace_rmsnorm_with_layer_norm(gm)
+        example_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
+        replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
 
         orig_output, new_output = transform(
             gm,
             example_args,
             output_dir=args.output_dir,
         )
-    elif args.model == "llama_encoder":
+    elif args.model == "llama_decoder":
         from transformers import AutoModelForCausalLM
 
         if args.model_name_or_path is None:
