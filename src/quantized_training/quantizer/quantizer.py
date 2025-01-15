@@ -34,13 +34,7 @@ PARAMS_TYPE = {
     'block_size': int,
 }
 
-def get_default_qmax(dtype):
-    if dtype == "posit8_1":
-        return 64
-
-    if (match := re.fullmatch(r'nf(\d+)', dtype)):
-        return 1
-
+def get_max_val(dtype):
     if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
         return 2 ** (nbits - 1) - 1
@@ -52,6 +46,18 @@ def get_default_qmax(dtype):
         if dtype == "fp8_e4m3":
             return 2**emax * 1.75
         return 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
+
+    if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
+        nbits = int(match.group(1))
+        es = int(match.group(2))
+        if nbits == 8 and es == 1:
+            return 64
+        return (2 ** (2 ** es)) ** (nbits - 2)
+
+    if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
+        if match.group(2) is not None:
+            return 2 ** int(match.group(2)) - 1
+        return 1
 
     return None
 
@@ -85,7 +91,7 @@ class QuantizationSpec(QuantizationSpecBase):
             params[key] = PARAMS_TYPE[key](value)
 
         if 'qscheme' in params:
-            params.setdefault('quant_max', get_default_qmax(params['dtype']))
+            params.setdefault('quant_max', get_max_val(params['dtype']))
             params.setdefault('amax_history_len', 50)
 
         return QuantizationSpec(**params)

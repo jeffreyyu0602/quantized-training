@@ -37,11 +37,13 @@ def get_quantization_map(dtype, device=None):
     values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
     if dtype is None:
         return values
+
+    # PyTorch native dtypes
     if dtype in ["float32", "float16", "bfloat16"]:
-        # PyTorch native dtypes
         torch_dtype = getattr(torch, dtype)
         return values.to(torch_dtype).to(torch.bfloat16)
-    elif (match := re.fullmatch(r'int(\d+)', dtype)):
+
+    if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
         quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
         return torch.clamp(torch.round(values), quant_min, quant_max)
@@ -68,10 +70,10 @@ def get_quantization_map(dtype, device=None):
     elif (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
         nbits, es = match.groups()
         return quantize_to_posit(values, int(nbits), int(es), round_to_even=True)
-    elif (match := re.fullmatch(r'nf(\d+)', dtype)):
-        # Adopted from bitsandbytes code
+    elif (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
         nbits = int(match.group(1))
-        return quantize_to_nf(values, nbits)
+        int_bits = int(match.group(2)) if match.group(2) else None
+        return quantize_to_nf(values, nbits, int_bits=int_bits)
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
