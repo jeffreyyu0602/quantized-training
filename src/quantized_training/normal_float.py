@@ -40,5 +40,10 @@ def quantize_to_nf(
     if int_bits is not None:
         values = torch.round(values * (2**int_bits - 1))
 
+    values = values.to(input.device, dtype=input.dtype)
     indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)
-    return values[indices].to(input.device, dtype=input.dtype)
+
+    code = values[indices]
+    code[input > values.amax()] = values.amax()
+    code[input < values.amin()] = values.amin()
+    return code
