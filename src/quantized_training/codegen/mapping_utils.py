@@ -22,12 +22,39 @@ from ..pt2e_utils import dtype_byte_size
 logger = logging.getLogger(__name__)
 
 
+# Global variable to store the custom save function
+_custom_save_function = None
+
+def register_save_function(custom_function):
+    """
+    Decorator to register a custom function for saving tensors.
+    The custom function should accept two arguments: tensor and filename.
+    """
+    global _custom_save_function
+    if not callable(custom_function):
+        raise ValueError("The custom function must be callable.")
+    _custom_save_function = custom_function
+    print(f"Custom save function '{custom_function.__name__}' registered.")
+    return custom_function
+
+
 def _save_tensor(tensor, filename):
     tensor = tensor.float().flatten()
     packed_data = struct.pack(f'{tensor.numel()}f', *tensor.tolist())
     with open(filename, 'wb') as f:
         f.write(packed_data)
     print(f"Writing tensor to {filename}")
+
+
+def save_tensor(tensor, filename):
+    """
+    Save the tensor to a file using the custom save function if defined,
+    otherwise use the default _save_tensor function.
+    """
+    if _custom_save_function is not None:
+        _custom_save_function(tensor, filename)
+    else:
+        _save_tensor(tensor, filename)
 
 
 def _set_tensor_field(field, node, output_dir=None, is_output=False):
@@ -80,7 +107,7 @@ def _set_tensor_field(field, node, output_dir=None, is_output=False):
         node = source_node
 
     if output_dir is not None:
-        _save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
+        save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
     field.node = node.name
     if (dtype := node.meta.get("dtype", None)) is not None:
@@ -532,7 +559,7 @@ def map_getitem(node, output_dir):
         tensor_param.memory.offset = offset
         offset += tensor.numel() * dtype_byte_size(tensor.dtype)
         if output_dir is not None:
-            _save_tensor(tensor, os.path.join(output_dir, f"{from_node.name}_{i}.bin"))
+            save_tensor(tensor, os.path.join(output_dir, f"{from_node.name}_{i}.bin"))
         param.inputs.append(tensor_param)
     return param
 
