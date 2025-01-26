@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_quantization_map(dtype, device=None):
-    """Return the quantization function for the given dtype."""
+    """Return a quantization map for the given dtype."""
     values = torch.arange(2 ** 16, dtype=torch.int16, device=device).view(torch.bfloat16)
     if dtype is None:
         return values
@@ -43,39 +43,54 @@ def get_quantization_map(dtype, device=None):
         torch_dtype = getattr(torch, dtype)
         return values.to(torch_dtype).to(torch.bfloat16)
 
+    # Integer data types
     if (match := re.fullmatch(r'int(\d+)', dtype)):
         nbits = int(match.group(1))
         quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
         return torch.clamp(torch.round(values), quant_min, quant_max)
-    elif (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
-        # Custom implementation for NVIDIA FP8 format
+
+    # Custom implementation for NVIDIA FP8 format
+    if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
         fp8_format = match.group(1).lower()
         return (
             quantize_to_fp8_e4m3(values) if fp8_format == 'e4m3'
             else quantize_to_fp8_e5m2(values)
         )
-    elif (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
-        # Adopted from microscaling code
+
+    # Floating point implementation adopted from microscaling code
+    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
         nbits, ebits, mbits = map(int, match.groups())
-        assert nbits == ebits + mbits + 1
+        assert nbits == ebits + mbits + 1 or nbits == ebits + mbits
+
+        # Unsigned float for scaling factors
+        if nbits == ebits + mbits:
+            values = torch.abs(values)
+
         mbits = mbits + 2
         emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
         if dtype != "fp8_e4m3":
             max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
         else:
             max_norm = 2**emax * 1.75  # FP8 has custom max_norm
+
         return _quantize_elemwise_core(
             values, mbits, ebits, max_norm, round="even", saturate_normals=True
         )
-    elif (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
+
+    # Posit data types invented by John Gustafson
+    # https://www.johndcook.com/blog/2018/04/11/anatomy-of-a-posit-number/
+    if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
         nbits, es = match.groups()
         return quantize_to_posit(values, int(nbits), int(es), round_to_even=True)
-    elif (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
+
+    # NormalFloat by Tim Dettmers and adopted from the bitsandbytes library
+    # This data type will return two tensors: a mapping to NF index and a value map
+    if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
         nbits = int(match.group(1))
         int_bits = int(match.group(2)) if match.group(2) else None
         return quantize_to_nf(values, nbits, int_bits=int_bits)
-    else:
-        raise ValueError(f"Unsupported dtype: {dtype}")
+
+    raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 class MXFakeQuantFunction(torch.autograd.Function):
@@ -130,6 +145,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
             scale = torch.where(amax > 0.0, scale, 1.0)
             scale = torch.where(torch.isfinite(amax), scale, 1.0)
 
+            # Quantize the scale using the codebook
             if scale_code is not None:
                 scale = vmap(scale, scale_code)
             scale = torch.where(scale > 0.0, scale, 1.0)
