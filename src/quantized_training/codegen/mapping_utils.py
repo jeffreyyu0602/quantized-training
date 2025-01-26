@@ -162,9 +162,9 @@ def map_conv2d(node, output_dir):
         _set_tensor_field(param.weight, args[1], output_dir)
     else:
         _set_tensor_field(param.mx_input.input, args[0], output_dir)
-        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['input_scale'], output_dir)
         _set_tensor_field(param.mx_weight.input, args[1], output_dir)
-        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['weight_scale'], output_dir)
     if args[2] is not None:
         _set_tensor_field(param.bias, args[2], output_dir)
     _set_repeated_field(param.stride, args[3])
@@ -192,9 +192,9 @@ def map_linear(node, output_dir):
         _set_tensor_field(param.weight, node.args[1], output_dir)
     else:
         _set_tensor_field(param.mx_input.input, node.args[0], output_dir)
-        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['input_scale'], output_dir)
         _set_tensor_field(param.mx_weight.input, node.args[1], output_dir)
-        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['weight_scale'], output_dir)
     if len(node.args) > 2:
         _set_tensor_field(param.bias, node.args[2], output_dir)
     return param
@@ -218,9 +218,9 @@ def map_matmul(node, output_dir):
         _set_tensor_field(param.weight, node.args[1], output_dir)
     else:
         _set_tensor_field(param.mx_input.input, node.args[0], output_dir)
-        _set_tensor_field(param.mx_input.scale, node.kwargs['scale_inp'], output_dir)
+        _set_tensor_field(param.mx_input.scale, node.kwargs['input_scale'], output_dir)
         _set_tensor_field(param.mx_weight.input, node.args[1], output_dir)
-        _set_tensor_field(param.mx_weight.scale, node.kwargs['scale_wt'], output_dir)
+        _set_tensor_field(param.mx_weight.scale, node.kwargs['weight_scale'], output_dir)
     return param
 
 

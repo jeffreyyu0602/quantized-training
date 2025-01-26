@@ -94,6 +94,7 @@ class MXFakeQuantFunction(torch.autograd.Function):
         axes=None,
         block_size=0,
         force_scale_power_of_two=False,
+        scale_code=None,
     ):
         if fake_quant_enabled[0] == 0:
             return input
@@ -128,6 +129,10 @@ class MXFakeQuantFunction(torch.autograd.Function):
             scale = amax / quant_max
             scale = torch.where(amax > 0.0, scale, 1.0)
             scale = torch.where(torch.isfinite(amax), scale, 1.0)
+
+            if scale_code is not None:
+                scale = vmap(scale, scale_code)
+            scale = torch.where(scale > 0.0, scale, 1.0)
 
         input = vmap(input / scale, code) * scale
 
@@ -213,6 +218,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     code: torch.Tensor
     amax_history: torch.Tensor
     scale: torch.Tensor
+    scale_code: Optional[torch.Tensor]
 
     def __init__(
         self,
@@ -238,7 +244,17 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.outlier_threshold = kwargs.get("outlier_threshold", None)
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
-        self.register_buffer("code", get_quantization_map(dtype, device), persistent=False)
+        quant_map = get_quantization_map(dtype, device)
+        if not isinstance(quant_map, torch.Tensor):
+            indices, values = quant_map
+            quant_map = values[indices]
+        self.register_buffer("code", quant_map, persistent=False)
+        self.scale_dtype = kwargs.get("scale_dtype", None)
+        if self.scale_dtype is not None:
+            self.register_buffer(
+                "scale_code", get_quantization_map(self.scale_dtype, device), persistent=False)
+        else:
+            self.scale_code = None
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
@@ -303,6 +319,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.ch_axis,
                 self.block_size,
                 self.force_scale_power_of_two,
+                self.scale_code,
             )
         else:
             X = FusedAmaxObsFakeQuantFunction.apply(

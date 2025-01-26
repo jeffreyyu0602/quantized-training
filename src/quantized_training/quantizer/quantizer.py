@@ -24,6 +24,7 @@ ABBREV_MAP = {
     'ahl': 'amax_history_len',
     'ax': 'ch_axis',
     'bs': 'block_size',
+    'scale': 'scale_dtype',
 }
 
 PARAMS_TYPE = {
@@ -32,6 +33,7 @@ PARAMS_TYPE = {
     'amax_history_len': int,
     'ch_axis': int,
     'block_size': int,
+    'scale_dtype': str,
 }
 
 def get_max_val(dtype):
@@ -74,6 +76,7 @@ class QuantizationSpec(QuantizationSpecBase):
     amax_history_len: Optional[int] = None
     ch_axis: Optional[int] = None
     block_size: Optional[int] = None
+    scale_dtype: Optional[str] = None
     is_dynamic: bool = False  # required by sharing nodes
 
     @staticmethod

@@ -36,14 +36,12 @@ def quantize_to_nf(
     int_bits=None,
 ):
     values = create_normal_map(k=k, use_extra_value=use_extra_value)
-
     if int_bits is not None:
         values = torch.round(values * (2**int_bits - 1))
-
     values = values.to(input.device, dtype=input.dtype)
-    indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)
 
-    code = values[indices]
-    code[input > values.amax()] = values.amax()
-    code[input < values.amin()] = values.amin()
-    return code
+    indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)
+    indices = torch.where(input < values.amin(), 0, indices)
+    indices = torch.where(input > values.amax(), 2 ** k - 1, indices)
+
+    return indices, values

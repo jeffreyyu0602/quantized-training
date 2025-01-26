@@ -326,10 +326,12 @@ if __name__ == "__main__":
 
         gm = prepare_pt2e(MobileBertEncoder(), quantizer, example_args)
 
-        # Generate a random scale, otherwise a scale of 1 will be optimized away.
+        for i in range(3):
+            gm(*example_args)
+
         for name, module in gm.named_modules():
             if hasattr(module, "scale"):
-                module.scale = torch.randn_like(module.scale)
+                print(module.scale)
 
         convert_pt2e(gm, args.bias)
 
@@ -482,7 +484,7 @@ if __name__ == "__main__":
         # create position embeddings to be shared across the decoder layers
         position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
 
-        class LlamaEncoder(torch.nn.Module):
+        class LLamaDecoder(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.model = model.model
@@ -496,7 +498,20 @@ if __name__ == "__main__":
                 return layer_outputs[0]
 
         example_args = (hidden_states, causal_mask, position_embeddings)
-        model = LlamaEncoder()
+        model = LLamaDecoder()
+
+        from quantized_training import print_node_scope_tabular, get_aten_graph_module
+        gm = get_aten_graph_module(model, example_args)
+        print_node_scope_tabular(gm)
+
+        if args.activation is not None and "microscaling" in args.activation:
+            dtype = args.activation.split(",")[0]
+            qspec = QuantizationSpec.from_str(f"{dtype},qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+            qconfig = QuantizationConfig(qspec, None, qspec, None)
+
+            quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
+            quantizer.set_module_name("model.layers[0].self_attn.o_proj", qconfig)
 
         gm = prepare_pt2e(model, quantizer, example_args)
 
@@ -505,12 +520,12 @@ if __name__ == "__main__":
             calib_input = (torch.randn_like(hidden_states), causal_mask, position_embeddings)
             gm(*calib_input)
 
-        convert_pt2e(gm)
-
         example_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
         eliminate_dtype_conversion(gm)
         convert_expand(gm)
+
+        convert_pt2e(gm)
 
         # Generate float32 model
         if not args.bf16:
