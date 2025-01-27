@@ -882,10 +882,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
                 nodes_to_delete.extend(delete_unused_values(n))
         return nodes_to_delete
     
-    def get_node_byte_size(n: Node):
+    def get_num_bytes(n: Node):
         if n.meta.get('dtype', None) is not None:
             return dtype_byte_size(n.meta['dtype'])
-        return dtype_byte_size(n.value.dtype)
+        else:
+            return dtype_byte_size(n.value.dtype)
 
     for node in model.graph.nodes:
         if node.op not in ["call_function", "call_module"]:
@@ -906,7 +907,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
         if node.target == torch.ops.aten.select.int and node.args[1] == 0:
-            size = node.value.numel() * get_node_byte_size(node)
+            size = node.value.numel() * get_num_bytes(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
@@ -925,7 +926,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         next_node = next(iter(node.users))
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = next_node.args[0][0]
-            tensor_sizes = [n.value.numel() * get_node_byte_size(n) for n in next_node.args[0]]
+            tensor_sizes = [n.value.numel() * get_num_bytes(n) for n in next_node.args[0]]
             if (memory := first_node.meta.get("memory", None)) is None:
                 memory = manager.allocate_memory(first_node, sum(tensor_sizes))
                 first_node.meta["memory"] = memory

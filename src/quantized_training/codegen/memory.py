@@ -12,10 +12,16 @@ logger = logging.getLogger(__name__)
 
 class Partition:
     def __init__(self, start, end, partition_id=None):
-        self.start = start
-        self.end = end
+        self.start = int(start)
+        self.end = math.ceil(end)
         self.partition_id = partition_id
         self.node = None  # None means the partition is free
+
+        if self.start != start:
+            logger.warning(f"Partition start {start} is not an integer. Rounding to {self.start}.")
+
+        if self.end != end:
+            logger.warning(f"Partition end {end} is not an integer. Rounding up to {self.end}.")
 
     def __str__(self):
         return f"Partition(start={self.start}, end={self.end}, partition_id={self.partition_id})"
@@ -59,27 +65,24 @@ class MemoryManager:
                             return True
             return False
 
-        tensor_size = size
-        if tensor_size is None:
-            if isinstance(node.value, torch.Tensor):
-                if node.meta.get('dtype', None) is not None:
-                    num_bytes = dtype_byte_size(node.meta['dtype'])
-                else:
-                    num_bytes = dtype_byte_size(node.value.dtype)
-                tensor_size = math.ceil((size or node.value.numel()) * num_bytes)
-            elif isinstance(node.value, (tuple, list)):
-                tensor_size = sum(math.ceil(t.numel() * dtype_byte_size(t.dtype)) for t in node.value)
+        if size is not None:
+            tensor_size = size
+        elif isinstance(node.value, torch.Tensor):
+            if node.meta.get('dtype', None) is not None:
+                num_bytes = dtype_byte_size(node.meta['dtype'])
             else:
-                logger.warning(f"Node {node} has a non-tensor output")
-                return None
+                num_bytes = dtype_byte_size(node.value.dtype)
+            tensor_size = node.value.numel() * num_bytes
 
-            # TODO the systolic array dimension is hardcoded here
+            # TODO the hardware unroll dimension is hardcoded
             if is_conv2d_input(node) and node.value.shape[1] < 16:
-                print(f"Node {node} requires replication. Increase memory size.")
+                logger.warning(f"Node {node} requires replication. Increase memory size.")
                 tensor_size *= 2
-
-        # torch.bool has 1/8 byte. Round total size to the nearest byte.
-        tensor_size = int(tensor_size)
+        elif isinstance(node.value, (tuple, list)):
+            tensor_size = sum(t.numel() * dtype_byte_size(t.dtype) for t in node.value)
+        else:
+            logger.warning(f"Node {node} has a non-tensor output")
+            return None
 
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
