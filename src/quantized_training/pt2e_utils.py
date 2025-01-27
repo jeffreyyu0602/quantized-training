@@ -38,7 +38,7 @@ def dtype_byte_size(dtype: torch.dtype):
     if bit_search is None:
         raise ValueError(f"`dtype` is not a valid dtype: {dtype}.")
     bit_size = int(bit_search.groups()[0])
-    return bit_size // 8
+    return bit_size / 8.0
 
 
 def get_device_map(model: GraphModule, max_memory=None, verbose=False):
