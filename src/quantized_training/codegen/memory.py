@@ -1,4 +1,5 @@
 import logging
+import math
 from random import randint
 
 import torch
@@ -61,13 +62,13 @@ class MemoryManager:
         tensor_size = size
         if tensor_size is None:
             if isinstance(node.value, torch.Tensor):
-                tensor_size = size or node.value.numel()
                 if node.meta.get('dtype', None) is not None:
-                    tensor_size *= dtype_byte_size(node.meta['dtype'])
+                    num_bytes = dtype_byte_size(node.meta['dtype'])
                 else:
-                    tensor_size *= dtype_byte_size(node.value.dtype)
+                    num_bytes = dtype_byte_size(node.value.dtype)
+                tensor_size = math.ceil((size or node.value.numel()) * num_bytes)
             elif isinstance(node.value, (tuple, list)):
-                tensor_size = sum(t.numel() * dtype_byte_size(t.dtype) for t in node.value)
+                tensor_size = sum(math.ceil(t.numel() * dtype_byte_size(t.dtype)) for t in node.value)
             else:
                 logger.warning(f"Node {node} has a non-tensor output")
                 return None
