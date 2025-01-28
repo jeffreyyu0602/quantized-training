@@ -84,7 +84,8 @@ def transform(
     if example_kwargs is None:
         example_kwargs = {}
 
-    orig_model = copy.deepcopy(model)
+    # Run the model once to get a reference output
+    orig_out = model(*example_args, **example_kwargs)
 
     from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
@@ -147,6 +148,5 @@ def transform(
 
     gen_compute_graph(model, os.path.join(output_dir, output_file))
 
-    orig_out = orig_model(*example_args, **example_kwargs)
     new_out = model(*example_args, *list(example_kwargs.values()))
     return orig_out, new_out

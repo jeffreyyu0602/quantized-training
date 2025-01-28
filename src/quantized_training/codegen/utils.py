@@ -5,7 +5,7 @@ import torch
 from torch._export import capture_pre_autograd_graph
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 
-from .mapping import _decompose_node
+from .mapping import graph_copy
 from ..pt2e_utils import get_aten_graph_module
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -137,7 +137,7 @@ def convert_expand(model: torch.fx.GraphModule):
             Expand(), (input_node.meta["val"],)
         )
 
-        _decompose_node(model, gm, node)
+        graph_copy(model, gm.graph, node)
         model.graph.erase_node(node)
 
     model.graph.lint()

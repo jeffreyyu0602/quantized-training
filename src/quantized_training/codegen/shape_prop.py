@@ -67,18 +67,22 @@ class ShapeProp:
                 env.pop(n.name)
 
         for node in self.graph.nodes:
-            if node.op == 'placeholder':
-                result = next(args_iter)
-            elif node.op == 'get_attr':
-                result = fetch_attr(node.target)
-            elif node.op == 'call_function':
-                result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
-            elif node.op == 'call_method':
-                self_obj, *args = load_arg(node.args)
-                kwargs = load_arg(node.kwargs)
-                result = getattr(self_obj, node.target)(*args, **kwargs)
-            elif node.op == 'call_module':
-                result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
+            try:
+                if node.op == 'placeholder':
+                    result = next(args_iter)
+                elif node.op == 'get_attr':
+                    result = fetch_attr(node.target)
+                elif node.op == 'call_function':
+                    result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
+                elif node.op == 'call_method':
+                    self_obj, *args = load_arg(node.args)
+                    kwargs = load_arg(node.kwargs)
+                    result = getattr(self_obj, node.target)(*args, **kwargs)
+                elif node.op == 'call_module':
+                    result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
+            except:
+                print(f"Error in node {node}")
+                raise
 
             # This is the only code specific to shape propagation.
             # you can delete this `if` branch and this becomes

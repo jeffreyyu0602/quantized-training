@@ -98,23 +98,25 @@ def replace_elementwise_with_vmap(
     return model
 
 
-def _decompose_node(model: GraphModule, gm: GraphModule, source_node: Node) -> List[Node]:
-    args_iter = iter(source_node.all_input_nodes)
+def graph_copy(self: GraphModule, graph: Graph, source: Node) -> List[Node]:
+    args_iter = iter(source.all_input_nodes)
     value_remap = {}
-    for node in list(gm.graph.nodes):
+    for node in list(graph.nodes):
         if node.op == 'placeholder':
             value_remap[node] = next(args_iter)
         elif node.op == 'output':
-            source_node.replace_all_uses_with(value_remap[node.args[0][0]])
+            source.replace_all_uses_with(value_remap[node.args[0][0]])
         else:
-            with model.graph.inserting_before(source_node):
-                value_remap[node] = model.graph.node_copy(node, lambda n: value_remap[n])
+            with self.graph.inserting_before(source):
+                value_remap[node] = self.graph.node_copy(node, lambda n: value_remap[n])
 
             if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
                 source_fn = source_fn_st[-1]
-                value_remap[node].meta['source_fn_stack'] = [(value_remap[node].name, source_fn[1])]
+                value_remap[node].meta['source_fn_stack'] = [
+                    (value_remap[node].name, source_fn[1])
+                ]
 
-    output_node = list(gm.graph.nodes)[-1]
+    output_node = list(graph.nodes)[-1]
     return [value_remap[n] for n in output_node.args[0]]
 
 
@@ -140,27 +142,65 @@ def _decompose_bmm(model: GraphModule, node: Node):
             return result
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2))
-    output_nodes = _decompose_node(model, gm, node)
+    output_nodes = graph_copy(model, gm.graph, node)
     model.graph.erase_node(node)
     return output_nodes[0]
 
 
-def split_nodes_on_path(graph: Graph, nodes: List[Node]):
-    node_groups = [[] for _ in range(len(nodes[-1].users))]
-    for node in reversed(nodes):
-        orig_users = list(node.users)
-        for i, user in enumerate(orig_users):
-            with graph.inserting_before(user):
-                new_node = graph.node_copy(node, lambda n: n)
-            user.replace_input_with(node, new_node)
-            node_groups[i].insert(0, new_node)
+def _decompose_bmm_mx(model: GraphModule, node: Node):
+    assert (
+        node.op == 'call_function' and
+        node.target == torch.ops.quantized_ops.matmul_mx.default
+    )
 
-            # Copy and update the source_fn_stack
-            if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
-                source_fn = source_fn_st[-1]
-                new_node.meta['source_fn_stack'] = source_fn_st + [(new_node.name, source_fn[1])]
-        graph.erase_node(node)
-    return node_groups
+    input1 = node.args[0].value
+    input2 = node.args[1].value
+
+    input1_dims = sum(1 for d in input1.shape if d > 1)
+    input2_dims = sum(1 for d in input2.shape if d > 1)
+    if input1_dims < 3 and input2_dims < 3:
+        return None
+
+    block_size = node.kwargs['block_size']
+
+    class BMM(torch.nn.Module):
+        def forward(
+                self, input: torch.Tensor, other: torch.Tensor, input_scale=None,
+                weight_scale=None, input_code=None, weight_code=None):
+            # Loop through each element in the batch dimensions
+            batch_shape = input.shape[:-2]
+            result = []
+            for idx in itertools.product(*[range(dim) for dim in batch_shape]):
+                result.append(torch.ops.quantized_ops.matmul_mx(
+                    input[idx],
+                    other[idx],
+                    input_scale=input_scale[idx],
+                    weight_scale=weight_scale[idx],
+                    block_size=block_size,
+                    input_code=input_code,
+                    weight_code=weight_code,
+                ))
+            result = torch.stack(result)
+            result = result.view(*batch_shape, *result.shape[-2:])
+            return result
+
+    kwargs = {
+        'input_scale': node.kwargs['input_scale'].value,
+        'weight_scale': node.kwargs['weight_scale'].value,
+        'input_code': node.kwargs['input_code'].value if 'input_code' in node.kwargs else None,
+        'weight_code': node.kwargs['weight_code'].value if 'weight_code' in node.kwargs else None,
+    }
+
+    gm = capture_pre_autograd_graph(BMM(), (input1, input2), kwargs)
+
+    source_fn = node.meta['source_fn_stack'][-1]
+    for n in gm.graph.nodes:
+        if n.target == torch.ops.quantized_ops.matmul_mx.default:
+            n.meta['source_fn_stack'] = [(n.name, source_fn[1])]
+
+    output_nodes = graph_copy(model, gm.graph, node)
+    model.graph.erase_node(node)
+    return output_nodes[0]
 
 
 def split_multi_head_attention(model: GraphModule):
@@ -177,94 +217,110 @@ def split_multi_head_attention(model: GraphModule):
         grouped_nodes[bt[0]].append(matmul_node)
 
     for nodes in grouped_nodes.values():
-        if len(nodes) == 1:
-            _decompose_bmm(model, nodes[0])
+        if len(nodes) != 2:
+            for node in nodes:
+                if node.target == torch.ops.aten.matmul.default:
+                    _decompose_bmm(model, node)
+                else:
+                    _decompose_bmm_mx(model, node)
             continue
 
-        assert len(nodes) == 2
-        matmul_1 = nodes[0]
-        matmul_2 = nodes[1]
+        qk_matmul, av_matmul = nodes[0], nodes[1]
 
-        query = matmul_1.args[0]
-        key = matmul_1.args[1]
-        value = matmul_2.args[1]
+        query = qk_matmul.args[0]
+        key = qk_matmul.args[1]
+        value = av_matmul.args[1]
+        input_scale = qk_matmul.kwargs.get('input_scale', None)
+        weight_scale = qk_matmul.kwargs.get('weight_scale', None)
 
-        # Find all the nodes between two matmul nodes
-        nodes_in_path = []
-        next_node = next(iter(matmul_1.users))
-        while len(next_node.users) == 1 and next_node.target != torch.ops.aten.matmul.default:
-            nodes_in_path.append(next_node)
-            next_node = next(iter(next_node.users))
+        # Find the nodes between the qk and av matmuls
+        def dfs(current_node, visited):
+            if current_node == av_matmul:
+                return [visited]
+            paths = []
+            for user in current_node.users:
+                if user not in visited:
+                    paths.extend(dfs(user, visited + [user]))
+            return paths
 
-        assert id(next_node) == id(matmul_2)
+        paths = dfs(qk_matmul, [qk_matmul])
 
-        output_1 = _decompose_bmm(model, matmul_1)
-        output_2 = _decompose_bmm(model, matmul_2)
+        nodes_between = set()
+        for path in paths:
+            nodes_between.update(path[1:-1])
 
+        # Sort the nodes between the qk and av matmuls
+        order = {node: idx for idx, node in enumerate(graph.nodes)}
+        nodes_between = sorted(nodes_between, key=lambda n: order[n])
+
+        # Decompose BMM into multiple matmuls
+        if qk_matmul.target == torch.ops.aten.matmul.default:
+            qk_output = _decompose_bmm(model, qk_matmul)
+            av_output = _decompose_bmm(model, av_matmul)
+        else:
+            qk_output = _decompose_bmm_mx(model, qk_matmul)
+            av_output = _decompose_bmm_mx(model, av_matmul)
+
+        # Annotate the dtype of the new nodes in the graph
         def propagate_input_dtype(node):
             if (dtype := node.meta.get('dtype', None)) is None:
                 return
-            select_nodes = list(node.users)
-            while len(select_nodes) > 0:
-                select = select_nodes.pop(0)
-                select.meta['dtype'] = dtype
-                select_nodes.extend([
-                    n for n in select.users if n.target != torch.ops.aten.matmul.default
-                ])
+            for user in node.users:
+                if user.target == torch.ops.aten.select.int:
+                    user.meta['dtype'] = dtype
+                    propagate_input_dtype(user)
 
-        def propagate_output_dtype(matmul_node, output_node):
-            if (dtype := matmul_node.meta.get('dtype', None)) is None:
+        def propagate_output_dtype(orig_node, new_node):
+            if (dtype := orig_node.meta.get('dtype', None)) is None:
                 return
-            output_nodes = [output_node, output_node.args[0]] + output_node.args[0].args[0]
+            output_nodes = [new_node, new_node.args[0]] + new_node.args[0].args[0]
             for node in output_nodes:
                 node.meta['dtype'] = dtype
 
-        if output_1 is not None:
+        if qk_output is not None:
             propagate_input_dtype(query)
             propagate_input_dtype(key)
-            propagate_output_dtype(matmul_1, output_1)
+            propagate_output_dtype(qk_matmul, qk_output)
 
-        if output_2 is not None:
+        if av_output is not None:
             propagate_input_dtype(value)
-            propagate_output_dtype(matmul_2, output_2)
+            propagate_output_dtype(av_matmul, av_output)
 
-        if output_1 is None or output_2 is None:
+        if input_scale is not None:
+            propagate_input_dtype(input_scale)
+
+        if weight_scale is not None:
+            propagate_input_dtype(weight_scale)
+
+        if qk_output is None or av_output is None:
             continue
 
-        # Before splitting the nodes:
-        # select -> matmul \                          / select_1 -> select_2
-        #       ...
-        # select -> matmul -> stack -> view -> group -> select_1 -> select_2
-        # select -> matmul /                          \ select_1 -> select_2
+        # Duplicate the nodes between the qk and av matmuls to perform fusion
+        qk_matmuls = qk_output.args[0].args[0]
+        av_matmuls = av_output.args[0].args[0]
 
-        # After splitting the nodes:
-        # select -> matmul \                 / group 1   -> select_1 -> select_2
-        #       ...
-        # select -> matmul -> stack -> view -> group N-1 -> select_1 -> select_2
-        # select -> matmul /                 \ group N   -> select_1 -> select_2
-        # 
-        # We can match the decomposed matmul nodes with a specific path and remove
-        # the stack and view nodes. Each group perform a single head attention.
+        nodes_between[0].replace_input_with(qk_output, qk_matmuls[0])
+        av_matmuls[0].replace_input_with(av_matmuls[0].args[0], nodes_between[-1])
 
-        # Final graph after removing the stack and view nodes:
-        # select -> matmul -> group 1   -> matmul
-        #       ...
-        # select -> matmul -> group N-1 -> matmul
-        # select -> matmul -> group N   -> matmul
+        if (scale_node := av_matmuls[0].kwargs.get('input_scale', None)) is not None:
+            av_matmuls[0].replace_input_with(scale_node, nodes_between[-2])
 
-        node_groups = split_nodes_on_path(graph, nodes_in_path)
-        matmul_nodes = output_1.args[0].args[0]
-        for node in matmul_nodes:
-            # Input select for the first set of matmul nodes
-            select = node.args[0]
-            for group in node_groups:
-                # Input select for the second set of matmul nodes
-                select_1 = next(iter(group[-1].users))
-                select_2 = next(iter(select_1.users))
-                if select_2.args[1:] == select.args[1:]:
-                    group[0].replace_input_with(group[0].args[0], node)
-                    select_2.replace_all_uses_with(group[-1])
-                    break
+        for qk_matmul, av_matmul in zip(qk_matmuls[1:], av_matmuls[1:]):
+            value_remap = {qk_matmuls[0]: qk_matmul}
+            for node in nodes_between:
+                with graph.inserting_before(av_matmul):
+                    value_remap[node] = graph.node_copy(node, lambda n: value_remap.get(n, n))
+
+                if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
+                    source_fn = source_fn_st[-1]
+                    value_remap[node].meta['source_fn_stack'] = [
+                        (value_remap[node].name, source_fn[1])
+                    ]
+
+            av_matmul.replace_input_with(av_matmul.args[0], value_remap[nodes_between[-1]])
+
+            if (scale_node := av_matmul.kwargs.get('input_scale', None)) is not None:
+                av_matmul.replace_input_with(scale_node, value_remap[nodes_between[-2]])
 
     graph.lint()
 
@@ -422,7 +478,7 @@ def transform_cat_nodes(model: GraphModule):
                 return output.reshape(*shape, *output.shape[1:])
 
         gm = capture_pre_autograd_graph(Concat(), (*args[0],))
-        _decompose_node(model, gm, node)
+        graph_copy(model, gm.graph, node)
 
     model.graph.lint()
 

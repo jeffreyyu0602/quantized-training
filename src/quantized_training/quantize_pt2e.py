@@ -1,5 +1,6 @@
 import copy
 import itertools
+from collections import OrderedDict
 from dataclasses import asdict, replace
 from typing import Dict, Tuple, Any, Optional, Callable, List
 
@@ -556,8 +557,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     graph.erase_node(node)
 
     for user_node in orig_fq_users:
-        kwargs = dict(user_node.kwargs)
+        kwargs = OrderedDict(user_node.kwargs)
         kwargs.setdefault("block_size", activation_post_process.block_size)
+
         if qparam_node_inp is not None:
             # Handle the second argument of torch.matmul
             if id(quantized_node) == id(user_node.args[1]):
@@ -570,6 +572,10 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         if qparam_node_wt is not None:
             kwargs.setdefault("weight_scale", qparam_node_wt)
             kwargs.setdefault("weight_code", values)
+
+        # Sort kwargs for later MHA splitting
+        order = ["input_scale", "weight_scale", "block_size", "input_code", "weight_code"]
+        kwargs = OrderedDict((key, kwargs[key]) for key in order if key in kwargs)
 
         # Replace the node with its MX counterpart
         if user_node.target in QUANT_OP_MAPPINGS:
@@ -889,7 +895,7 @@ def eliminate_dead_code(self):
     # the removed node.
     changed = False
     for node in reversed(self.nodes):
-        if len(node.users) == 0 and node.op == 'call_function':
+        if node.op != 'output' and len(node.users) == 0:
             self.erase_node(node)
             changed = True
 
@@ -898,8 +904,6 @@ def eliminate_dead_code(self):
 
 def convert_pt2e(model: GraphModule, output_dtype: str = None):
     modules = dict(model.named_modules(remove_duplicate=False))
-
-    eliminate_dead_code(model.graph)
 
     for node in list(model.graph.nodes):
         if node.op == "call_module":
