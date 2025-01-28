@@ -469,7 +469,12 @@ if __name__ == "__main__":
             attn_implementation="eager", # turn off flash attention
         )
 
-        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+
+        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+
+        input_ids = encodings.input_ids[:,:128]
         inputs_embeds = model.model.embed_tokens(input_ids)
         cache_position = torch.arange(0, inputs_embeds.shape[1])
         position_ids = cache_position.unsqueeze(0)
@@ -499,19 +504,6 @@ if __name__ == "__main__":
 
         example_args = (hidden_states, causal_mask, position_embeddings)
         model = LLamaDecoder()
-
-        from quantized_training import print_node_scope_tabular, get_aten_graph_module
-        gm = get_aten_graph_module(model, example_args)
-        print_node_scope_tabular(gm)
-
-        if args.activation is not None and "microscaling" in args.activation:
-            dtype = args.activation.split(",")[0]
-            qspec = QuantizationSpec.from_str(f"{dtype},qs=per_tensor_symmetric")
-            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-            qconfig = QuantizationConfig(qspec, None, qspec, None)
-
-            quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
-            quantizer.set_module_name("model.layers[0].self_attn.o_proj", qconfig)
 
         gm = prepare_pt2e(model, quantizer, example_args)
 
