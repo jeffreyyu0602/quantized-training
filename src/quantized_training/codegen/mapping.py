@@ -230,8 +230,9 @@ def split_multi_head_attention(model: GraphModule):
         query = qk_matmul.args[0]
         key = qk_matmul.args[1]
         value = av_matmul.args[1]
-        input_scale = qk_matmul.kwargs.get('input_scale', None)
-        weight_scale = qk_matmul.kwargs.get('weight_scale', None)
+        query_scale = qk_matmul.kwargs.get('input_scale', None)
+        key_scale = qk_matmul.kwargs.get('weight_scale', None)
+        value_scale = av_matmul.kwargs.get('weight_scale', None)
 
         # Find the nodes between the qk and av matmuls
         def dfs(current_node, visited):
@@ -286,11 +287,14 @@ def split_multi_head_attention(model: GraphModule):
             propagate_input_dtype(value)
             propagate_output_dtype(av_matmul, av_output)
 
-        if input_scale is not None:
-            propagate_input_dtype(input_scale)
+        if query_scale is not None:
+            propagate_input_dtype(query_scale)
 
-        if weight_scale is not None:
-            propagate_input_dtype(weight_scale)
+        if key_scale is not None:
+            propagate_input_dtype(key_scale)
+
+        if value_scale is not None:
+            propagate_input_dtype(value_scale)
 
         if qk_output is None or av_output is None:
             continue
