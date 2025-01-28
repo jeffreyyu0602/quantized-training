@@ -689,7 +689,7 @@ def fuse_op_with_input(
         )
 
 
-def fuse_operator(model: GraphModule, example_inputs, mapping=None):
+def fuse_operator(model: GraphModule, mapping=None):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
 
@@ -705,14 +705,6 @@ def fuse_operator(model: GraphModule, example_inputs, mapping=None):
         mapping = {}
 
     nodes_map = {}
-
-    ShapeProp(model).propagate(*example_inputs)
-    transform_cat_nodes(model)
-
-    ShapeProp(model).propagate(*example_inputs)
-    transform_stack_nodes(model)
-
-    ShapeProp(model).propagate(*example_inputs)
 
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))

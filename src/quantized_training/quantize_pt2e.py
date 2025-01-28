@@ -613,7 +613,7 @@ def _eliminate_dequantize_with_no_effect(model: GraphModule):
         model.graph.erase_node(dequantized_node)
 
 
-def _fuse_quantize_dequantize_with_previous_op(model: GraphModule):
+def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     """
     Move quantize and dequantize nodes up the graph and place them after the
     previous operation (e.g. matmul, conv2d, etc.), so that the quantize and
@@ -913,7 +913,6 @@ def convert_pt2e(model: GraphModule, output_dtype: str = None):
                         model, node, modules, output_dtype)
 
     _eliminate_dequantize_with_no_effect(model)
-    _fuse_quantize_dequantize_with_previous_op(model)
 
     model.graph.lint()
     model.recompile()

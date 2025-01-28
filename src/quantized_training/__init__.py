@@ -12,8 +12,12 @@ from .quantizer import *
 from .training_args import *
 from .utils import *
 from .histogram import *
-from .codegen.mapping import replace_elementwise_with_vmap
-from .quantize_pt2e import _fuse_quantize_dequantize_with_previous_op
+from .codegen.mapping import (
+    replace_elementwise_with_vmap,
+    transform_cat_nodes,
+    transform_stack_nodes,
+)
+from .quantize_pt2e import fuse_quantize_dequantize_with_previous_op
 from google.protobuf import text_format
 import operator
 
@@ -85,13 +89,18 @@ def transform(
     from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
+    # Turn batched matmul into multiple matmuls
     ShapeProp(model).propagate(*flatten_args)
     split_multi_head_attention(model)
 
-    # There are additional dequantize ops produced by head splitting. Fuse them
-    # with the previous op.
+    # Handle tensor concatenation along non-zero dimensions
     ShapeProp(model).propagate(*flatten_args)
-    _fuse_quantize_dequantize_with_previous_op(model)
+    transform_cat_nodes(model)
+    transform_stack_nodes(model)
+
+    # Move quantize and dequantize ops to the end of last compute op
+    ShapeProp(model).propagate(*flatten_args)
+    fuse_quantize_dequantize_with_previous_op(model)
 
     vector_stages = {
         0: ["gemm"],
@@ -111,7 +120,8 @@ def transform(
 
     replace_elementwise_with_vmap(model, vector_stages)
 
-    fuse_operator(model, flatten_args, vector_stages)
+    ShapeProp(model).propagate(*flatten_args)
+    fuse_operator(model, vector_stages)
 
     model.graph.print_tabular()
 
