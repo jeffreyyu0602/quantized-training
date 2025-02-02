@@ -184,14 +184,23 @@ def _decompose_bmm_mx(model: GraphModule, node: Node):
             result = result.view(*batch_shape, *result.shape[-2:])
             return result
 
+    input_code = node.kwargs.get('input_code', None)
+    weight_code = node.kwargs.get('weight_code', None)
+
     kwargs = {
         'input_scale': node.kwargs['input_scale'].value,
         'weight_scale': node.kwargs['weight_scale'].value,
-        'input_code': node.kwargs['input_code'].value if 'input_code' in node.kwargs else None,
-        'weight_code': node.kwargs['weight_code'].value if 'weight_code' in node.kwargs else None,
+        'input_code': input_code.value if input_code is not None else None,
+        'weight_code': weight_code.value if weight_code is not None else None,
     }
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2), kwargs)
+
+    # Remove unused placeholder nodes
+    for n in gm.graph.nodes:
+        if n.op == 'placeholder' and len(n.users) == 0:
+            gm.graph.erase_node(n)
+    gm.graph.lint()
 
     source_fn = node.meta['source_fn_stack'][-1]
     for n in gm.graph.nodes:
@@ -383,13 +392,14 @@ def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
             return False
         # Check if all the arguments of the current node are visited before the
         # previous node
-        for arg in n.args:
-            if (
-                isinstance(arg, Node)
-                and id(arg) != id(prev_node)
-                and arg.op == "call_function"
-                and order[arg] > order[prev_node]
-            ):
+        for arg in n.all_input_nodes:
+            if id(arg) == id(prev_node):
+                continue
+
+            while _is_nop(arg) or _is_slicing_nop(arg):
+                arg = arg.all_input_nodes[0]
+
+            if arg.op == "call_function" and order[arg] > order[prev_node]:
                 return False
         prev_node = n
     return True
@@ -632,7 +642,10 @@ def fuse_reshape_with_input(
     fused_nodes.append(node)
 
     # Base case: encountered a GEMM or elementwise operation
-    if _is_gemm_op(node) or _is_elementwise_op(node):
+    if (
+        (is_tranpose(reshape_node) and _is_gemm_op(node)) or
+        (not is_tranpose(reshape_node) and _is_elementwise_op(node))
+    ):
         fused_nodes = check_branch_independence(graph, fused_nodes)
         if (group := search_group(node, candidates)) is not None:
             group.extend(n for n in fused_nodes if n not in group)
@@ -656,6 +669,8 @@ def fuse_reshape_with_input(
     ):
         logger.warning(f"Cannot fuse {reshape_node} with {node}")
         return []
+
+    # TODO: is it worth performing fusion if there are more than one user?
 
     # If there is a divergent point in the graph, perform fusion on each branch
     all_reshape_nodes = []
