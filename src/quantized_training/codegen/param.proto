@@ -4,135 +4,70 @@ package codegen;
 
 message Memory {
   int32 partition = 1;
-  uint64 offset = 2;
+  uint64 address = 2;
 }
 
 message Tensor {
-  string node = 1;
-  string dtype = 2;
-  repeated int32 shape = 3;
-  Memory memory = 4;
-  float scale = 5;
-  oneof fusion {
-    ReshapeOp reshape = 6;
-    SlicingOp slicing = 7;
-  }
+  string node = 1;           // Associated node name (for debugging)
+  repeated int32 shape = 2;  // Shape of the tensor
+  string dtype = 3;          // Data type (e.g., "float32", "int8")
+  optional Memory memory = 4; // Optional memory info
+  optional float scale = 5;  // Optional scale for quantization
+  optional OpOverload reshape = 6; // Optional fused reshape/slicing
 }
 
-message MXTensor {
-  Tensor input = 1;
-  Tensor scale = 2;
-}
-
-message TensorArray {
+// Wrapper for repeated tensors (since `oneof` doesn't allow repeated fields)
+message TensorList {
   repeated Tensor tensors = 1;
 }
 
-// Elementwise and nonlinear operations
-message VectorOp {
-  string name = 1;
-  string opcode = 2;
-  oneof input_field {
-    Tensor input = 3;
-    float input_scalar = 4;
-  }
-  oneof other_field {
-    Tensor other = 5;
-    float other_scalar = 6;
-  }
+// Wrapper for repeated integers (to avoid `repeated int32` inside `oneof`)
+message IntList {
+  repeated int64 values = 1;
 }
 
-// GEMM and layer normalization
-message MatrixOp {
-  string name = 1;
-  string opcode = 2;
-  oneof input_field {
-    Tensor input = 3;
-    MXTensor mx_input = 4;
-  }
-  oneof weight_field {
-    Tensor weight = 5;
-    MXTensor mx_weight = 6;
-  }
-  Tensor bias = 7;
-  repeated int32 stride = 8;
-  repeated int32 padding = 9;
-  repeated int32 dilation = 10;
-  int32 groups = 11;
-}
-
-// Pooling operations
-message PoolingOp {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  repeated int32 kernel_size = 4;
-  repeated int32 stride = 5;
-  repeated int32 padding = 6;
-  repeated int32 dilation = 7;  // for max_pool
-  bool ceil_mode = 8;
-  bool count_include_pad = 9;   // for avg_pool
-  int32 divisor_override = 10;  // for avg_pool
-  repeated int32 output_size = 11;  // for adaptive_avg_pool2d
-}
-
-// Reduction and complex operations (e.g. Softmax)
-message ReduceOp {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  repeated int32 dim = 4;
-  bool keepdim = 5;
-}
-
-// Permutation and transposition operations
-message ReshapeOp {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  repeated int32 dims = 4;
-  repeated int32 input_sizes = 5;
-  repeated int32 output_sizes = 6;
-}
-
-// Slicing and indexing operations
-message SlicingOp {
-  string name = 1;
-  string opcode = 2;
-  Tensor input = 3;
-  int32 dim = 4;
-  int32 start = 5;
-  int32 end = 6;
-  int32 step = 7;
-  repeated int32 output_sizes = 8;
-}
-
-// Operations that do not change the underlying data
-message Nop {
-  string name = 1;
-  string opcode = 2;
-  repeated Tensor inputs = 3;
-}
-
-message Operator {
-  string name = 1;
-  oneof op {
-    MatrixOp matrix_op = 2;
-    PoolingOp pooling_op = 3;
-    ReduceOp reduce_op = 4;
-    ReshapeOp reshape_op = 5;
-    SlicingOp slicing_op = 6;
-    Nop nop = 7;
-  }
-  repeated VectorOp vector_ops = 8;
-  oneof output_field {
-    Tensor output = 9;
-    TensorArray outputs = 10;
+// Represents arguments for operations
+message Argument {
+  oneof arg_type {
+    Tensor tensor = 1;
+    TensorList tensor_list = 2;
+    IntList int_list = 3;
+    int64 int_value = 4;      
+    float float_value = 5;
+    bool bool_value = 6;
+    string str_value = 7;
   }
 }
 
+// Represents an operation, without fusion information
+message OpOverload {
+  string name = 1;            // Unique name of the node
+  string op = 2;              // Type of operation (e.g., call_function, call_module)
+  string target = 3;          // Target function/module name
+  repeated Argument args = 4; // Positional arguments
+  map<string, Argument> kwargs = 5; // Keyword arguments
+}
+
+// Represents a fused operation
+message OpOverloadList {
+  string name = 1;
+  repeated OpOverload op_list = 2;
+}
+
+message Operation {
+  oneof op_type {
+    OpOverload op = 2;
+    OpOverloadList fused_op = 3;
+  }
+  oneof return_type {
+    Tensor output = 4;
+    TensorList outputs = 5;
+  }
+}
+
+// Represents a torch.fx.Graph
 message Model {
   repeated Tensor inputs = 1;
   repeated Tensor parameters = 2;
-  repeated Operator ops = 3;
+  repeated Operation ops = 3;
 }

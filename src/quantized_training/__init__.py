@@ -12,11 +12,6 @@ from .quantizer import *
 from .training_args import *
 from .utils import *
 from .histogram import *
-from .codegen.mapping import (
-    replace_elementwise_with_vmap,
-    transform_cat_nodes,
-    transform_stack_nodes,
-)
 from .quantize_pt2e import fuse_quantize_dequantize_with_previous_op
 from google.protobuf import text_format
 import operator
@@ -96,8 +91,8 @@ def transform(
 
     # Handle tensor concatenation along non-zero dimensions
     ShapeProp(model).propagate(*flatten_args)
-    transform_cat_nodes(model)
-    transform_stack_nodes(model)
+    convert_cat(model)
+    convert_stack(model)
 
     # Move quantize and dequantize ops to the end of last compute op
     ShapeProp(model).propagate(*flatten_args)
@@ -138,13 +133,18 @@ def transform(
         visualize_memory_layout(manager.snapshots, filename)
         logger.error(f"Memory allocation failed. Memory layout saved to {filename}")
 
-    model_ir = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
-    with open(os.path.join(output_dir, 'model.txt'), "w") as f:
-        f.write(text_format.MessageToString(model_ir))
+    model_params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
 
-    layers = [p.name for p in model_ir.ops if p.WhichOneof("op") != "nop"]
+    with open(os.path.join(output_dir, 'model.txt'), "w") as f:
+        f.write(text_format.MessageToString(model_params))
+
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
-        f.write('\n'.join(layers))
+        for op in model_params.ops:
+            if op.WhichOneof('op_type') == 'op':
+                if op.op.op != 'nop':
+                    f.write(op.op.name + '\n')
+            else:
+                f.write(op.fused_op.name + '\n')
 
     gen_compute_graph(model, os.path.join(output_dir, output_file))
 

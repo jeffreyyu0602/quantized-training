@@ -1,15 +1,35 @@
+import itertools
 import logging
-from typing import List
+from typing import Callable, Dict, List
 
 import torch
 from torch._export import capture_pre_autograd_graph
+from torch.ao.quantization.fx.utils import assert_and_get_unique_device
+from torch.fx import GraphModule
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
+from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import graph_copy
+from .mapping_utils import _is_elementwise_op
 from ..pt2e_utils import get_aten_graph_module
+from ..quantize_pt2e import create_getattr_from_value
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "convert_cat",
+    "convert_expand",
+    "convert_stack",
+    "eliminate_dtype_conversion",
+    "get_conv_bn_layers",
+    "pad_matmul_to_multiples_of_unroll_dim",
+    "pad_vit_embeddings_output",
+    "replace_elementwise_with_vmap",
+    "replace_interpolate",
+    "replace_permute_with_transpose",
+    "replace_rmsnorm_with_layer_norm",
+]
 
 
 def get_conv_bn_layers(model):
@@ -24,6 +44,165 @@ def get_conv_bn_layers(model):
                 if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
                     layers.append([module_names[k-1], name])
     return layers
+
+
+def convert_cat(model: GraphModule):
+    partitions = get_source_partitions(model.graph, [torch.cat])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        node = partition.output_nodes[0]
+        if node.target != torch.ops.aten.cat.default:
+            continue
+
+        input_shape = list(node.args[0][0].shape)
+        if all(list(n.shape) == input_shape for n in node.args[0][1:]):
+            continue
+
+        logger.info(f"Node {node} has different input shapes")
+        dim = node.args[1]
+
+        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+        shape = list(args[0][0].shape[:dim])
+
+        class Concat(torch.nn.Module):
+            def forward(self, *inputs):
+                result = []
+                for idx in itertools.product(*[range(dim) for dim in shape]):
+                    tensor = torch.cat([x[idx] for x in inputs], dim=0)
+                    result.append(tensor)
+                output = torch.stack(result, dim=0)
+                return output.reshape(*shape, *output.shape[1:])
+
+        gm = capture_pre_autograd_graph(Concat(), (*args[0],))
+        graph_copy(model, gm.graph, node)
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def convert_stack(model: GraphModule):
+    graph = model.graph
+
+    partitions = get_source_partitions(graph, [torch.stack, torch.cat])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    while len(partitions) > 0:
+        cat_node = partitions.pop(0).output_nodes[0]
+        if cat_node.target not in [
+            torch.ops.aten.cat.default, torch.ops.aten.stack.default
+        ]:
+            continue
+
+        input_shape = list(cat_node.args[0][0].shape)
+
+        if not all(list(n.shape) == input_shape for n in cat_node.args[0][1:]):
+            shapes = [n.shape for n in cat_node.args[0]]
+            logger.warning(
+                "Concatenated tensors have different shapes in node %s. Shapes: %s",
+                cat_node,
+                shapes
+            )
+            continue
+
+        if len(cat_node.args) == 1 or cat_node.args[1] == 0:
+            continue
+
+        concat_dim = cat_node.args[1]
+        if concat_dim < 0:
+            concat_dim += len(input_shape)
+
+        # Always stack along the first dimension
+        if cat_node.target == torch.ops.aten.stack.default:
+            cat_node.args = (cat_node.args[0], 0)
+            stack_node = cat_node
+        else:
+            with graph.inserting_after(cat_node):
+                stack_node = graph.call_function(
+                    torch.ops.aten.stack.default, (cat_node.args[0], 0)
+                )
+
+        # Permute the concatenated tensor to match the original order
+        dims = list(range(len(input_shape) + 1))[1:]
+        dims.insert(concat_dim, 0)
+
+        with graph.inserting_after(stack_node):
+            permute_node = graph.call_function(
+                torch.ops.aten.permute.default, (stack_node, dims),
+            )
+            # get_source_partitions expects 'permute' as the source function. This is
+            # hacky but there is no other way to set this meta field properly.
+            permute_node.meta['source_fn_stack'] = [(permute_node.name, 'permute')]
+            output_node = permute_node
+
+        # Flatten the permuted tensor if it is a cat operation
+        if cat_node.target == torch.ops.aten.cat.default:
+            with graph.inserting_after(permute_node):
+                output_node = graph.call_function(
+                    torch.ops.aten.flatten.using_ints,
+                    (permute_node, concat_dim, concat_dim + 1),
+                )
+
+        # Replace all use of the cat node with the new node
+        for node in list(cat_node.users):
+            if id(node) == id(output_node):
+                continue
+            node.replace_input_with(cat_node, output_node)
+
+        if cat_node.target == torch.ops.aten.cat.default:
+            graph.erase_node(cat_node)
+
+    graph.lint()
+
+    graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def convert_expand(model: torch.fx.GraphModule):
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.expand.default:
+            continue
+
+        input_node = node.args[0]
+        sizes = node.args[1]
+        original_shape = input_node.meta["val"].shape
+        assert len(sizes) >= len(original_shape), (
+            "Sizes must have at least as many dimensions as the original tensor."
+        )
+
+        # Add singleton dimensions to match the size length
+        while len(original_shape) < len(sizes):
+            input = input.unsqueeze(0)
+            original_shape = input.shape
+
+        class Expand(torch.nn.Module):
+            def forward(self, input):
+                # Stack along the first dimension repeatedly to create the expanded shape
+                for dim, size in enumerate(sizes):
+                    if input.shape[dim] == 1 and size > 1:
+                        stacked_tensors = []
+                        for _ in range(size):
+                            stacked_tensors.append(input.squeeze(dim) * 1)
+                        input = torch.stack(stacked_tensors, dim=dim)
+                    elif input.shape[dim] != size:
+                        raise ValueError(f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}.")
+
+                return input
+
+        gm: torch.fx.GraphModule = capture_pre_autograd_graph(
+            Expand(), (input_node.meta["val"],)
+        )
+
+        graph_copy(model, gm.graph, node)
+        model.graph.erase_node(node)
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
 
 
 def replace_interpolate():
@@ -89,6 +268,86 @@ def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
     model.recompile()
 
 
+def replace_elementwise_with_vmap(
+    model: GraphModule,
+    mapping: Dict[str, Callable],
+) -> GraphModule:
+    device = assert_and_get_unique_device(model)
+
+    nodes_map = {}
+
+    mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
+    for node in list(model.graph.nodes):
+        if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
+            continue
+
+        source_fn_st = node.meta.get("source_fn_stack", [])
+        if source_fn_st and source_fn_st[-1][1] in mapped_sources:
+            continue
+
+        logger.info(f"Replace {node.target} with value mapping")
+
+        if (get_attr_node := nodes_map.get(node.target, None)) is None:
+            values = (torch.arange(2 ** 16, dtype=torch.int16, device=device)
+                    .view(torch.bfloat16))
+            val_map = node.target(values, *node.args[1:])
+
+            with model.graph.inserting_before(node):
+                get_attr_node = create_getattr_from_value(
+                    model, model.graph, f'_tensor_constant_', val_map
+                )
+
+            nodes_map[node.target] = get_attr_node
+
+        with model.graph.inserting_before(node):
+            new_node = model.graph.call_function(
+                torch.ops.quantized_ops.vmap, (node.args[0], get_attr_node)
+            )
+
+        new_node.meta = node.meta
+        new_node.meta["source_fn_stack"] = [(new_node.name, "vmap")]
+
+        node.replace_all_uses_with(new_node)
+        model.graph.erase_node(node)
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def replace_permute_with_transpose(model: torch.fx.GraphModule):
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.permute.default:
+            continue
+
+        # if permuted dims is the last two dims
+        permute_dims = node.args[1]
+        tranpose_dims = list(range(len(permute_dims)))
+        tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
+        if permute_dims != tranpose_dims:
+            continue
+
+        with model.graph.inserting_before(node):
+            transpose_node = model.graph.call_function(
+                torch.ops.aten.transpose.int,
+                (node.args[0], -1, -2),
+            )
+
+        # Since we are doing a 1 to 1 replacement, we can copy over the meta data
+        transpose_node.meta = node.meta
+
+        node.replace_all_uses_with(transpose_node)
+        model.graph.erase_node(node)
+
+        logger.info(f"Replaced permute with transpose: {node} -> {transpose_node}")
+
+    model.graph.lint()
+    model.recompile()
+    return model
+
+
 def eliminate_dtype_conversion(model: torch.fx.GraphModule):
     for node in list(model.graph.nodes):
         if node.target == torch.ops.aten.to.dtype:
@@ -97,48 +356,6 @@ def eliminate_dtype_conversion(model: torch.fx.GraphModule):
 
         if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
             node.args = node.args[:-1]
-
-    model.graph.lint()
-    model.recompile()
-
-
-def convert_expand(model: torch.fx.GraphModule):
-    for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.expand.default:
-            continue
-
-        input_node = node.args[0]
-        sizes = node.args[1]
-        original_shape = input_node.meta["val"].shape
-        assert len(sizes) >= len(original_shape), (
-            "Sizes must have at least as many dimensions as the original tensor."
-        )
-
-        # Add singleton dimensions to match the size length
-        while len(original_shape) < len(sizes):
-            input = input.unsqueeze(0)
-            original_shape = input.shape
-
-        class Expand(torch.nn.Module):
-            def forward(self, input):
-                # Stack along the first dimension repeatedly to create the expanded shape
-                for dim, size in enumerate(sizes):
-                    if input.shape[dim] == 1 and size > 1:
-                        stacked_tensors = []
-                        for _ in range(size):
-                            stacked_tensors.append(input.squeeze(dim) * 1)
-                        input = torch.stack(stacked_tensors, dim=dim)
-                    elif input.shape[dim] != size:
-                        raise ValueError(f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}.")
-
-                return input
-
-        gm: torch.fx.GraphModule = capture_pre_autograd_graph(
-            Expand(), (input_node.meta["val"],)
-        )
-
-        graph_copy(model, gm.graph, node)
-        model.graph.erase_node(node)
 
     model.graph.lint()
     model.recompile()
@@ -211,6 +428,8 @@ def pad_matmul_to_multiples_of_unroll_dim(
                 slice_node.meta["dtype"] = dtype
 
     model.graph.lint()
+
+    model.graph.eliminate_dead_code()
     model.recompile()
     return model
 
@@ -262,37 +481,6 @@ def pad_vit_embeddings_output(
         if node.target == torch.ops.aten.view.default:
             new_size = [x if x != orig_dim else x + pad for x in node.args[1]]
             node.args = (node.args[0], new_size)
-
-    model.graph.lint()
-    model.recompile()
-    return model
-
-
-def replace_permute_with_transpose(model: torch.fx.GraphModule):
-    for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.permute.default:
-            continue
-
-        # if permuted dims is the last two dims
-        permute_dims = node.args[1]
-        tranpose_dims = list(range(len(permute_dims)))
-        tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
-        if permute_dims != tranpose_dims:
-            continue
-
-        with model.graph.inserting_before(node):
-            transpose_node = model.graph.call_function(
-                torch.ops.aten.transpose.int,
-                (node.args[0], -1, -2),
-            )
-
-        # Since we are doing a 1 to 1 replacement, we can copy over the meta data
-        transpose_node.meta = node.meta
-
-        node.replace_all_uses_with(transpose_node)
-        model.graph.erase_node(node)
-
-        logger.info(f"Replaced permute with transpose: {node} -> {transpose_node}")
 
     model.graph.lint()
     model.recompile()
