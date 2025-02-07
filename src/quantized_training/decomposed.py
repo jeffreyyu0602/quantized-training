@@ -166,7 +166,7 @@ quantized_decomposed_lib.define(
 @impl(quantized_decomposed_lib, "matmul_mx", "CompositeExplicitAutograd")
 def matmul_mx(
     self: torch.Tensor,
-    mat2: torch.Tensor,
+    other: torch.Tensor,
     *,
     input_scale: Optional[torch.Tensor] = None,
     weight_scale: Optional[torch.Tensor] = None,
@@ -177,14 +177,14 @@ def matmul_mx(
     if input_code is not None:
         self = input_code[self.to(torch.long)]
     if weight_code is not None:
-        mat2 = weight_code[mat2.to(torch.long)]
+        other = weight_code[other.to(torch.long)]
 
     if input_scale is not None:
         self = self * torch.repeat_interleave(input_scale, block_size, -1)
     if weight_scale is not None:
-        mat2 = mat2 * torch.repeat_interleave(weight_scale, block_size, -2)
+        other = other * torch.repeat_interleave(weight_scale, block_size, -2)
 
-    return torch.matmul(self, mat2)
+    return torch.matmul(self, other)
 
 quantized_decomposed_lib.define(
     "calculate_mx_qparam(Tensor self, int axis, float qmax, int block_size, "

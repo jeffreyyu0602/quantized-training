@@ -301,7 +301,8 @@ def replace_elementwise_with_vmap(
 
         with model.graph.inserting_before(node):
             new_node = model.graph.call_function(
-                torch.ops.quantized_ops.vmap, (node.args[0], get_attr_node)
+                torch.ops.quantized_ops.vmap.default,
+                (node.args[0], get_attr_node)
             )
 
         new_node.meta = node.meta

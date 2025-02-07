@@ -4,6 +4,7 @@ import struct
 
 import torch
 from torch.fx import Node
+from torch.fx.operator_schemas import normalize_function
 
 from .param_pb2 import Argument, IntList, Memory, OpOverload, Tensor
 from ..pt2e_utils import dtype_byte_size
@@ -163,19 +164,24 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     op_overload = OpOverload(
         name=node.name,
         op=node.op,
-        target=node.target.__name__.split(".")[0],
+        target=node.target._schema.name.split('::')[1],
     )
 
     if _is_nop(node) or is_addressing_op(node):
         op_overload.op = "nop"
 
+    new_args_and_kwargs = normalize_function(
+        node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
+    )
+
     # Convert positional arguments
-    for arg in node.args:
+    for arg in new_args_and_kwargs.args:
         op_overload.args.append(convert_arg(arg, output_dir))
 
     # Convert keyword arguments
-    for key, value in node.kwargs.items():
-        op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
+    for key, value in new_args_and_kwargs.kwargs.items():
+        if "code" not in key and value is not None:
+            op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
 
     return op_overload
 
