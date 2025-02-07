@@ -5,7 +5,7 @@ import struct
 import torch
 from torch.fx import Node
 
-from .param_pb2 import Argument, Memory, OpOverload, Tensor
+from .param_pb2 import Argument, IntList, Memory, OpOverload, Tensor
 from ..pt2e_utils import dtype_byte_size
 
 logger = logging.getLogger(__name__)
@@ -51,16 +51,26 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         f"Expected node {node} has value attribute."
     )
 
-    # Reshape can be fused at the input or output of an operation/submodule.
-    # If the node's op is call_module, then the reshape is fused at the output
-    # of the last operation in the submodule.
+    # If a reshape operation is fused at the output of an operation, it should
+    # not be applied again when consuming the node, which is a call_module node.
     reshape_node = node.meta.get("reshape", None)
-    if reshape_node is not None and (node.op != "call_module" or is_output):
+    if reshape_node is not None and (is_output or node.op != "call_module"):
         field.reshape.CopyFrom(map_node(reshape_node))
+        # There could be additional reshape nodes (view, reshape, and etc.) after
+        # the permute/tranpose operation. We need to store the output shape of
+        # the last reshape operation.
+        # TODO using the word reshape here is misleading. We should differentiate
+        # between reshape and transpose/permute operations.
+        field.reshape.kwargs["output_shape"].CopyFrom(Argument(
+            int_list=IntList(values=node.shape)
+        ))
         if not is_output:
             node = reshape_node.args[0]
     elif (getitem_node := node.meta.get("slicing", None)) is not None:
         field.reshape.CopyFrom(map_node(getitem_node))
+        field.reshape.kwargs["output_shape"].CopyFrom(Argument(
+            int_list=IntList(values=node.shape)
+        ))
         node = getitem_node.args[0]
 
     if (dq_scale := node.meta.get("dq_scale", None)) is not None:
@@ -96,6 +106,8 @@ def set_output_field(param, node, output_dir):
         partition = node.meta["memory"].partition_id
         address = node.meta["memory"].start
 
+        # TODO: for microscaling, we need to output two tensors
+        # with different data types.
         for i, tensor in enumerate(node.value):
             param.outputs.tensors.append(Tensor(
                 node=f"{node.name}_{i}",
