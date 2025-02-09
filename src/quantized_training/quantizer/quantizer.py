@@ -25,6 +25,7 @@ ABBREV_MAP = {
     'ax': 'ch_axis',
     'bs': 'block_size',
     'scale': 'scale_dtype',
+    'outlier': 'outlier_threshold',
 }
 
 PARAMS_TYPE = {
@@ -34,14 +35,15 @@ PARAMS_TYPE = {
     'ch_axis': int,
     'block_size': int,
     'scale_dtype': str,
+    'outlier_threshold': float,
 }
 
 def get_max_val(dtype):
-    if (match := re.fullmatch(r'int(\d+)', dtype)):
+    if (match := re.fullmatch(r'int(\d+)', dtype, re.IGNORECASE)):
         nbits = int(match.group(1))
         return 2 ** (nbits - 1) - 1
 
-    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
+    if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype, re.IGNORECASE)):
         ebits = int(match.group(2))
         mbits = int(match.group(3)) + 2
         emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
@@ -77,6 +79,7 @@ class QuantizationSpec(QuantizationSpecBase):
     ch_axis: Optional[int] = None
     block_size: Optional[int] = None
     scale_dtype: Optional[str] = None
+    outlier_threshold: Optional[float] = None
     is_dynamic: bool = False  # required by sharing nodes
 
     @staticmethod
@@ -93,9 +96,10 @@ class QuantizationSpec(QuantizationSpecBase):
                 raise ValueError(f"Unknown argument: {key}")
             params[key] = PARAMS_TYPE[key](value)
 
-        if 'qscheme' in params:
+        if (qscheme := params.get('qscheme', None)) is not None:
             params.setdefault('quant_max', get_max_val(params['dtype']))
-            params.setdefault('amax_history_len', 50)
+            if qscheme != QScheme.MICROSCALING:
+                params.setdefault('amax_history_len', 16)
 
         return QuantizationSpec(**params)
 

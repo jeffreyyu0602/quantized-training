@@ -161,7 +161,7 @@ def get_default_quantizer(
     bias: Optional[QuantizationSpec] = None,
     record_histogram: bool = False,
     force_scale_power_of_two: bool = False,
-    outlier_threshold: float = None,
+    **kwargs: Any,
 ) -> XNNPACKQuantizer:
     """
     Create a quantizer for the given activation and weight quantization specifications.
@@ -179,7 +179,6 @@ def get_default_quantizer(
     observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize.with_args(
         record_histogram=record_histogram,
         force_scale_power_of_two=force_scale_power_of_two,
-        outlier_threshold=outlier_threshold,
     )
 
     qschemes = []
