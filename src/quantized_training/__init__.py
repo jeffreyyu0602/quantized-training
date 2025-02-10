@@ -64,8 +64,8 @@ OPERATOR_MAPPINGS = {
     "silu": [torch.nn.SiLU, torch.nn.functional.silu],
     "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
     "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
-    "quantize": [torch.ops.quantized_ops.quantize],
-    "dequantize": [torch.ops.quantized_ops.dequantize],
+    "quantize": [torch.ops.quantized_ops.quantize.default],
+    "dequantize": [torch.ops.quantized_ops.dequantize.default],
 }
 
 def transform(

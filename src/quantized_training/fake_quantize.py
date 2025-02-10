@@ -142,13 +142,12 @@ class MXFakeQuantFunction(torch.autograd.Function):
             # Use absolute maximum value for scale calculation
             amax = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
             scale = amax / quant_max
-            scale = torch.where(amax > 0.0, scale, 1.0)
-            scale = torch.where(torch.isfinite(amax), scale, 1.0)
 
             # Quantize the scale using the codebook
             if scale_code is not None:
                 scale = vmap(scale, scale_code)
-            scale = torch.where(scale > 0.0, scale, 1.0)
+
+        scale = torch.where(scale > 0.0, scale, 1.0)
 
         input = vmap(input / scale, code) * scale
 

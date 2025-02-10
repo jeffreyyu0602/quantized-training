@@ -694,7 +694,7 @@ def fuse_operator(model: GraphModule, mapping=None):
 
         fuse_op_with_input(graph, fused_nodes_list, nodes_map, slice_node)
 
-    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize])
+    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize.default])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
     while len(partitions) > 0:
         dequantized_node = partitions.pop(0).output_nodes[0]
