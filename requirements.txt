@@ -1,6 +1,6 @@
 matplotlib
 scipy
-transformers==4.36.2
+transformers==4.45.2
 datasets==2.15.0
 accelerate==0.22.0
 evaluate

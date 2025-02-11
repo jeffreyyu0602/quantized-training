@@ -321,7 +321,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             mask = torch.abs(X) < self.outlier_threshold
             X = torch.where(mask, X, torch.zeros_like(X))
 
-            outlier_pct = mask.sum().item() / X.numel()
+            outlier_pct = mask.bitwise_not().sum().item() / X.numel()
             self.max_outlier_pct = max(outlier_pct, getattr(self, "max_outlier_pct", 0.0))
 
         if self.qscheme == qt.microscaling:
