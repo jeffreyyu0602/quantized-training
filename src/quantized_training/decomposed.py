@@ -12,20 +12,22 @@ from .mx_utils import _reshape_to_blocks, _shared_exponents
 # name is not too long
 quantized_decomposed_lib = Library("quantized_ops", "DEF")
 
-def expand(input, target, block_size):
-    while input.ndim < target.ndim:
+def expand(input, shape, block_size):
+    while input.ndim < len(shape):
         input = input.unsqueeze(0)
 
-    for dim in range(target.ndim):
-        if input.shape[dim] != target.shape[dim]:
+    for dim in range(len(shape)):
+        if input.shape[dim] != shape[dim]:
             input = torch.repeat_interleave(input, block_size, dim)
 
-    if list(input.shape) != list(target.shape):
-        slices = [slice(0, x) for x in target.shape]
+    if list(input.shape) != list(shape):
+        slices = [slice(0, x) for x in shape]
         input = input[slices]
     return input
 
+
 quantized_decomposed_lib.define("vmap(Tensor self, Tensor code) -> Tensor")
+
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
 def vmap(input: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
@@ -67,7 +69,7 @@ def quantize(
     """
 
     if block_size is not None:
-        scale = expand(scale, input, block_size)
+        scale = expand(scale, input.shape, block_size)
     return vmap(input / scale, code)
 
 
@@ -134,9 +136,9 @@ def conv2d_mx(
 
     # Replicate scales to match input and weight shapes
     if input_scale is not None:
-        input = input * torch.repeat_interleave(input_scale, block_size, 1)
+        input = input * expand(input_scale, input.shape, block_size)
     if weight_scale is not None:
-        weight = weight * torch.repeat_interleave(weight_scale, block_size, 1)
+        weight = weight * expand(weight_scale, weight.shape, block_size)
 
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
@@ -166,9 +168,9 @@ def linear_mx(
         weight = weight_code[weight.to(torch.long)]
 
     if input_scale is not None:
-        input = input * torch.repeat_interleave(input_scale, block_size, -1)
+        input = input * expand(input_scale, input.shape, block_size)
     if weight_scale is not None:
-        weight = weight * torch.repeat_interleave(weight_scale, block_size, -1)
+        weight = weight * expand(weight_scale, weight.shape, block_size)
 
     return F.linear(input, weight, bias)
 
@@ -196,9 +198,9 @@ def matmul_mx(
         other = weight_code[other.to(torch.long)]
 
     if input_scale is not None:
-        self = self * torch.repeat_interleave(input_scale, block_size, -1)
+        self = self * expand(input_scale, self.shape, block_size)
     if weight_scale is not None:
-        other = other * torch.repeat_interleave(weight_scale, block_size, -2)
+        other = other * expand(weight_scale, other.shape, block_size)
 
     return torch.matmul(self, other)
 

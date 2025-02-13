@@ -108,10 +108,9 @@ def set_output_field(param, node, output_dir):
         partition = node.meta["memory"].partition_id
         address = node.meta["memory"].start
 
-        if "dtype" not in node.meta:
-            dtypes = [str(tensor.dtype).split(".")[1] for tensor in node.value]
-        else:
-            dtypes = node.meta["dtype"]
+        dtypes = [str(t.dtype).split(".")[1] for t in node.value]
+        if "dtype" in node.meta:
+            dtypes = [dt or dtypes[i] for i, dt in enumerate(node.meta["dtype"])]
 
         for i, tensor in enumerate(node.value):
             param.outputs.tensors.append(Tensor(

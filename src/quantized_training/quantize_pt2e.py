@@ -573,7 +573,8 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             )
 
         quantize_mx_node.meta["dtype"] = (
-            activation_post_process.scale_dtype,
+            ("fp8_e8m0" if activation_post_process.force_scale_power_of_two
+                else activation_post_process.scale_dtype),
             activation_post_process.dtype,
         )
 

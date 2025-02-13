@@ -81,13 +81,13 @@ class MemoryManager:
                 logger.warning(f"Node {node} requires replication. Increase memory size.")
                 tensor_size *= 2
         elif isinstance(node.value, (tuple, list)):
+            dtypes = [t.dtype for t in node.value]
+            if "dtype" in node.meta:
+                dtypes = [dt or dtypes[i] for i, dt in enumerate(node.meta["dtype"])]
+
             tensor_size = 0
             for i, t in enumerate(node.value):
-                if node.meta.get('dtype', None) is not None:
-                    num_bytes = dtype_byte_size(node.meta['dtype'][i])
-                else:
-                    num_bytes = dtype_byte_size(t.dtype)
-                tensor_size += t.numel() * num_bytes
+                tensor_size += t.numel() * dtype_byte_size(dtypes[i])
         else:
             logger.warning(f"Node {node} has a non-tensor output")
             return None

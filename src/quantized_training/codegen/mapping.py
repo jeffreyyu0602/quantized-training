@@ -813,10 +813,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         if node.target == operator.getitem:
             input_node = node.args[0]
-            if "dtype" not in node.meta:
-                dtypes = [str(tensor.dtype).split(".")[1] for tensor in input_node.value]
-            else:
-                dtypes = input_node.meta["dtype"]
+
+            dtypes = [t.dtype for t in input_node.value]
+            if "dtype" in input_node.meta:
+                dtypes = [dt or dtypes[i] for i, dt in enumerate(input_node.meta["dtype"])]
+
             sizes = [t.numel() * dtype_byte_size(dtypes[i]) for i, t in enumerate(input_node.value)]
             start_offset = input_node.meta["memory"].start + sum(sizes[:node.args[1]])
             size = sizes[node.args[1]]
