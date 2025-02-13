@@ -813,8 +813,13 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             continue
 
         if node.target == operator.getitem:
-            sizes = [t.numel() * dtype_byte_size(t.dtype) for t in node.args[0].value]
-            start_offset = node.args[0].meta["memory"].start + sum(sizes[:node.args[1]])
+            input_node = node.args[0]
+            if "dtype" not in node.meta:
+                dtypes = [str(tensor.dtype).split(".")[1] for tensor in input_node.value]
+            else:
+                dtypes = input_node.meta["dtype"]
+            sizes = [t.numel() * dtype_byte_size(dtypes[i]) for i, t in enumerate(input_node.value)]
+            start_offset = input_node.meta["memory"].start + sum(sizes[:node.args[1]])
             size = sizes[node.args[1]]
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
             continue
@@ -976,7 +981,7 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
                 edges.append((node.name, u.name))
 
     g = graphviz.Digraph()
-    g.attr(bgcolor="transparent")
+    # g.attr(bgcolor="transparent")
 
     for node, attrs in nodes.items():
         g.node(node, **attrs)

@@ -55,13 +55,15 @@ class MemoryManager:
         def is_conv2d_input(n):
             if n.op == 'get_attr':
                 return False
+
             for user in n.users:
                 if user.target == torch.ops.aten.conv2d.default:
                     return True
-                elif user.op == 'call_module':
-                    submodule = user.meta['submodule']
-                    for sub_node in submodule.graph.nodes:
-                        if sub_node.name == n.name and is_conv2d_input(sub_node):
+
+                if user.op == 'call_module':
+                    gm = user.meta['submodule']
+                    for sn in gm.graph.nodes:
+                        if sn.name == n.name and is_conv2d_input(sn):
                             return True
             return False
 
@@ -79,7 +81,13 @@ class MemoryManager:
                 logger.warning(f"Node {node} requires replication. Increase memory size.")
                 tensor_size *= 2
         elif isinstance(node.value, (tuple, list)):
-            tensor_size = sum(t.numel() * dtype_byte_size(t.dtype) for t in node.value)
+            tensor_size = 0
+            for i, t in enumerate(node.value):
+                if node.meta.get('dtype', None) is not None:
+                    num_bytes = dtype_byte_size(node.meta['dtype'][i])
+                else:
+                    num_bytes = dtype_byte_size(t.dtype)
+                tensor_size += t.numel() * num_bytes
         else:
             logger.warning(f"Node {node} has a non-tensor output")
             return None

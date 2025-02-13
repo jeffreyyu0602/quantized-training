@@ -8,6 +8,10 @@ from torch.library import Library, impl
 from .mx_utils import _reshape_to_blocks, _shared_exponents
 
 
+# Note: decomposed means decomposed quantized tensor, using decomposed so that the
+# name is not too long
+quantized_decomposed_lib = Library("quantized_ops", "DEF")
+
 def expand(input, target, block_size):
     while input.ndim < target.ndim:
         input = input.unsqueeze(0)
@@ -21,10 +25,6 @@ def expand(input, target, block_size):
         input = input[slices]
     return input
 
-# Note: decomposed means decomposed quantized tensor, using decomposed so that the
-# name is not too long
-quantized_decomposed_lib = Library("quantized_ops", "DEF")
-
 quantized_decomposed_lib.define("vmap(Tensor self, Tensor code) -> Tensor")
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
@@ -37,8 +37,11 @@ def vmap(input: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
         indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
     return code[indices].to(input.dtype)
 
+
 quantized_decomposed_lib.define(
-    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, SymInt? block_size=None) -> Tensor")
+    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, int? block_size=None) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "quantize", "CompositeExplicitAutograd")
 def quantize(
@@ -67,8 +70,11 @@ def quantize(
         scale = expand(scale, input, block_size)
     return vmap(input / scale, code)
 
+
 quantized_decomposed_lib.define(
-    "dequantize(Tensor input, Tensor scale, str? dtype, Tensor code) -> Tensor")
+    "dequantize(Tensor input, Tensor scale, str? dtype, Tensor code) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "dequantize", "CompositeExplicitAutograd")
 def dequantize(
@@ -95,11 +101,14 @@ def dequantize(
         return vmap(input, code) * scale
     return input * scale
 
+
 quantized_decomposed_lib.define(
     "conv2d_mx(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, "
     "SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1, *, Tensor? input_scale=None, "
-    "Tensor? weight_scale=None, SymInt? block_size=None, Tensor? input_code=None, "
-    "Tensor? weight_code=None) -> Tensor")
+    "Tensor? weight_scale=None, int? block_size=None, Tensor? input_code=None, "
+    "Tensor? weight_code=None) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "conv2d_mx", "CompositeExplicitAutograd")
 def conv2d_mx(
@@ -117,11 +126,13 @@ def conv2d_mx(
     input_code: Optional[torch.Tensor] = None,
     weight_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    # For codebook quantization, decode input and weight into float values first
     if input_code is not None:
         input = input_code[input.to(torch.long)]
     if weight_code is not None:
         weight = weight_code[weight.to(torch.long)]
 
+    # Replicate scales to match input and weight shapes
     if input_scale is not None:
         input = input * torch.repeat_interleave(input_scale, block_size, 1)
     if weight_scale is not None:
@@ -129,10 +140,13 @@ def conv2d_mx(
 
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
+
 quantized_decomposed_lib.define(
     "linear_mx(Tensor input, Tensor weight, Tensor? bias=None, *, Tensor? input_scale=None, "
-    "Tensor? weight_scale=None, SymInt? block_size=None, Tensor? input_code=None, "
-    "Tensor? weight_code=None) -> Tensor")
+    "Tensor? weight_scale=None, int? block_size=None, Tensor? input_code=None, "
+    "Tensor? weight_code=None) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "linear_mx", "CompositeExplicitAutograd")
 def linear_mx(
@@ -158,10 +172,12 @@ def linear_mx(
 
     return F.linear(input, weight, bias)
 
+
 quantized_decomposed_lib.define(
-    "matmul_mx(Tensor self, Tensor other, *, Tensor? input_scale=None, "
-    "Tensor? weight_scale=None, SymInt? block_size=None, Tensor? input_code=None, "
-    "Tensor? weight_code=None) -> Tensor")
+    "matmul_mx(Tensor self, Tensor other, *, Tensor? input_scale=None, Tensor? weight_scale=None, "
+    "int? block_size=None, Tensor? input_code=None, Tensor? weight_code=None) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "matmul_mx", "CompositeExplicitAutograd")
 def matmul_mx(
@@ -186,15 +202,18 @@ def matmul_mx(
 
     return torch.matmul(self, other)
 
+
 quantized_decomposed_lib.define(
-    "calculate_mx_qparam(Tensor self, int axis, float qmax, int block_size, "
-    "bool force_scale_power_of_two=False, Tensor code=None) -> Tensor")
+    "calculate_mx_qparam(Tensor self, int axis, float quant_max, int block_size, "
+    "bool force_scale_power_of_two=False, Tensor code=None) -> Tensor"
+)
+
 
 @impl(quantized_decomposed_lib, "calculate_mx_qparam", "CompositeExplicitAutograd")
 def calculate_mx_qparam(
     input: torch.Tensor,
-    axes: int,
-    qmax: float,
+    axis: int,
+    quant_max: float,
     block_size: int,
     force_scale_power_of_two: bool = False,
     code: Optional[torch.Tensor] = None,
@@ -202,8 +221,7 @@ def calculate_mx_qparam(
     assert block_size > 0
 
     # Make sure axes is a list of non-negative numbers
-    axes = [axes] if type(axes) == int else axes
-    axes = [x + input.ndim if x < 0 else x for x in axes]
+    axes = [axis + input.ndim if axis < 0 else axis]
 
     # Perform tiling to the hardware vector size
     input, axes, orig_shape, padded_shape = _reshape_to_blocks(
@@ -220,22 +238,45 @@ def calculate_mx_qparam(
 
         # Offset the max exponent by the largest representable exponent
         # in the element data format
-        shared_exp = shared_exp - math.floor(math.log2(qmax))
+        shared_exp = shared_exp - math.floor(math.log2(quant_max))
 
         for axis in reversed(axes):
             # Remove extra dimension
             shared_exp = torch.squeeze(shared_exp, dim=axis + 1)
 
-        return 2 ** shared_exp
+        scale = 2 ** shared_exp
     else:
         # Use absolute maximum value to compute scaling factors
         amax = torch.amax(torch.abs(input), dim=shared_exp_axes)
-        scale = amax / qmax
-        scale = torch.where(amax > 0.0, scale, 1.0)
-        scale = torch.where(torch.isfinite(amax), scale, 1.0)
+        scale = amax / quant_max
 
         # Quantize the scale using the codebook
         if code is not None:
             scale = vmap(scale, code)
-        scale = torch.where(scale > 0.0, scale, 1.0)
-        return scale
+
+    scale = torch.where(scale > 0.0, scale, 1.0)
+    return scale
+
+
+quantized_decomposed_lib.define(
+    "quantize_mx(Tensor self, int axis, float quant_max, int block_size, str dtype, Tensor code, "
+    "bool force_scale_power_of_two=False, Tensor scale_code=None) -> (Tensor, Tensor)"
+)
+
+
+@impl(quantized_decomposed_lib, "quantize_mx", "CompositeExplicitAutograd")
+def quantize_mx(
+    input: torch.Tensor,
+    axis: int,
+    quant_max: float,
+    block_size: int,
+    dtype: str,
+    code: torch.Tensor,
+    force_scale_power_of_two: bool = False,
+    scale_code: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor]:
+    scale = calculate_mx_qparam(
+        input, axis, quant_max, block_size, force_scale_power_of_two, scale_code
+    )
+    input = quantize(input, scale, dtype, code, block_size)
+    return scale, input

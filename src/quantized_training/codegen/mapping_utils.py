@@ -1,3 +1,4 @@
+import operator
 import logging
 import os
 import struct
@@ -107,17 +108,20 @@ def set_output_field(param, node, output_dir):
         partition = node.meta["memory"].partition_id
         address = node.meta["memory"].start
 
-        # TODO: for microscaling, we need to output two tensors
-        # with different data types.
+        if "dtype" not in node.meta:
+            dtypes = [str(tensor.dtype).split(".")[1] for tensor in node.value]
+        else:
+            dtypes = node.meta["dtype"]
+
         for i, tensor in enumerate(node.value):
             param.outputs.tensors.append(Tensor(
                 node=f"{node.name}_{i}",
                 shape=list(tensor.shape),
-                dtype=str(tensor.dtype).split(".")[1],
+                dtype=dtypes[i],
                 memory=Memory(partition=partition, address=int(address)),
             ))
 
-            address += tensor.numel() * dtype_byte_size(tensor.dtype)
+            address += tensor.numel() * dtype_byte_size(dtypes[i])
 
             if output_dir is not None:
                 save_tensor(tensor, os.path.join(output_dir, f"{node.name}_{i}.bin"))
@@ -133,7 +137,13 @@ def convert_arg(value, output_dir=None) -> Argument:
     arg = Argument()
 
     if isinstance(value, torch.fx.Node):
-       set_tensor_field(arg.tensor, value, output_dir)
+        if isinstance(value.value, torch.Tensor):
+            set_tensor_field(arg.tensor, value, output_dir)
+        elif isinstance(value.value, (tuple, list)):
+            for i, _t in enumerate(value.value):
+                arg.tensor_list.tensors.append(Tensor(
+                    node=f"{value.name}_{i}",
+                ))
     elif isinstance(value, (list, tuple)):
         if all(isinstance(x, torch.fx.Node) for x in value):
             arg.tensor_list.tensors.extend([
@@ -161,10 +171,15 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     """
     Converts a torch.fx.Node into an OpOverload protobuf message.
     """
+    if hasattr(node.target, "_schema"):
+        target = node.target._schema.name.split('::')[1]
+    else:
+        target = str(node.target)
+
     op_overload = OpOverload(
         name=node.name,
         op=node.op,
-        target=node.target._schema.name.split('::')[1],
+        target=target,
     )
 
     if _is_nop(node) or is_addressing_op(node):
@@ -174,12 +189,17 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
         node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
     )
 
+    if new_args_and_kwargs is not None:
+        args, kwargs = new_args_and_kwargs.args, new_args_and_kwargs.kwargs
+    else:
+        args, kwargs = node.args, node.kwargs
+
     # Convert positional arguments
-    for arg in new_args_and_kwargs.args:
+    for arg in args:
         op_overload.args.append(convert_arg(arg, output_dir))
 
     # Convert keyword arguments
-    for key, value in new_args_and_kwargs.kwargs.items():
+    for key, value in kwargs.items():
         if "code" not in key and value is not None:
             op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
 
