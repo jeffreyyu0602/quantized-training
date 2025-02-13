@@ -870,6 +870,7 @@ def gen_code(model, args, output_dir=None):
 
     ShapeProp(model).propagate(*args)
     model_params = Model()
+
     for node in model.graph.nodes:
         node_value = getattr(node, 'value', None)
         if not isinstance(node_value, (torch.Tensor, tuple, list)):
@@ -879,12 +880,12 @@ def gen_code(model, args, output_dir=None):
 
         if node.op == 'placeholder':
             tensor = Tensor()
-            set_tensor_field(tensor, node, output_dir)
+            set_tensor_field(tensor, node, output_dir, True)
             model_params.inputs.append(tensor)
             continue
         elif node.op == 'get_attr' and "memory" in node.meta:
             tensor = Tensor()
-            set_tensor_field(tensor, node, output_dir)
+            set_tensor_field(tensor, node, output_dir, True)
             model_params.parameters.append(tensor)
             continue
         elif node.op == 'call_function':
@@ -892,7 +893,7 @@ def gen_code(model, args, output_dir=None):
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
-            submodule_args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+            submodule_args = torch.fx.node.map_arg(node.args, lambda n: n.value.clone())
             ShapeProp(gm).propagate(*submodule_args)
 
             operators = []

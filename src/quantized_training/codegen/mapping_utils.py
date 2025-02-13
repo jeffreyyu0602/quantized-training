@@ -96,7 +96,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         field.memory.partition = memory.partition_id
         field.memory.address = memory.start
 
-    if output_dir is not None:
+    if output_dir is not None and is_output:
         save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
 
