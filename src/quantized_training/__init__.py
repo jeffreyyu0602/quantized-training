@@ -64,7 +64,7 @@ OPERATOR_MAPPINGS = {
     "silu": [torch.nn.SiLU, torch.nn.functional.silu],
     "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
     "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
-    "quantize": [torch.ops.quantized_ops.quantize.default],
+    "quantize": [torch.ops.quantized_ops.quantize.default, torch.ops.quantized_ops.quantize_mx.default],
     "dequantize": [torch.ops.quantized_ops.dequantize.default],
 }
 
@@ -118,6 +118,20 @@ def transform(
 
     ShapeProp(model).propagate(*flatten_args)
     fuse_operator(model, vector_stages)
+
+    complex_ops = {
+        0: ["layer_norm", torch.nn.Softmax, F.softmax],
+        7: ["quantize"],
+    }
+
+    # If there is no corresponding mapping, we directly append the op string
+    complex_ops = {
+        stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
+        for stage, ops in complex_ops.items()
+    }
+
+    ShapeProp(model).propagate(*flatten_args)
+    fuse_operator(model, complex_ops)
 
     model.graph.print_tabular()
 

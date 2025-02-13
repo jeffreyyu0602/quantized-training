@@ -734,13 +734,12 @@ def fuse_operator(model: GraphModule, mapping=None):
                     node.meta['reshape'] = source_node
                 else:
                     n.meta['reshape'] = source_node
-            elif _is_indexing_or_concatenation_op(source_node):
+
+            if _is_indexing_or_concatenation_op(source_node):
                 n.meta['slicing'] = source_node
-            elif source_node.target == torch.ops.quantized_ops.dequantize:
-                # get_attr_node is a placeholder node. We assume that the attribute
-                # name is equal to the placeholder name.
-                get_attr_node = source_node.args[1]
-                n.meta['dq_scale'] = buffers[get_attr_node.target]
+
+            if source_node.target == torch.ops.quantized_ops.dequantize.default:
+                n.meta['dq_scale'] = buffers[source_node.args[1].target]
 
     graph.lint()
 

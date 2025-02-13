@@ -246,22 +246,26 @@ def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
     _matches: List[InternalMatch] = matcher.match(original_graph)
     print(f"Found {len(_matches)} matches")
 
-    param_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
+    get_attr_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
 
     for match in _matches:
-        mapped_param_node = match.nodes_map[param_node]
         input_node = match.placeholder_nodes[0]
         output_node = match.returning_nodes[0]
         input_shape = input_node.meta["val"].shape
-        layer_norm_inputs = [input_node, [input_shape[-1]], mapped_param_node]
+        new_get_attr_node = match.nodes_map[get_attr_node]
+        layer_norm_inputs = [input_node, [input_shape[-1]], new_get_attr_node]
+
         with original_graph.inserting_before(output_node):
             new_node = original_graph.call_function(
                 torch.ops.aten.layer_norm.default,
                 tuple(layer_norm_inputs),
-                {},
+                {}
             )
+
         output_node.replace_all_uses_with(new_node)
         original_graph.erase_node(output_node)
+
+        new_node.meta["source_fn_stack"] = [(new_node.name, "layer_norm")]
 
     original_graph.lint()
     original_graph.eliminate_dead_code()
