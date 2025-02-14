@@ -312,9 +312,9 @@ def _is_elementwise_op(node: Node) -> bool:
         torch.ops.aten.hardtanh_.default,
         torch.ops.aten.relu_.default,
         # Quantization operations
-        torch.ops.quantized_ops.dequantize,
-        torch.ops.quantized_ops.quantize,
-        torch.ops.quantized_ops.vmap,
+        torch.ops.quantized_ops.dequantize.default,
+        torch.ops.quantized_ops.quantize.default,
+        torch.ops.quantized_ops.vmap.default,
         # Not in the core aten operator set. Will be removed in the future.
         torch.ops.aten.silu.default,
     ]
