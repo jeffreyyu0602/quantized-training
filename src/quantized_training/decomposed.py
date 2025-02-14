@@ -26,7 +26,7 @@ def expand(input, shape, block_size):
     return input
 
 
-quantized_decomposed_lib.define("vmap(Tensor self, Tensor code) -> Tensor")
+quantized_decomposed_lib.define("vmap(Tensor self, Tensor other) -> Tensor")
 
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")

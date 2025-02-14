@@ -924,20 +924,25 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        if node.op == "get_attr" and "code" in node.name:
-            continue
-
-        if node.op == "get_attr":
+        if node.op == "get_attr" or not hasattr(node, "value"):
             continue
 
         header = node.name
-        if hasattr(node, "value") and isinstance(node.value, (tuple, list)):
+
+        if isinstance(node.value, torch.Tensor):
+            header += f"&#92;n{str(tuple(node.value.shape))}"
+            if (dtype := node.meta.get("dtype", None)) is not None:
+                header += f"&#92;n{dtype}"
+        elif isinstance(node.value, (tuple, list)):
             shape_str = ", ".join([str(tuple(t.shape)) for t in node.value])
             header += f"&#92;n{shape_str}"
-        elif hasattr(node, "shape"):
-            header += f"&#92;n{str(tuple(node.shape))}"
-        if (dtype := node.meta.get("dtype", None)) is not None:
-            header += f"&#92;n{dtype}"
+
+            dtypes = [t.dtype for t in node.value]
+            if (dtype := node.meta.get("dtype", None)) is not None:
+                dtypes = [dt or dtypes[i] for i, dt in enumerate(dtype)]
+            header += f"&#92;n{', '.join([str(d) for d in dtypes])}"
+        else:
+            continue
 
         body = None
         if node.op == "call_module":
