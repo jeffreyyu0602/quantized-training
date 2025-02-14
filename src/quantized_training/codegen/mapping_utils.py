@@ -181,7 +181,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
         target=target,
     )
 
-    if _is_nop(node) or is_addressing_op(node):
+    if _is_nop(node) or is_addressing_op(node) or node.target == operator.getitem:
         op_overload.op = "nop"
 
     new_args_and_kwargs = normalize_function(

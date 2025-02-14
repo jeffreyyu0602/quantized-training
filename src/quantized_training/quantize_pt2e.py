@@ -445,6 +445,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     model: torch.fx.GraphModule,
     node: Node,
     modules: Dict[str, torch.nn.Module],
+    fused_quantization: bool = False,
 ):
     graph = model.graph
     assert modules is not None
@@ -489,48 +490,52 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 model, graph, input_node.name + "_scale_", scale)
             quantized_node = create_getattr_from_value(
                 model, graph, input_node.name + "_weight_", weight)
+    elif not fused_quantization:
+        with model.graph.inserting_before(node):
+            calculate_qparam_op_inputs = [
+                node.args[0],
+                activation_post_process.ch_axis,
+                activation_post_process.quant_max,
+                activation_post_process.block_size,
+                activation_post_process.force_scale_power_of_two,
+            ]
+
+            if activation_post_process.scale_code is not None:
+                get_attr_node = create_getattr_from_value(
+                    model, model.graph, "code_", activation_post_process.scale_code)
+                calculate_qparam_op_inputs.append(get_attr_node)
+
+            scale_node = model.graph.call_function(
+                torch.ops.quantized_ops.calculate_mx_qparam.default,
+                tuple(calculate_qparam_op_inputs),
+                {}
+            )
+
+            if activation_post_process.scale_dtype is not None:
+                scale_node.meta["dtype"] = activation_post_process.scale_dtype
+
+            get_attr_node = create_getattr_from_value(
+                model,
+                model.graph,
+                "code_",
+                activation_post_process.code if indices is None else indices,
+            )
+            quantize_op_inputs = [
+                node.args[0],
+                scale_node,
+                activation_post_process.dtype,
+                get_attr_node,
+                activation_post_process.block_size,
+            ]
+            quantized_node = model.graph.call_function(
+                torch.ops.quantized_ops.quantize.default,
+                tuple(quantize_op_inputs),
+                {}
+            )
+
+        source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
+        source_fn_st.append((quantized_node.name, quantized_node.target))
     else:
-        # with model.graph.inserting_before(node):
-        #     calculate_qparam_op_inputs = [
-        #         node.args[0],
-        #         activation_post_process.ch_axis,
-        #         activation_post_process.quant_max,
-        #         activation_post_process.block_size,
-        #         activation_post_process.force_scale_power_of_two,
-        #     ]
-
-        #     if activation_post_process.scale_code is not None:
-        #         get_attr_node = create_getattr_from_value(
-        #             model, model.graph, "code_", activation_post_process.scale_code)
-        #         calculate_qparam_op_inputs.append(get_attr_node)
-
-        #     scale_node = model.graph.call_function(
-        #         torch.ops.quantized_ops.calculate_mx_qparam.default,
-        #         tuple(calculate_qparam_op_inputs),
-        #         {}
-        #     )
-
-        #     if activation_post_process.scale_dtype is not None:
-        #         scale_node.meta["dtype"] = activation_post_process.scale_dtype
-
-        #     get_attr_node = create_getattr_from_value(
-        #         model,
-        #         model.graph,
-        #         "code_",
-        #         activation_post_process.code if indices is None else indices,
-        #     )
-        #     quantize_op_inputs = [
-        #         node.args[0],
-        #         scale_node,
-        #         activation_post_process.dtype,
-        #         get_attr_node,
-        #         activation_post_process.block_size,
-        #     ]
-        #     quantized_node = model.graph.call_function(
-        #         torch.ops.quantized_ops.quantize.default,
-        #         tuple(quantize_op_inputs),
-        #         {}
-        #     )
         with model.graph.inserting_before(node):
             get_attr_node = create_getattr_from_value(
                 model,
