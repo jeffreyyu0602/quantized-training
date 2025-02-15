@@ -826,7 +826,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
-        if node.target == torch.ops.aten.select.int and node.args[1] == 0:
+        # if node.target == torch.ops.aten.select.int and node.args[1] == 0:
+        if (
+            node.target == torch.ops.aten.select.int and
+            all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
+        ):
             size = node.value.numel() * get_num_bytes(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)

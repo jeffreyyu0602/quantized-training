@@ -369,7 +369,7 @@ def is_addressing_op(node: Node) -> bool:
     thus require no additional handling:
     """
     if node.target == torch.ops.aten.select.int:
-        return node.args[1] == 0
+        return all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
 
     if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
         return len(node.args) == 1 or node.args[1] == 0
