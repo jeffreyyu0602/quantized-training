@@ -445,7 +445,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     model: torch.fx.GraphModule,
     node: Node,
     modules: Dict[str, torch.nn.Module],
-    fused_quantization: bool = False,
+    fused_quantization: bool = True,
 ):
     graph = model.graph
     assert modules is not None
