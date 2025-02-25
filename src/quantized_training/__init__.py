@@ -89,9 +89,14 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
     split_multi_head_attention(model)
 
+    # rewrite_quantize_mx_for_lastdim(model)
+
     # Handle tensor concatenation along non-zero dimensions
     ShapeProp(model).propagate(*flatten_args)
     convert_cat(model)
+    convert_expand(model)
+
+    ShapeProp(model).propagate(*flatten_args)
     convert_stack(model)
 
     # Move quantize and dequantize ops to the end of last compute op
@@ -113,8 +118,6 @@ def transform(
         stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
         for stage, ops in vector_stages.items()
     }
-
-    replace_elementwise_with_vmap(model, vector_stages)
 
     ShapeProp(model).propagate(*flatten_args)
     fuse_operator(model, vector_stages)

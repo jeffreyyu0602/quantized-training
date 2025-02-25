@@ -534,7 +534,7 @@ def fuse_reshape_with_input(
     return all_reshape_nodes
 
 
-def swap_tranpose_and_select(
+def move_transpose_after_select(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
     nodes_map: Dict[Node, Node],
@@ -545,36 +545,35 @@ def swap_tranpose_and_select(
 
     select_nodes = []
 
-    user_node = next(iter(node.users))
-    while (
-        user_node.target == torch.ops.aten.select.int
-        and user_node.args[1] == 0
-    ):
-        select_nodes.append(user_node)
-        user_node = next(iter(user_node.users))
+    curr_user = next(iter(node.users))
+    while curr_user.target == torch.ops.aten.select.int and curr_user.args[1] == 0:
+        select_nodes.append(curr_user)
+        curr_user = next(iter(curr_user.users))
         dims = [x - 1 for x in dims]
 
-    if len(select_nodes) > 0:
-        with graph.inserting_before(user_node):
+    if select_nodes:
+        with graph.inserting_before(curr_user):
             new_node = graph.call_function(
                 torch.ops.aten.transpose.int, (select_nodes[-1], *dims),
             )
 
-        user_node.replace_input_with(select_nodes[-1], new_node)
+        curr_user.replace_input_with(select_nodes[-1], new_node)
         select_nodes[0].replace_input_with(node, node.args[0])
         graph.erase_node(node)
 
         group = search_group(node, candidates)
-
         group.remove(node)
         for n in select_nodes:
             group.remove(n)
         group.append(new_node)
 
-        user_node = nodes_map.pop(node, None)
+        mapped_node = nodes_map.pop(node, None)
         nodes_map[new_node] = (
-            new_node if user_node == select_nodes[-1] else user_node
+            new_node if mapped_node == select_nodes[-1] else mapped_node
         )
+
+    graph.lint()
+    graph.eliminate_dead_code()
 
 
 def fuse_op_with_input(
@@ -675,7 +674,7 @@ def fuse_operator(model: GraphModule, mapping=None):
 
         for n in nodes:
             if n.target == torch.ops.aten.transpose.int:
-                swap_tranpose_and_select(graph, fused_nodes_list, nodes_map, n)
+                move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
     partitions = get_source_partitions(graph, [operator.getitem])
     partitions = list(itertools.chain.from_iterable(partitions.values()))
@@ -740,6 +739,15 @@ def fuse_operator(model: GraphModule, mapping=None):
 
             if source_node.target == torch.ops.quantized_ops.dequantize.default:
                 n.meta['dq_scale'] = buffers[source_node.args[1].target]
+
+        # Update the metadata of all the user nodes that consumes the new node
+        for user in list(node.users):
+            if user.op != "call_module":
+                continue
+            index = user.args.index(node)
+            submodule = named_modules[user.target]
+            submodule_nodes = list(n for n in submodule.graph.nodes if n.op == 'placeholder')
+            submodule_nodes[index].meta['source_node'] = node
 
     graph.lint()
 

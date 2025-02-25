@@ -1,16 +1,14 @@
 import itertools
 import logging
-from typing import Callable, Dict, List
+from typing import Callable, List
 
 import torch
 from torch._export import capture_pre_autograd_graph
-from torch.ao.quantization.fx.utils import assert_and_get_unique_device
 from torch.fx import GraphModule
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import graph_copy
-from .mapping_utils import _is_elementwise_op
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -23,12 +21,12 @@ __all__ = [
     "convert_stack",
     "eliminate_dtype_conversion",
     "get_conv_bn_layers",
-    "pad_matmul_to_multiples_of_unroll_dim",
+    "pad_matmul_inputs_for_unroll_alignment",
     "pad_vit_embeddings_output",
-    "replace_elementwise_with_vmap",
+    "replace_target_with_vmap",
     "replace_interpolate",
-    "replace_permute_with_transpose",
     "replace_rmsnorm_with_layer_norm",
+    "rewrite_quantize_mx_for_lastdim",
 ]
 
 
@@ -154,7 +152,6 @@ def convert_stack(model: GraphModule):
             graph.erase_node(cat_node)
 
     graph.lint()
-
     graph.eliminate_dead_code()
     model.recompile()
     return model
@@ -187,7 +184,9 @@ def convert_expand(model: torch.fx.GraphModule):
                             stacked_tensors.append(input.squeeze(dim) * 1)
                         input = torch.stack(stacked_tensors, dim=dim)
                     elif input.shape[dim] != size:
-                        raise ValueError(f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}.")
+                        raise ValueError(
+                            f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}."
+                        )
 
                 return input
 
@@ -199,7 +198,6 @@ def convert_expand(model: torch.fx.GraphModule):
         model.graph.erase_node(node)
 
     model.graph.lint()
-
     model.graph.eliminate_dead_code()
     model.recompile()
     return model
@@ -272,33 +270,22 @@ def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
     model.recompile()
 
 
-def replace_elementwise_with_vmap(
+def replace_target_with_vmap(
     model: GraphModule,
-    mapping: Dict[str, Callable],
+    target: Callable
 ) -> GraphModule:
-    device = assert_and_get_unique_device(model)
-
     nodes_map = {}
-
-    mapped_sources = list(itertools.chain.from_iterable(mapping.values()))
     for node in list(model.graph.nodes):
-        if not _is_elementwise_op(node) or len(node.all_input_nodes) > 1:
+        if node.target != target:
             continue
-
-        source_fn_st = node.meta.get("source_fn_stack", [])
-        if source_fn_st and source_fn_st[-1][1] in mapped_sources:
-            continue
-
-        logger.info(f"Replace {node.target} with value mapping")
 
         if (get_attr_node := nodes_map.get(node.target, None)) is None:
-            values = (torch.arange(2 ** 16, dtype=torch.int16, device=device)
-                    .view(torch.bfloat16))
-            val_map = node.target(values, *node.args[1:])
+            values = (torch.arange(2 ** 16, dtype=torch.int16).view(torch.bfloat16))
+            code = node.target(values, *node.args[1:])
 
             with model.graph.inserting_before(node):
                 get_attr_node = create_getattr_from_value(
-                    model, model.graph, f'_tensor_constant_', val_map
+                    model, model.graph, f'_tensor_constant_', code
                 )
 
             nodes_map[node.target] = get_attr_node
@@ -316,124 +303,171 @@ def replace_elementwise_with_vmap(
         model.graph.erase_node(node)
 
     model.graph.lint()
-
     model.graph.eliminate_dead_code()
     model.recompile()
     return model
 
 
-def replace_permute_with_transpose(model: torch.fx.GraphModule):
+def rewrite_quantize_mx_for_lastdim(model: torch.fx.GraphModule):
+    graph = model.graph
     for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.permute.default:
+        if node.target != torch.ops.quantized_ops.quantize_mx.default:
             continue
 
-        # if permuted dims is the last two dims
-        permute_dims = node.args[1]
-        tranpose_dims = list(range(len(permute_dims)))
-        tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
-        if permute_dims != tranpose_dims:
+        axis = node.args[1]
+        if axis == -1 or axis == node.value[1].ndim - 1:
             continue
 
-        with model.graph.inserting_before(node):
-            transpose_node = model.graph.call_function(
+        with graph.inserting_before(node):
+            transpose_node = graph.call_function(
                 torch.ops.aten.transpose.int,
-                (node.args[0], -1, -2),
+                (node.args[0], axis, -1),
             )
 
-        # Since we are doing a 1 to 1 replacement, we can copy over the meta data
-        transpose_node.meta = node.meta
+        node.replace_input_with(node.args[0], transpose_node)
 
-        node.replace_all_uses_with(transpose_node)
-        model.graph.erase_node(node)
+        node.args = node.args[:1] + (-1,) + node.args[2:]
 
-        logger.info(f"Replaced permute with transpose: {node} -> {transpose_node}")
+        for user in node.users:
+            with graph.inserting_after(user):
+                transpose_back = graph.call_function(
+                    torch.ops.aten.transpose.int,
+                    (user, -1, axis),
+                )
 
-    model.graph.lint()
+            for n in list(user.users):
+                if id(n) != id(transpose_back):
+                    n.replace_input_with(user, transpose_back)
+
+            transpose_back.meta["dtype"] = node.meta["dtype"]
+            transpose_back.meta["source_fn_stack"] = [(transpose_back.name, "transpose")]
+
+    graph.lint()
+    graph.eliminate_dead_code()
     model.recompile()
     return model
 
 
+def replace_quantize_mx_with_reduce(model: torch.fx.GraphModule):
+    graph = model.graph
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.quantized_ops.quantize_mx.default:
+            continue
+
+        axis = node.args[1]
+        if axis == -1 or axis == node.value[1].ndim - 1:
+            continue
+
+
 def eliminate_dtype_conversion(model: torch.fx.GraphModule):
     for node in list(model.graph.nodes):
+        # Eliminate dtype conversion nodes.
         if node.target == torch.ops.aten.to.dtype:
             node.replace_all_uses_with(node.args[0])
             model.graph.erase_node(node)
+            continue
 
+        # Remove the dtype argument from softmax nodes.
         if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
             node.args = node.args[:-1]
 
     model.graph.lint()
+    model.graph.eliminate_dead_code()
     model.recompile()
+    return model
 
 
-def pad_matmul_to_multiples_of_unroll_dim(
+def pad_matmul_inputs_for_unroll_alignment(
     model: torch.fx.GraphModule,
-    ic_unroll = 32,
-    oc_unroll = 32
-):
+    c_unroll: int = 32,
+    k_unroll: int = 32,
+) -> torch.fx.GraphModule:
+    """
+    Pad inputs to GEMM (matrix multiplication) nodes in a torch.fx.GraphModule so that
+    the dimensions C and K are multiples of the provided unroll factors.
+
+    The GEMM operation is assumed to multiply:
+        - input1 of shape [..., X, C]
+        - input2 of shape [..., C, K]
+    resulting in an output of shape [..., X, K].
+
+    Padding is applied as follows:
+        - For input1: pad the C dimension (last dimension) by pad_C.
+        - For input2: pad the C dimension (second-to-last) by pad_C and the K dimension (last)
+          by pad_K.
+
+    After the GEMM, the output is sliced to remove the extra padded columns in the K dimension.
+
+    Parameters:
+        model (torch.fx.GraphModule): The FX graph module to transform.
+        c_unroll (int): Unroll factor for the C (shared inner) dimension.
+        k_unroll (int): Unroll factor for the K dimension.
+
+    Returns:
+        torch.fx.GraphModule: The transformed FX graph module.
+    """
     for node in list(model.graph.nodes):
         if node.target != torch.ops.aten.matmul.default:
             continue
 
-        input1 = node.args[0]
-        input2 = node.args[1]
-        input1_ndim = sum(1 for d in input1.meta["val"].shape if d > 1)
-        input2_ndim = sum(1 for d in input2.meta["val"].shape if d > 1)
+        # Get the two input nodes and their shapes.
+        input1, input2 = node.args[0], node.args[1]
+        shape1 = input1.meta["val"].shape  # Expected: [..., X, C]
+        shape2 = input2.meta["val"].shape  # Expected: [..., C, K]
+
+        # Process only if the inputs are at least 3D (batched or higher-dimensional).
+        input1_ndim = sum(1 for d in shape1 if d > 1)
+        input2_ndim = sum(1 for d in shape2 if d > 1)
         if input1_ndim < 3 and input2_ndim < 3:
             continue
 
-        input_pad = (ic_unroll - (input1.meta["val"].shape[-2] % ic_unroll)) % ic_unroll
-        ic_pad = (ic_unroll - (input1.meta["val"].shape[-1] % ic_unroll)) % ic_unroll
-        oc_pad = (oc_unroll - (input2.meta["val"].shape[-1] % oc_unroll)) % oc_unroll
+        # Interpret dimensions as: input1 is [..., X, C] and input2 is [..., C, K]
+        C = shape1[-1]
+        K = shape2[-1]
 
-        if input_pad or ic_pad:
+        # Compute required padding.
+        pad_C = (c_unroll - (C % c_unroll)) % c_unroll
+        pad_K = (k_unroll - (K % k_unroll)) % k_unroll
+
+        # Pad input1 (shape: [..., X, C]) along C dimension if needed.
+        if pad_C > 0:
             with model.graph.inserting_before(node):
-                pad_node = model.graph.call_function(
+                padded_input1 = model.graph.call_function(
                     torch.ops.aten.pad.default,
-                    (input1, [0, ic_pad, 0, input_pad]),
+                    (input1, [0, pad_C]),
                 )
-                node.replace_input_with(input1, pad_node)
+            node.replace_input_with(input1, padded_input1)
             if (dtype := input1.meta.get("dtype")) is not None:
-                pad_node.meta["dtype"] = dtype
+                padded_input1.meta["dtype"] = dtype
 
-        if ic_pad or oc_pad:
+        # Pad input2 (shape: [..., C, K]) along C and K dimensions if needed.
+        if pad_C > 0 or pad_K > 0:
             with model.graph.inserting_before(node):
-                pad_node = model.graph.call_function(
+                padded_input2 = model.graph.call_function(
                     torch.ops.aten.pad.default,
-                    (input2, [0, oc_pad, 0, ic_pad]),
+                    (input2, [0, pad_K, 0, pad_C]),
                 )
-                node.replace_input_with(input2, pad_node)
+            node.replace_input_with(input2, padded_input2)
             if (dtype := input2.meta.get("dtype")) is not None:
-                pad_node.meta["dtype"] = dtype
+                padded_input2.meta["dtype"] = dtype
 
+        # After GEMM, slice the output to remove the extra padded columns in the K dimension.
         user_node = next(iter(node.users))
         output_node = node
-        if input_pad:
-            with model.graph.inserting_before(user_node):
-                output_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor,
-                    (node, -2, 0, input1.meta["val"].shape[-2]),
-                )
-            for user in list(node.users):
-                if id(user) != id(output_node):
-                    user.replace_input_with(node, output_node)
-            if (dtype := node.meta.get("dtype")) is not None:
-                output_node.meta["dtype"] = dtype
 
-        if oc_pad:
+        if pad_K:
             with model.graph.inserting_before(user_node):
-                slice_node = model.graph.call_function(
+                sliced_output = model.graph.call_function(
                     torch.ops.aten.slice.Tensor,
-                    (output_node, -1, 0, input2.meta["val"].shape[-1]),
+                    (output_node, -1, 0, K),
                 )
             for user in list(output_node.users):
-                if id(user) != id(slice_node):
-                    user.replace_input_with(output_node, slice_node)
+                if id(user) != id(sliced_output):
+                    user.replace_input_with(output_node, sliced_output)
             if (dtype := output_node.meta.get("dtype")) is not None:
-                slice_node.meta["dtype"] = dtype
+                sliced_output.meta["dtype"] = dtype
 
     model.graph.lint()
-
     model.graph.eliminate_dead_code()
     model.recompile()
     return model

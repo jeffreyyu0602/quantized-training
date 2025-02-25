@@ -28,13 +28,11 @@ from quantized_training import (
     transform,
 )
 from quantized_training.codegen.utils import (
-    convert_expand,
     eliminate_dtype_conversion,
     get_conv_bn_layers,
     pad_vit_embeddings_output,
     replace_interpolate,
     replace_rmsnorm_with_layer_norm,
-    replace_permute_with_transpose,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,8 +194,6 @@ if __name__ == "__main__":
                 gm(inputs.unsqueeze(0).to(torch_dtype))
 
         convert_pt2e(gm)
-
-        replace_permute_with_transpose(gm)
 
         # TODO why the output is different after replacing gelu with vmap
         orig_output, new_output = transform(
@@ -422,12 +418,11 @@ if __name__ == "__main__":
         causal_mask = model.model._update_causal_mask(
             None, inputs_embeds, cache_position, None, None
         )
-        hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+        position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
 
-        example_args = (hidden_states, causal_mask, position_embeddings)
+        example_args = (inputs_embeds, causal_mask, position_embeddings)
 
         class LlamaWrapper(torch.nn.Module):
             def __init__(self):
@@ -481,13 +476,12 @@ if __name__ == "__main__":
         causal_mask = model.model._update_causal_mask(
             None, inputs_embeds, cache_position, None, None
         )
-        hidden_states = inputs_embeds
 
         # no matter the length, we just slice it
         causal_mask = causal_mask[:, :, :, : input_ids.shape[-1]]
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+        position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
 
         class LLamaDecoder(torch.nn.Module):
             def __init__(self):
@@ -502,35 +496,40 @@ if __name__ == "__main__":
                 )
                 return layer_outputs[0]
 
-        example_args = (hidden_states, causal_mask, position_embeddings)
+        example_args = (inputs_embeds, causal_mask, position_embeddings)
         model = LLamaDecoder()
 
         gm = prepare_pt2e(model, quantizer, example_args)
 
         # Calibrate using random inputs
         for i in range(3):
-            calib_input = (torch.randn_like(hidden_states), causal_mask, position_embeddings)
+            calib_input = (inputs_embeds.clone(), causal_mask, position_embeddings)
             gm(*calib_input)
 
         example_input = torch.randn(1, 128, 2048, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
         eliminate_dtype_conversion(gm)
-        convert_expand(gm)
 
         convert_pt2e(gm)
 
         # Generate float32 model
         if not args.bf16:
             gm.float()
-
             position_embeddings = tuple(t.float() for t in position_embeddings)
-            example_args = (hidden_states.float(), causal_mask.float(), position_embeddings)
+            example_args = (inputs_embeds.float(), causal_mask.float(), position_embeddings)
 
         orig_output, new_output = transform(
             gm,
             example_args,
             output_dir=args.output_dir,
         )
+    elif args.model == "llama_decode":
+        import transformers
+
+        model_id = "meta-llama/Meta-Llama-3-8B"
+
+        pipeline = transformers.pipeline("text-generation", model=model_id, model_kwargs={"torch_dtype": torch.bfloat16}, device_map="auto")
+        pipeline("Hey how are you doing today?")
     elif args.model == "vit":
         from transformers import ViTForImageClassification
 

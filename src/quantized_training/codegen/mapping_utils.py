@@ -54,15 +54,13 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     )
 
     # If a reshape operation is fused at the output of an operation, it should
-    # not be applied again when consuming the node, which is a call_module node.
+    # not be applied again when consuming the node, which has op call_module.
     reshape_node = node.meta.get("reshape", None)
     if reshape_node is not None and (is_output or node.op != "call_module"):
         field.reshape.CopyFrom(map_node(reshape_node))
-        # There could be additional reshape nodes (view, reshape, and etc.) after
-        # the permute/tranpose operation. We need to store the output shape of
-        # the last reshape operation.
-        # TODO using the word reshape here is misleading. We should differentiate
-        # between reshape and transpose/permute operations.
+        # There could be additional operations (view, reshape, and etc.) after
+        # the permute/transpose operation. Store the output shape of the last
+        # reshape operation for convenience.
         field.reshape.kwargs["output_shape"].CopyFrom(Argument(
             int_list=IntList(values=node.shape)
         ))
