@@ -791,7 +791,7 @@ def main(args):
         device = torch.device("cpu")
     model.to(device)
 
-    if args.pt2e_quantization:
+    if not args.eager:
         print("PyTorch 2 Export quantization")
         if args.bf16:
             model.bfloat16()

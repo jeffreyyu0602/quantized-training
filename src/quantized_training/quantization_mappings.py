@@ -30,7 +30,7 @@ TRANSFORMER_MODULE_MAPPINGS: Dict[Callable, Any] = {
     bert.modeling_bert.BertOutput: quantizable.BertOutput,
     distilbert.modeling_distilbert.TransformerBlock: quantizable.TransformerBlock,
     gpt2.modeling_gpt2.GPT2Block: quantizable.GPT2Block,
-    llama.modeling_llama.LlamaDecoderLayer: quantizable.LlamaDecoderLayer,
+    # llama.modeling_llama.LlamaDecoderLayer: quantizable.LlamaDecoderLayer,
     mobilebert.modeling_mobilebert.MobileBertSelfAttention: quantizable.MobileBertSelfAttention,
     mobilebert.modeling_mobilebert.MobileBertSelfOutput: quantizable.MobileBertSelfOutput,
     mobilebert.modeling_mobilebert.FFNOutput: quantizable.FFNOutput,

@@ -73,6 +73,7 @@ def transform(
     example_args,
     example_kwargs=None,
     *,
+    bank_width=None,
     output_file="compute_graph",
     output_dir=None
 ):
@@ -89,15 +90,11 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
     split_multi_head_attention(model)
 
-    # rewrite_quantize_mx_for_lastdim(model)
-
-    # Handle tensor concatenation along non-zero dimensions
+    # Perform transformations to the model
     ShapeProp(model).propagate(*flatten_args)
-    convert_cat(model)
-    convert_expand(model)
-
-    ShapeProp(model).propagate(*flatten_args)
-    convert_stack(model)
+    convert_cat_and_stack_as_stack_on_dim0(model)
+    convert_cat_with_mismatched_shapes_to_stack(model)
+    convert_expand_to_memory_copy(model)
 
     # Move quantize and dequantize ops to the end of last compute op
     ShapeProp(model).propagate(*flatten_args)
@@ -141,7 +138,7 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
 
     try:
-        manager = MemoryManager(1024 ** 4)
+        manager = MemoryManager(1024 ** 4, bank_width=bank_width)
         allocate_weights(model, manager)
         allocate_activations(model, manager)
     except RuntimeError:

@@ -16,9 +16,9 @@ from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "convert_cat",
-    "convert_expand",
-    "convert_stack",
+    "convert_cat_and_stack_as_stack_on_dim0",
+    "convert_cat_with_mismatched_shapes_to_stack",
+    "convert_expand_to_memory_copy",
     "eliminate_dtype_conversion",
     "get_conv_bn_layers",
     "pad_matmul_inputs_for_unroll_alignment",
@@ -44,44 +44,18 @@ def get_conv_bn_layers(model):
     return layers
 
 
-def convert_cat(model: GraphModule):
-    partitions = get_source_partitions(model.graph, [torch.cat])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
-        node = partition.output_nodes[0]
-        if node.target != torch.ops.aten.cat.default:
-            continue
+def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
+    """
+    Transforms occurrences of `torch.cat` and `torch.stack` operations on non-zero dimensions
+    into a `torch.stack` on the 0th dimension, followed by a `permute` operation to restore
+    the original order.
 
-        input_shape = list(node.args[0][0].shape)
-        if all(list(n.shape) == input_shape for n in node.args[0][1:]):
-            continue
+    Args:
+        model (GraphModule): The PyTorch FX GraphModule to be modified.
 
-        logger.info(f"Node {node} has different input shapes")
-        dim = node.args[1]
-
-        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
-        shape = list(args[0][0].shape[:dim])
-
-        class Concat(torch.nn.Module):
-            def forward(self, *inputs):
-                result = []
-                for idx in itertools.product(*[range(dim) for dim in shape]):
-                    tensor = torch.cat([x[idx] for x in inputs], dim=0)
-                    result.append(tensor)
-                output = torch.stack(result, dim=0)
-                return output.reshape(*shape, *output.shape[1:])
-
-        gm = capture_pre_autograd_graph(Concat(), (*args[0],))
-        graph_copy(model, gm.graph, node)
-
-    model.graph.lint()
-
-    model.graph.eliminate_dead_code()
-    model.recompile()
-    return model
-
-
-def convert_stack(model: GraphModule):
+    Returns:
+        GraphModule: The transformed GraphModule with `torch.cat` and `torch.stack` operations adjusted.
+    """
     graph = model.graph
 
     partitions = get_source_partitions(graph, [torch.stack, torch.cat])
@@ -91,6 +65,10 @@ def convert_stack(model: GraphModule):
         if cat_node.target not in [
             torch.ops.aten.cat.default, torch.ops.aten.stack.default
         ]:
+            continue
+
+        if not all(hasattr(n, "shape") for n in cat_node.args[0]):
+            logger.warning(f"Node {cat_node} do not have a shape attribute")
             continue
 
         input_shape = list(cat_node.args[0][0].shape)
@@ -157,9 +135,72 @@ def convert_stack(model: GraphModule):
     return model
 
 
-def convert_expand(model: torch.fx.GraphModule):
+def convert_cat_with_mismatched_shapes_to_stack(model: GraphModule):
+    """
+    Convert `torch.cat` operations where input tensors have different shapes by replacing them
+    with a `torch.stack` operation along the concatenated dimensions.
+
+    Args:
+        model (GraphModule): The PyTorch FX GraphModule to be modified.
+
+    Returns:
+        GraphModule: The transformed GraphModule with `torch.cat` operations adjusted to `torch.stack`.
+    """
+    partitions = get_source_partitions(model.graph, [torch.cat])
+    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for partition in partitions:
+        node = partition.output_nodes[0]
+        if node.target != torch.ops.aten.cat.default:
+            continue
+
+        input_shape = list(node.args[0][0].shape)
+        if all(list(n.shape) == input_shape for n in node.args[0][1:]):
+            continue
+
+        logger.info(f"Node {node} has different input shapes")
+        dim = node.args[1]
+
+        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+        shape = list(args[0][0].shape[:dim])
+
+        class Concat(torch.nn.Module):
+            def forward(self, *inputs):
+                result = []
+                for idx in itertools.product(*[range(dim) for dim in shape]):
+                    tensor = torch.cat([x[idx] for x in inputs], dim=0)
+                    result.append(tensor)
+                output = torch.stack(result, dim=0)
+                return output.reshape(*shape, *output.shape[1:])
+
+        gm = capture_pre_autograd_graph(Concat(), (*args[0],))
+        graph_copy(model, gm, node)
+
+    model.graph.lint()
+
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def convert_expand_to_memory_copy(model: torch.fx.GraphModule):
+    """
+    Convert `torch.expand` operations into explicit memory copying by replicating input elements.
+    This replaces implicit broadcasting with actual memory duplication, ensuring that expanded
+    dimensions are materialized as stacked tensors.
+
+    Args:
+        model (torch.fx.GraphModule): The PyTorch FX GraphModule to be modified.
+
+    Returns:
+        torch.fx.GraphModule: The transformed GraphModule where `torch.expand` operations are
+        replaced with explicit memory copies.
+    """
     for node in list(model.graph.nodes):
         if node.target != torch.ops.aten.expand.default:
+            continue
+
+        # Skip if the expand operation is a no-op
+        if all(x == 1 or x == -1 for x in node.args[1]):
             continue
 
         input_node = node.args[0]
@@ -194,7 +235,7 @@ def convert_expand(model: torch.fx.GraphModule):
             Expand(), (input_node.meta["val"],)
         )
 
-        graph_copy(model, gm.graph, node)
+        graph_copy(model, gm, node)
         model.graph.erase_node(node)
 
     model.graph.lint()
@@ -357,6 +398,37 @@ def replace_quantize_mx_with_reduce(model: torch.fx.GraphModule):
         axis = node.args[1]
         if axis == -1 or axis == node.value[1].ndim - 1:
             continue
+
+        axis = axis if axis >= 0 else axis + node.value[1].ndim
+        quant_max = node.args[2]
+        block_size = node.args[3]
+        dtype = node.args[4]
+
+        from ..fake_quantize import get_quantization_map
+
+        @torch.compiler.assume_constant_result
+        def get_code():
+            code = get_quantization_map(dtype)
+            return code[0] if isinstance(code, tuple) else code
+
+        class QuantizeMXDecomposed(torch.nn.Module):
+            def forward(self, input):
+                new_shape = input.shape[:axis] + (-1, block_size) + input.shape[axis + 1:]
+                reshape = input.reshape(new_shape)
+                scale = torch.amax(torch.abs(reshape), axis + 1) * (1.0 / quant_max)
+                code = get_code()
+                quantized = torch.ops.quantized_ops.quantize(
+                    input, scale, dtype, code, block_size
+                )
+                return scale, quantized
+
+        gm = capture_pre_autograd_graph(QuantizeMXDecomposed(), (node.args[0].meta["val"],))
+        graph_copy(model, gm, node)
+
+    graph.lint()
+    graph.eliminate_dead_code()
+    model.recompile()
+    return model
 
 
 def eliminate_dtype_conversion(model: torch.fx.GraphModule):

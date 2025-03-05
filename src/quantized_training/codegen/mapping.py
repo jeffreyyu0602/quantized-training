@@ -28,23 +28,37 @@ from .memory import MemoryManager, Partition
 from .param_pb2 import Model, Operation, Tensor
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
+from ..quantize_pt2e import create_getattr_from_value
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
-def graph_copy(self: GraphModule, graph: Graph, source: Node) -> List[Node]:
+def graph_copy(self: GraphModule, module: GraphModule, source: Node) -> List[Node]:
     args_iter = iter(source.all_input_nodes)
     value_remap = {}
-    for node in list(graph.nodes):
+    for node in list(module.graph.nodes):
         if node.op == 'placeholder':
             value_remap[node] = next(args_iter)
         elif node.op == 'output':
-            source.replace_all_uses_with(value_remap[node.args[0][0]])
+            output_node = node
+            if len(node.args[0]) == 1:
+                source.replace_all_uses_with(value_remap[node.args[0][0]])
+            else:
+                for user in list(source.users):
+                    assert user.target == operator.getitem
+                    select_idx = user.args[1]
+                    user.replace_all_uses_with(value_remap[node.args[0][select_idx]])
         else:
             with self.graph.inserting_before(source):
-                value_remap[node] = self.graph.node_copy(node, lambda n: value_remap[n])
+                if node.op == 'get_attr':
+                    param = getattr(module, node.target)
+                    get_attr_node = create_getattr_from_value(
+                        self, self.graph, "_tensor_constant_", param)
+                    value_remap[node] = get_attr_node
+                else:
+                    value_remap[node] = self.graph.node_copy(node, lambda n: value_remap[n])
 
             if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
                 source_fn = source_fn_st[-1]
@@ -52,7 +66,6 @@ def graph_copy(self: GraphModule, graph: Graph, source: Node) -> List[Node]:
                     (value_remap[node].name, source_fn[1])
                 ]
 
-    output_node = list(graph.nodes)[-1]
     return [value_remap[n] for n in output_node.args[0]]
 
 
@@ -78,7 +91,7 @@ def _decompose_bmm(model: GraphModule, node: Node):
             return result
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2))
-    output_nodes = graph_copy(model, gm.graph, node)
+    output_nodes = graph_copy(model, gm, node)
     model.graph.erase_node(node)
     return output_nodes[0]
 
@@ -143,7 +156,7 @@ def _decompose_bmm_mx(model: GraphModule, node: Node):
         if n.target == torch.ops.quantized_ops.matmul_mx.default:
             n.meta['source_fn_stack'] = [(n.name, source_fn[1])]
 
-    output_nodes = graph_copy(model, gm.graph, node)
+    output_nodes = graph_copy(model, gm, node)
     model.graph.erase_node(node)
     return output_nodes[0]
 

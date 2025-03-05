@@ -39,8 +39,9 @@ class MemoryManager:
     """
     total_partitions = 0
 
-    def __init__(self, total_memory):
+    def __init__(self, total_memory, bank_width=32):
         self.total_memory = total_memory
+        self.bank_width = bank_width
         self.partition_id = MemoryManager.total_partitions
         MemoryManager.total_partitions += 1
         self.memory_partitions = [Partition(start=0, end=total_memory, partition_id=self.partition_id)]
@@ -91,6 +92,10 @@ class MemoryManager:
         else:
             logger.warning(f"Node {node} has a non-tensor output")
             return None
+
+        # Make sure the tensor size is a multiple of the bank width for alignment
+        if self.bank_width is not None:
+            tensor_size = (tensor_size + self.bank_width - 1) // self.bank_width * self.bank_width
 
         for partition in self.memory_partitions:
             if partition.node is None and (partition.end - partition.start) >= tensor_size:

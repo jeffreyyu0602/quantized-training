@@ -135,9 +135,9 @@ def add_qspec_args(parser=None):
     # Quantization arguments
     #----------------------------------------------------
     parser.add_argument(
-        "--pt2e_quantization",
+        "--eager",
         action="store_true",
-        help="Whether to use torch.export mode quantizaion.",
+        help="Whether to use eager mode quantizaion.",
     )
     parser.add_argument(
         "--activation",
@@ -198,12 +198,6 @@ def add_qspec_args(parser=None):
         help='Whether to force the scaling factor to be a power of two.',
     )
     parser.add_argument(
-        '--outlier_threshold',
-        type=float,
-        default=None,
-        help='Threshold for outlier detection.',
-    )
-    parser.add_argument(
         '--calibration_steps',
         type=int,
         default=0,
@@ -244,6 +238,12 @@ def add_qspec_args(parser=None):
         "--record_histogram",
         action="store_true",
         help="Whether to store and plot the histogram of tensor value.",
+    )
+    parser.add_argument(
+        "--bank_width",
+        type=int,
+        default=None,
+        help="The width of the memory bank in unit of bytes for memory planning.",
     )
     #----------------------------------------------------
     # Slurm arguments

@@ -263,7 +263,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
         quant_map = get_quantization_map(dtype, device)
-        if not isinstance(quant_map, torch.Tensor):
+        if isinstance(quant_map, tuple):
             indices, values = quant_map
             quant_map = values[indices]
         self.register_buffer("code", quant_map, persistent=False)
