@@ -411,7 +411,12 @@ if __name__ == "__main__":
             attn_implementation="eager", # turn off flash attention
         )
 
-        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+
+        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+
+        input_ids = encodings.input_ids[:,:128]
         inputs_embeds = model.model.embed_tokens(input_ids)
         cache_position = torch.arange(0, inputs_embeds.shape[1])
         position_ids = cache_position.unsqueeze(0)
@@ -442,11 +447,14 @@ if __name__ == "__main__":
                 return logits
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
-        convert_pt2e(gm)
+
+        eliminate_dtype_conversion(gm)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
+
+        convert_pt2e(gm)
 
         orig_output, new_output = transform(
             gm,
@@ -507,10 +515,11 @@ if __name__ == "__main__":
             calib_input = (inputs_embeds.clone(), causal_mask, position_embeddings)
             gm(*calib_input)
 
+        eliminate_dtype_conversion(gm)
+
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
-        eliminate_dtype_conversion(gm)
 
         convert_pt2e(gm)
 

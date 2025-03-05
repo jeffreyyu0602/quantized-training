@@ -158,6 +158,8 @@ def convert_arg(value, output_dir=None) -> Argument:
         arg.bool_value = value
     elif isinstance(value, str):
         arg.str_value = value
+    elif isinstance(value, torch.dtype):
+        arg.dtype = str(value).split(".")[1]
     else:
         raise TypeError(f"Unsupported arg type: {type(value)}")
 
