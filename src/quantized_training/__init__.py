@@ -90,11 +90,13 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
     split_multi_head_attention(model)
 
+    # Convert torch.expand in Grouped Query Attention to memory copy
+    convert_expand_to_memory_copy(model)
+
     # Perform transformations to the model
     ShapeProp(model).propagate(*flatten_args)
     convert_cat_and_stack_as_stack_on_dim0(model)
     convert_cat_with_mismatched_shapes_to_stack(model)
-    convert_expand_to_memory_copy(model)
 
     # Move quantize and dequantize ops to the end of last compute op
     ShapeProp(model).propagate(*flatten_args)

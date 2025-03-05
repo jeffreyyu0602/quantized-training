@@ -861,7 +861,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         # memory for all the tensors in the stack operation (read below)
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             if len(node.args) != 1 and node.args[1] != 0:
-                logger.warning("Only support stacking or concatenating on the first dimension")
+                logger.warning(f"Unsupported stack operation: {node}")
             else:
                 node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
                 continue
