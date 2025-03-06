@@ -401,6 +401,8 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
                         nodes_fused[n] = None
                     if [output_node] in fused_nodes_list:
                         fused_nodes_list.remove([output_node])
+                    if [output_node] in fusion_candidates:
+                        fusion_candidates.remove([output_node])
                     break
 
             if matched:

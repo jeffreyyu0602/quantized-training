@@ -37,6 +37,7 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
+    parser.add_argument('--mp', action='store_true', help='Use mixed precision')
     add_qspec_args(parser)
     return parser.parse_args()
 
@@ -63,8 +64,9 @@ def main(args):
         bias=args.bias,
         record_histogram=args.record_histogram,
         force_scale_power_of_two=args.force_scale_power_of_two,
-        outlier_threshold=args.outlier_threshold,
     )
+
+    # TODO: add eager mode quantization in case torch.export fails
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     example_args = (input_ids,)
@@ -77,6 +79,24 @@ def main(args):
     # print_node_scope_tabular(gm)
 
     quantizer.set_module_name_object_type_order("model.rotary_emb", torch.ops.aten.matmul.default, 0, None)
+
+    # Quantize query and attention probs to INT6 with no outlier thresholding
+    if args.activation is not None and args.mp:
+        matmul_qconfig = quantizer.object_type_config[torch.ops.aten.matmul.default]
+        print(matmul_qconfig)
+
+        matmul_qconfig.input_activation.dtype = "int6"
+        matmul_qconfig.input_activation.quant_max = 31
+        matmul_qconfig.input_activation.outlier_threshold = None
+
+        matmul_qconfig.weight.dtype = "int6"
+        matmul_qconfig.weight.quant_max = 31
+        matmul_qconfig.weight.outlier_threshold = None
+
+        print("Updated matmul_qconfig:")
+        print(matmul_qconfig)
+
+        quantizer.set_object_type(torch.ops.aten.matmul.default, matmul_qconfig)
 
     # New LLaMA implementation includes @torch.no_grad() statement, which will turn
     # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().
@@ -153,7 +173,7 @@ def main(args):
     logger.info(f"perplexity: {ppl.item()}")
 
     for name, module in model.named_modules():
-        if hasattr(module, "max_outlier_pct"):
+        if hasattr(module, "max_outlier_pct") and module.max_outlier_pct > 0:
             logger.info(f"{name}: {module.max_outlier_pct:.2%} outliers")
 
     if args.record_histogram and args.output_dir is not None:

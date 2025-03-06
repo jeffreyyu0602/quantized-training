@@ -490,7 +490,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 model, graph, input_node.name + "_scale_", scale)
             quantized_node = create_getattr_from_value(
                 model, graph, input_node.name + "_weight_", weight)
-    elif not fused_quantization:
+    elif activation_post_process.ch_axis == -2:
         with model.graph.inserting_before(node):
             calculate_qparam_op_inputs = [
                 node.args[0],
