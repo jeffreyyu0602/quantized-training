@@ -97,7 +97,7 @@ class QuantizationSpec(QuantizationSpecBase):
             params[key] = PARAMS_TYPE[key](value)
 
         if (qscheme := params.get('qscheme', None)) is not None:
-            params.setdefault('quant_max', get_max_val(params['dtype']))
+            params.setdefault('quant_max', float(get_max_val(params['dtype'])))
             if qscheme != QScheme.MICROSCALING:
                 params.setdefault('amax_history_len', 16)
 
