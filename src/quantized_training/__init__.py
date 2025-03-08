@@ -106,10 +106,9 @@ def transform(
         0: ["gemm"],
         1: ["dequantize"],
         2: ["add", "sub", "mul", "div"],
-        3: ["exp"],
+        3: ["exp", "abs", "relu", "gelu", "silu", "vmap"],
         4: ["add", "mul", "div"],
-        5: ["relu", "gelu", "silu", "vmap"],
-        7: ["quantize"],
+        5: ["div", "quantize"],
     }
 
     # If there is no corresponding mapping, we directly append the op string
