@@ -448,11 +448,11 @@ if __name__ == "__main__":
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
 
-        eliminate_dtype_conversion(gm)
-
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
+
+        eliminate_dtype_conversion(gm)
 
         convert_pt2e(gm)
 
@@ -515,11 +515,11 @@ if __name__ == "__main__":
             calib_input = (inputs_embeds.clone(), causal_mask, position_embeddings)
             gm(*calib_input)
 
-        eliminate_dtype_conversion(gm)
-
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
+
+        eliminate_dtype_conversion(gm)
 
         convert_pt2e(gm)
 
