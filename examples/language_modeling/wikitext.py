@@ -18,6 +18,7 @@ from quantized_training import (
 )
 from quantized_training.pt2e_utils import dispatch_model, get_device_map
 from quantized_training.quantize_pt2e import convert_pt2e
+from quantized_training.modules import pt2e
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,11 @@ def main(args):
         force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
-    # TODO: add eager mode quantization in case torch.export fails
-
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     example_args = (input_ids,)
-    example_kwargs = {"labels": input_ids.clone()}
+    example_kwargs = {"labels": input_ids.clone(), 'use_cache': False}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
-    dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}}
+    dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}, "use_cache": None}
 
     # from quantized_training import print_node_scope_tabular, get_aten_graph_module
     # gm = get_aten_graph_module(model, example_args)
@@ -89,9 +88,9 @@ def main(args):
         matmul_qconfig.input_activation.quant_max = 31
         matmul_qconfig.input_activation.outlier_threshold = None
 
-        matmul_qconfig.weight.dtype = "int6"
-        matmul_qconfig.weight.quant_max = 31
-        matmul_qconfig.weight.outlier_threshold = None
+        # matmul_qconfig.weight.dtype = "int6"
+        # matmul_qconfig.weight.quant_max = 31
+        # matmul_qconfig.weight.outlier_threshold = None
 
         print("Updated matmul_qconfig:")
         print(matmul_qconfig)
@@ -104,12 +103,12 @@ def main(args):
         model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
     if args.gpu is None:
-        # Reserve 12 GB for activations
+        # Reserve 4 GB for activations
+        activation = 4 * 1024 ** 3
         max_memory = {
-            k: max(v - 12 * 1024 ** 3, 0)
-            for k, v in get_max_memory().items() if isinstance(k, int)
+            k: v - activation
+            for k, v in get_max_memory().items() if isinstance(k, int) and v > activation
         }
-        max_memory = dict(sorted(max_memory.items(), key=lambda item: item[1], reverse=True))
         device_map = get_device_map(model, max_memory=max_memory)
         dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
 
@@ -152,7 +151,7 @@ def main(args):
         target_ids[:, :-trg_len] = -100
 
         with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
+            outputs = model(input_ids, labels=target_ids, use_cache=False)
 
             # loss is calculated using CrossEntropyLoss which averages over valid labels
             # N.B. the model only calculates loss over trg_len - 1 labels, because it internally shifts the labels

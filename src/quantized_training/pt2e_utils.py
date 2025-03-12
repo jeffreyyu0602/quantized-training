@@ -1,10 +1,11 @@
 import re
 from collections import defaultdict
-from typing import Dict, Tuple, Callable, Any, Union
+from typing import Dict, Tuple, Callable, Any, Union, List
 
 import torch
 from torch._export import capture_pre_autograd_graph
 from torch.fx import GraphModule, Node
+from torch.fx.graph import map_arg
 from accelerate.big_modeling import infer_auto_device_map
 from accelerate.utils import get_max_memory
 
@@ -60,6 +61,8 @@ def get_device_map(model: GraphModule, max_memory=None, verbose=False):
             print(f"\nTreating node {node}.")
         # Assess size needed
         tensor = node.meta.get('val')
+        if tensor is None:
+            continue
         module_size = tensor.numel() * dtype_byte_size(tensor.dtype)
 
         device = devices[current_device]
@@ -99,38 +102,50 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
     env : Dict[str, Node] = {}
     modules = dict(model.named_modules())
 
+    node_to_last_use : Dict[Node, Node] = {}
+    user_to_last_uses : Dict[Node, List[Node]] = {}
+
+    def register_last_uses(n: Node, user: Node):
+        if n.op != 'get_attr' and n not in node_to_last_use:
+            node_to_last_use[n] = user
+            user_to_last_uses.setdefault(user, []).append(n)
+
+    for node in reversed(model.graph.nodes):
+        map_arg(node.args, lambda n: register_last_uses(n, node))
+        map_arg(node.kwargs, lambda n: register_last_uses(n, node))
+
+    def delete_unused_values(user : Node):
+        """
+        Delete values after their last use. This ensures that values that are
+        not used in the remainder of the code are freed and the memory usage
+        of the code is optimal.
+        """
+        nodes_to_delete = user_to_last_uses.get(user, [])
+        for n in nodes_to_delete:
+            env.pop(n.name, None)
+
     def load_arg(a):
-        return torch.fx.graph.map_arg(a, lambda n: env[n])
+        return torch.fx.graph.map_arg(a, lambda n: env[n.name])
 
-    def fetch_attr(node):
-        if 'param_constant' in node.name:
-            return model.get_parameter(node.target)
-        return model.get_buffer(node.target)
+    def fetch_attr(target):
+        return getattr(model, target, None)
 
-    def is_node_visited(node):
-        if isinstance(node, (list, tuple)):
-            return all(is_node_visited(n) for n in node)
-        return node in env
+    def get_unique_device(nodes):
+        get_attr_nodes = [n for n in nodes if n.op == 'get_attr']
+        args = load_arg(get_attr_nodes if get_attr_nodes else nodes)
+        devices = {t.device for t in args if isinstance(t, torch.Tensor)}
+        return devices.pop() if devices else None
 
-    def get_devices(tensor):
-        devices = []
-        if isinstance(tensor, torch.Tensor):
-            devices.append(tensor.device)
-        elif isinstance(tensor, (list, tuple)):
-            for t in tensor:
-                devices.extend(get_devices(t))
-        return devices
-
-    def insert_adaptor(node, user, env, device):
+    def insert_adaptor(node, user, device):
         if isinstance(node, (list, tuple)):
             for n in node:
-                insert_adaptor(n, user, env, device)
+                insert_adaptor(n, user, device)
             return
 
         if not isinstance(node, Node):
             return
 
-        value = env[node]
+        value = env[node.name]
         if not isinstance(value, torch.Tensor) or value.device == device:
             return
 
@@ -142,37 +157,28 @@ def dispatch_model(model, args, device_map=None, max_memory=None):
         if to_node is None:
             with model.graph.inserting_after(node):
                 to_node = model.graph.call_function(torch.Tensor.to, (node, device))
-            env[to_node] = value.to(device)
+            env[to_node.name] = value.to(device)
 
         user.replace_input_with(node, to_node)
 
     for node in model.graph.nodes:
         if node.op == 'placeholder':
-            result = next(args_iter)
+            result = next(args_iter, None)
         elif node.op == 'get_attr':
-            result = fetch_attr(node)
-            device = device_map[node.target]
-            if device != result.device:
-                result.data = result.data.to(device)
+            result = fetch_attr(node.target)
+            if isinstance(result, torch.Tensor):
+                result.data = result.data.to(device_map[node.target])
         elif node.op == 'call_function':
-            args = load_arg(node.args)
-            devices = set(get_devices(args))
-            if len(devices) > 1:
-                # Sort the devices and use the last one
-                devices = sorted(str(d) for d in devices)
-                device = torch.device(devices[-1])
+            device = get_unique_device(node.all_input_nodes)
+            if device is not None:
                 for arg in node.args:
-                    insert_adaptor(arg, node, env, device)
+                    insert_adaptor(arg, node, device)
             result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
         elif node.op == 'call_module':
             result = modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
 
-        env[node] = result
-
-        # Free up memory
-        for n in list(env.keys()):
-            if n.target != torch.Tensor.to and is_node_visited(list(n.users.keys())):
-                env[n] = None
+        env[node.name] = result
+        delete_unused_values(node)
 
     model.graph.lint()
     model.recompile()
