@@ -727,20 +727,19 @@ def fuse_operator(model: GraphModule, mapping=None):
 
     nodes_map = {v.name: k.name for k, v in nodes_map.items()}
 
+    buffers = dict(model.named_buffers())
+
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
-        named_modules = dict(model.named_modules(remove_duplicate=False))
+
         gm = named_modules[node.target]
-
-        buffers = dict(model.named_buffers())
-
         nodes = list(gm.graph.nodes)
+
         for n in nodes:
             if (name := nodes_map.get(n.name, None)) is None:
                 continue
-            source_node = next(iter(n for n in nodes if n.name == name))
 
-            # A small trick to skip generating the param for this node
+            source_node = next(iter(n for n in nodes if n.name == name))
             source_node.meta['fused'] = True
 
             if _is_reshape_op(source_node):
@@ -759,9 +758,14 @@ def fuse_operator(model: GraphModule, mapping=None):
         for user in list(node.users):
             if user.op != "call_module":
                 continue
+
             index = user.args.index(node)
             submodule = named_modules[user.target]
-            submodule_nodes = list(n for n in submodule.graph.nodes if n.op == 'placeholder')
+
+            submodule_nodes = [
+                n for n in submodule.graph.nodes if n.op == 'placeholder'
+            ]
+
             submodule_nodes[index].meta['source_node'] = node
 
     graph.lint()
