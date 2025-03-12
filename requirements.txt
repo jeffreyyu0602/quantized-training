@@ -1,12 +1,12 @@
 matplotlib
 scipy
-transformers==4.45.2
+transformers==4.49.0
 datasets==2.15.0
 accelerate==0.22.0
 evaluate
 scikit-learn
 peft==0.6.2
-softposit
+sentencepiece
 wandb
 librosa
 soundfile
