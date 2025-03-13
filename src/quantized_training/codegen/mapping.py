@@ -727,7 +727,7 @@ def fuse_operator(model: GraphModule, mapping=None):
 
     nodes_map = {v.name: k.name for k, v in nodes_map.items()}
 
-    buffers = dict(model.named_buffers())
+    named_buffers = dict(model.named_buffers())
 
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
@@ -752,7 +752,7 @@ def fuse_operator(model: GraphModule, mapping=None):
                 n.meta['slicing'] = source_node
 
             if source_node.target == torch.ops.quantized_ops.dequantize.default:
-                n.meta['dq_scale'] = buffers[source_node.args[1].target]
+                n.meta['dq_scale'] = named_buffers[source_node.args[1].target]
 
         # Update the metadata of all the user nodes that consumes the new node
         for user in list(node.users):

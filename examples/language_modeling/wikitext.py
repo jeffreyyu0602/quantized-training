@@ -106,6 +106,12 @@ def main(args):
     with torch.no_grad():
         model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
+    # torch.export does not capture the correct device for inputs, so we need to manually
+    # set the device for operations like torch.full
+    for node in list(model.graph.nodes):
+        if 'device' in node.kwargs:
+            node.kwargs = dict(node.kwargs, device=device)
+
     if args.gpu is None:
         activation = 8 * 1024 ** 3
         max_memory = {
@@ -114,8 +120,6 @@ def main(args):
         }
 
         device_map = get_device_map(model, max_memory)
-        print('\n'.join(f"{k}: {v}" for k, v in device_map.items()))
-
         dispatch_model(model, device_map)
         insert_align_device_nodes(model, (input_ids, example_kwargs["labels"]))
 
