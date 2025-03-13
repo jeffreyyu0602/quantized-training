@@ -43,6 +43,7 @@ def parse_args():
         )
     )
     parser.add_argument('--mp', action='store_true', help='Use mixed precision')
+    parser.add_argument('--reserved_memory', type=int, default=8, help='GPU memory reserved for storing activations')
     add_qspec_args(parser)
     return parser.parse_args()
 
@@ -113,10 +114,10 @@ def main(args):
             node.kwargs = dict(node.kwargs, device=device)
 
     if args.gpu is None:
-        activation = 8 * 1024 ** 3
+        reserved_memory = args.reserved_memory * 1024 ** 3
         max_memory = {
-            k: v - activation
-            for k, v in get_max_memory().items() if isinstance(k, int) and v > activation
+            k: v - reserved_memory
+            for k, v in get_max_memory().items() if isinstance(k, int) and v > reserved_memory
         }
 
         device_map = get_device_map(model, max_memory)

@@ -39,12 +39,12 @@ class MemoryManager:
     """
     total_partitions = 0
 
-    def __init__(self, total_memory, bank_width=32):
-        self.total_memory = total_memory
+    def __init__(self, total_memory=None, bank_width=None):
+        self.total_memory = total_memory or (1 << 63) - 1
         self.bank_width = bank_width
         self.partition_id = MemoryManager.total_partitions
         MemoryManager.total_partitions += 1
-        self.memory_partitions = [Partition(start=0, end=total_memory, partition_id=self.partition_id)]
+        self.memory_partitions = [Partition(start=0, end=self.total_memory, partition_id=self.partition_id)]
         self.tensor_memory_map = {}
         self.snapshots = []  # Stores the snapshots of partitions over time
 

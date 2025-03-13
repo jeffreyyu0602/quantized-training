@@ -69,14 +69,12 @@ OPERATOR_MAPPINGS = {
     "dequantize": [torch.ops.quantized_ops.dequantize.default],
 }
 
+
 def transform(
     model: torch.fx.GraphModule,
     example_args,
     example_kwargs=None,
-    *,
-    bank_width=None,
-    output_file="compute_graph",
-    output_dir=None
+    patterns=None,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -103,51 +101,39 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
     fuse_quantize_dequantize_with_previous_op(model)
 
-    vector_stages = {
-        0: ["gemm"],
-        1: ["dequantize"],
-        2: ["add", "sub", "mul", "div"],
-        3: ["exp", "abs", "relu", "gelu", "silu", "vmap"],
-        4: ["add", "mul", "div"],
-        5: ["div", "quantize"],
-    }
+    for pattern in patterns:
+        # If there is no corresponding mapping, we directly append the op itself
+        vector_stages = [
+            [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
+            for ops in pattern
+        ]
 
-    # If there is no corresponding mapping, we directly append the op string
-    vector_stages = {
-        stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
-        for stage, ops in vector_stages.items()
-    }
-
-    ShapeProp(model).propagate(*flatten_args)
-    fuse_operator(model, vector_stages)
-
-    complex_ops = {
-        0: ["layer_norm", torch.nn.Softmax, F.softmax],
-        7: ["quantize"],
-    }
-
-    # If there is no corresponding mapping, we directly append the op string
-    complex_ops = {
-        stage: [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
-        for stage, ops in complex_ops.items()
-    }
-
-    ShapeProp(model).propagate(*flatten_args)
-    fuse_operator(model, complex_ops)
+        ShapeProp(model).propagate(*flatten_args)
+        fuse_operator(model, vector_stages)
 
     model.graph.print_tabular()
 
+    new_out = model(*example_args, *list(example_kwargs.values()))
+    return orig_out, new_out
+
+
+def compile(
+    model: torch.fx.GraphModule,
+    example_args,
+    example_kwargs=None,
+    total_memory=None,
+    bank_width=None,
+    output_dir=None,
+    output_file="compute_graph",
+):
+    from torch.utils._pytree import tree_flatten
+    flatten_args, spec = tree_flatten((example_args, example_kwargs))
+
     ShapeProp(model).propagate(*flatten_args)
 
-    try:
-        manager = MemoryManager(1024 ** 4, bank_width=bank_width)
-        allocate_weights(model, manager)
-        allocate_activations(model, manager)
-    except RuntimeError:
-        manager.print_partitions()
-        filename = os.path.join(output_dir, "memory_layout.png")
-        visualize_memory_layout(manager.snapshots, filename)
-        logger.error(f"Memory allocation failed. Memory layout saved to {filename}")
+    manager = MemoryManager(total_memory, bank_width=bank_width)
+    allocate_weights(model, manager)
+    allocate_activations(model, manager)
 
     model_params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
 
@@ -156,13 +142,9 @@ def transform(
 
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         for op in model_params.ops:
-            if op.WhichOneof('op_type') == 'op':
-                if op.op.op != 'nop':
-                    f.write(op.op.name + '\n')
-            else:
+            if op.WhichOneof('op_type') == 'fused_op':
                 f.write(op.fused_op.name + '\n')
+            elif op.op.op != 'nop':
+                f.write(op.op.name + '\n')
 
     gen_compute_graph(model, os.path.join(output_dir, output_file))
-
-    new_out = model(*example_args, *list(example_kwargs.values()))
-    return orig_out, new_out

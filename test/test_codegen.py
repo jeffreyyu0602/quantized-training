@@ -26,6 +26,7 @@ from quantized_training import (
     get_default_quantizer,
     prepare_pt2e,
     transform,
+    compile,
 )
 from quantized_training.codegen.utils import (
     eliminate_dtype_conversion,
@@ -56,6 +57,22 @@ TORCHVISION_MODELS = {
     "resnet50": models.resnet50,
     "mobilenet": models.mobilenet_v2,
 }
+
+
+vector_stages = [
+    [
+        ["gemm"],
+        ["dequantize"],
+        ["add", "sub", "mul", "div"],
+        ["exp", "abs", "relu", "gelu", "silu", "vmap"],
+        ["add", "mul", "div"],
+        ["div", "quantize"],
+    ],
+    [
+        ["layer_norm", torch.nn.Softmax, torch.nn.functional.softmax],
+        ["quantize"],
+    ]
+]
 
 
 if __name__ == "__main__":
@@ -116,6 +133,12 @@ if __name__ == "__main__":
 
     torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
+    compile_args = {
+        "bank_width": args.bank_width,
+        "output_dir": args.output_dir,
+        "output_file": args.model,
+    }
+
     if args.model in TORCHVISION_MODELS:
         model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
 
@@ -153,12 +176,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file=args.model,
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     elif args.model == "segformer":
         replace_interpolate()
 
@@ -196,12 +215,9 @@ if __name__ == "__main__":
         convert_pt2e(gm)
 
         # TODO why the output is different after replacing gelu with vmap
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file="segformer",
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
+
         orig_output = orig_output.logits
         new_output = new_output.logits
     elif args.model == "mobilebert":
@@ -292,12 +308,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file="mobilebert",
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     elif args.model == "mobilebert_encoder":
         if args.model_name_or_path is None:
             args.model_name_or_path = "google/mobilebert-uncased"
@@ -331,12 +343,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file="mobilebert",
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
 
         orig_output = orig_output[0]
         new_output = new_output[0]
@@ -393,12 +401,8 @@ if __name__ == "__main__":
         gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
         convert_pt2e(gm)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file="bert",
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     elif args.model == "llama":
         from transformers import AutoModelForCausalLM
 
@@ -456,11 +460,8 @@ if __name__ == "__main__":
 
         convert_pt2e(gm)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     elif args.model == "llama_decoder":
         from transformers import AutoModelForCausalLM
 
@@ -529,11 +530,8 @@ if __name__ == "__main__":
             position_embeddings = tuple(t.float() for t in position_embeddings)
             example_args = (inputs_embeds.float(), causal_mask.float(), position_embeddings)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     elif args.model == "llama_decode":
         import transformers
 
@@ -576,12 +574,8 @@ if __name__ == "__main__":
 
         pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
 
-        orig_output, new_output = transform(
-            gm,
-            example_args,
-            output_file=args.model,
-            output_dir=args.output_dir,
-        )
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
 
         orig_output = orig_output.logits
         new_output = new_output.logits

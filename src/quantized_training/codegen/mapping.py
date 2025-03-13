@@ -626,7 +626,7 @@ def fuse_op_with_input(
         )
 
 
-def fuse_operator(model: GraphModule, mapping=None):
+def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
 
@@ -638,15 +638,12 @@ def fuse_operator(model: GraphModule, mapping=None):
     encounter a node with multiple users, we duplicate all the elements on the path
     and perform fusion on each branch.
     """
-    if mapping is None:
-        mapping = {}
-
     nodes_map = {}
 
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
-    fused_nodes_list = find_sequential_nodes(model, mapping.values())
+    fused_nodes_list = find_sequential_nodes(model, operations) if operations else []
 
     partitions = get_source_partitions(graph, ['permute', 'transpose'])
     partitions = list(itertools.chain.from_iterable(partitions.values()))

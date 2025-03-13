@@ -219,7 +219,7 @@ def insert_align_device_nodes(model, example_args):
 def get_aten_graph_module(
     pattern: Callable,
     example_inputs: Tuple[Any, ...],
-    example_kwargs: Dict[str, Any],
+    example_kwargs: Dict[str, Any] = None,
     dynamic_shapes: Union[Dict[str, Any], Tuple[Any], None] = None,
     is_cuda: bool = False,
 ) -> GraphModule:
