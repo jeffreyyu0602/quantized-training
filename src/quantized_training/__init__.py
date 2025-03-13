@@ -31,6 +31,7 @@ __all__ = [
     "get_qconfig",
     "get_quantized_model",
     "get_default_quantizer",
+    "insert_align_device_nodes",
     "plot_histogram",
     "plot_layer_range",
     "prepare",

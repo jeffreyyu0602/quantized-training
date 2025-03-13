@@ -48,7 +48,7 @@ class ShapeProp:
         user_to_last_uses : Dict[Node, List[Node]] = {}
 
         def register_last_uses(n: Node, user: Node):
-            if n.op != 'get_attr' and n not in node_to_last_use:
+            if n not in node_to_last_use:
                 node_to_last_use[n] = user
                 user_to_last_uses.setdefault(user, []).append(n)
 

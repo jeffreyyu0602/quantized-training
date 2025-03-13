@@ -12,12 +12,16 @@ from quantized_training import (
     add_qspec_args,
     get_default_quantizer,
     prepare_pt2e,
+    convert_pt2e,
     plot_histogram,
     plot_layer_range,
     setup_logging,
+    print_node_scope_tabular,
+    get_aten_graph_module,
+    get_device_map,
+    dispatch_model,
+    insert_align_device_nodes,
 )
-from quantized_training.pt2e_utils import dispatch_model, get_device_map
-from quantized_training.quantize_pt2e import convert_pt2e
 from quantized_training.modules import pt2e
 
 logger = logging.getLogger(__name__)
@@ -67,14 +71,8 @@ def main(args):
         force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
-    input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
-    example_args = (input_ids,)
-    example_kwargs = {"labels": input_ids.clone(), 'use_cache': False}
-    seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
-    dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}, "use_cache": None}
-
-    # from quantized_training import print_node_scope_tabular, get_aten_graph_module
-    # gm = get_aten_graph_module(model, example_args)
+    # gm = get_aten_graph_module(model, example_args, example_kwargs, dynamic_shapes)
+    # gm.graph.print_tabular()
     # print_node_scope_tabular(gm)
 
     quantizer.set_module_name_object_type_order("model.rotary_emb", torch.ops.aten.matmul.default, 0, None)
@@ -97,20 +95,29 @@ def main(args):
 
         quantizer.set_object_type(torch.ops.aten.matmul.default, matmul_qconfig)
 
+    input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
+    example_args = (input_ids,)
+    example_kwargs = {"labels": input_ids.clone(), 'use_cache': False}
+    seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
+    dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}, "use_cache": None}
+
     # New LLaMA implementation includes @torch.no_grad() statement, which will turn
     # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().
     with torch.no_grad():
         model = prepare_pt2e(model, quantizer, example_args, example_kwargs, dynamic_shapes)
 
     if args.gpu is None:
-        # Reserve 4 GB for activations
-        activation = 4 * 1024 ** 3
+        activation = 8 * 1024 ** 3
         max_memory = {
             k: v - activation
             for k, v in get_max_memory().items() if isinstance(k, int) and v > activation
         }
-        device_map = get_device_map(model, max_memory=max_memory)
-        dispatch_model(model, (input_ids, example_kwargs["labels"]), device_map=device_map)
+
+        device_map = get_device_map(model, max_memory)
+        print('\n'.join(f"{k}: {v}" for k, v in device_map.items()))
+
+        dispatch_model(model, device_map)
+        insert_align_device_nodes(model, (input_ids, example_kwargs["labels"]))
 
     def calibrate(model):
         validation = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
