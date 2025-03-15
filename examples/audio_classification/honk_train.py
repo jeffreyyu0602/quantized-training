@@ -295,7 +295,7 @@ def main(args):
         checkpoint = torch.load(args.model_id, map_location=device)
         model.load_state_dict(checkpoint)
 
-    if not args.eager:
+    if args.pt2e:
         print("PyTorch 2 Export quantization")
         modules_to_fuse = [[f'conv{i}', f'bn{i}'] for i in range(1, 7)]
         model = torch.ao.quantization.fuse_modules(model.eval(), modules_to_fuse)

@@ -135,9 +135,9 @@ def add_qspec_args(parser=None):
     # Quantization arguments
     #----------------------------------------------------
     parser.add_argument(
-        "--eager",
+        "--pt2e",
         action="store_true",
-        help="Whether to use eager mode quantizaion.",
+        help="Whether to use PyTorch 2 torch.export post-training static quantizaion.",
     )
     parser.add_argument(
         "--activation",
