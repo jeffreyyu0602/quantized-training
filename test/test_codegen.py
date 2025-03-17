@@ -174,7 +174,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 gm(inputs.pixel_values.to(torch_dtype))
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
@@ -212,7 +212,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 gm(inputs.unsqueeze(0).to(torch_dtype))
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         # TODO why the output is different after replacing gelu with vmap
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
@@ -306,7 +306,7 @@ if __name__ == "__main__":
             if step == 9:
                 break
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
@@ -399,7 +399,7 @@ if __name__ == "__main__":
         quantizer.set_module_name("classifier", None)
 
         gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
@@ -458,7 +458,7 @@ if __name__ == "__main__":
 
         eliminate_dtype_conversion(gm)
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
@@ -522,7 +522,7 @@ if __name__ == "__main__":
 
         eliminate_dtype_conversion(gm)
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         # Generate float32 model
         if not args.bf16:
@@ -570,7 +570,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 gm(inputs.pixel_values.to(torch_dtype))
 
-        convert_pt2e(gm)
+        convert_pt2e(gm, args.bias)
 
         pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
 
