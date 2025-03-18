@@ -30,14 +30,23 @@ quantized_decomposed_lib.define("vmap(Tensor self, Tensor other) -> Tensor")
 
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
-def vmap(input: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
+def vmap(input: torch.Tensor, code: torch.Tensor, chunk_size=65536) -> torch.Tensor:
     if input.dtype == torch.bfloat16:
         indices = input.view(torch.int16).to(torch.int32) & 0xffff
     else:
         raw_bits = input.to(torch.float32).view(torch.int32)
         indices = (raw_bits >> 16) & 0xffff
         indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
-    return code[indices].to(input.dtype)
+
+    output = torch.empty_like(input, memory_format=torch.contiguous_format)
+    indices_flat = indices.reshape(-1)
+    output_flat = output.view(-1)
+
+    for start in range(0, indices_flat.numel(), chunk_size):
+        end = min(start + chunk_size, indices_flat.numel())
+        output_flat[start:end] = code[indices_flat[start:end]]
+
+    return output
 
 
 quantized_decomposed_lib.define(
