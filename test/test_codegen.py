@@ -1,12 +1,10 @@
 import argparse
 import logging
-from typing import List
 
 import torch
 from datasets import load_dataset
-from torch._export import capture_pre_autograd_graph
 from torch.utils.data import DataLoader
-from torchvision import models
+from torchvision import models, transforms
 from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForSemanticSegmentation,
@@ -579,6 +577,67 @@ if __name__ == "__main__":
 
         orig_output = orig_output.logits
         new_output = new_output.logits
+    elif args.model == "yolo5":
+        import sys
+        sys.path.append("libraries/yolov5-face")
+
+        from models.experimental import attempt_load
+
+        model = attempt_load(args.model_name_or_path, map_location="cpu").eval()
+
+        example_args = (torch.randn(1, 3, 640, 640, dtype=torch_dtype),)
+        output = model(*example_args)
+
+        gm = prepare_pt2e(model, quantizer, example_args)
+
+        from quantized_training.codegen.mapping import eliminate_dead_code
+        eliminate_dead_code(gm.graph)
+
+        dataset = load_dataset("CUHK-CSE/wider_face")
+
+        pipeline = transforms.Compose([
+            transforms.Resize((640, 640)),  # Resize to 416x416
+            transforms.ToTensor()           # Convert to tensor and normalize to [0, 1]
+        ])
+
+        for i in tqdm(range(10)):
+            inputs = pipeline(dataset['train'][i]["image"])
+            with torch.no_grad():
+                gm(inputs.unsqueeze(0).to(torch_dtype))
+
+        convert_pt2e(gm, args.bias)
+
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
+
+        orig_output = orig_output[0]
+        new_output = new_output[0]
+    elif args.model == "mobilevit":
+        try:
+            import timm
+            from timm.layers import set_fused_attn
+        except ImportError as e:
+            raise ImportError("The 'timm' library is not installed. Please install it using 'pip install timm'.") from e
+
+        set_fused_attn(False)
+        model = timm.create_model("hf-hub:timm/mobilevit_xxs.cvnets_in1k", pretrained=True).eval()
+
+        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
+        gm = prepare_pt2e(model, quantizer, example_args)
+
+        dataset = load_dataset("zh-plus/tiny-imagenet")
+
+        image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
+
+        for i in tqdm(range(10)):
+            inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
+            with torch.no_grad():
+                gm(inputs.pixel_values.to(torch_dtype))
+
+        convert_pt2e(gm, args.bias)
+
+        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        compile(gm, example_args, **compile_args)
     else:
         raise ValueError(f"Model {args.model} not supported")
 

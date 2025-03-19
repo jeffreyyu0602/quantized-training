@@ -8,7 +8,7 @@ from torch.fx import GraphModule
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from .mapping import graph_copy
+from .mapping import replace_node_with_graph_module
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -42,6 +42,47 @@ def get_conv_bn_layers(model):
                 if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
                     layers.append([module_names[k-1], name])
     return layers
+
+
+def fuse(model: torch.fx.GraphModule) -> torch.nn.Module:
+    """
+    Fuses convolution/BN and linear/BN layers for inference purposes.
+    """
+    from torch.nn.utils import fuse_conv_bn_weights
+
+    for node in list(model.graph.nodes):
+        if (
+            node.target == torch.ops.aten._native_batch_norm_legit.default and
+            node.args[0].target == torch.ops.aten.conv2d.default and
+            len(node.args[0].users) == 1 and
+            node.args[5] == False  # inference mode
+        ):
+            conv_node = node.args[0]
+
+            conv_w = model.get_parameter(conv_node.args[1])
+            conv_b = model.get_parameter(conv_node.args[2])
+
+            bn_w = model.get_parameter(node.args[1])
+            bn_b = model.get_parameter(node.args[2])
+            bn_rm = model.get_buffer(node.args[3])
+            bn_rv = model.get_buffer(node.args[4])
+            bn_eps = node.args[7]
+
+            fused_conv_w, fused_conv_b = fuse_conv_bn_weights(
+                conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b
+            )
+
+            model.register_parameter(conv_node.args[1].target, fused_conv_w)
+            model.register_parameter(conv_node.args[2].target, fused_conv_b)
+
+            node.replace_all_uses_with(conv_node)
+            model.graph.erase_node(node)
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
+    model.recompile()
+
+    return model
 
 
 def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
@@ -173,7 +214,7 @@ def convert_cat_with_mismatched_shapes_to_stack(model: GraphModule):
                 return output.reshape(*shape, *output.shape[1:])
 
         gm = capture_pre_autograd_graph(Concat(), (*args[0],))
-        graph_copy(model, gm, node)
+        replace_node_with_graph_module(model, gm, node)
 
     model.graph.lint()
 
@@ -235,7 +276,7 @@ def convert_expand_to_memory_copy(model: torch.fx.GraphModule):
             Expand(), (input_node.meta["val"],)
         )
 
-        graph_copy(model, gm, node)
+        replace_node_with_graph_module(model, gm, node)
         model.graph.erase_node(node)
 
     model.graph.lint()
@@ -423,7 +464,7 @@ def replace_quantize_mx_with_reduce(model: torch.fx.GraphModule):
                 return scale, quantized
 
         gm = capture_pre_autograd_graph(QuantizeMXDecomposed(), (node.args[0].meta["val"],))
-        graph_copy(model, gm, node)
+        replace_node_with_graph_module(model, gm, node)
 
     graph.lint()
     graph.eliminate_dead_code()

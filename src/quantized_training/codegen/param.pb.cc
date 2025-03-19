@@ -22,6 +22,25 @@ namespace _pbi = ::google::protobuf::internal;
 namespace _fl = ::google::protobuf::internal::field_layout;
 namespace codegen {
 
+inline constexpr ScalarList::Impl_::Impl_(
+    ::_pbi::ConstantInitialized) noexcept
+      : values_{},
+        _cached_size_{0} {}
+
+template <typename>
+PROTOBUF_CONSTEXPR ScalarList::ScalarList(::_pbi::ConstantInitialized)
+    : _impl_(::_pbi::ConstantInitialized()) {}
+struct ScalarListDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR ScalarListDefaultTypeInternal() : _instance(::_pbi::ConstantInitialized{}) {}
+  ~ScalarListDefaultTypeInternal() {}
+  union {
+    ScalarList _instance;
+  };
+};
+
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
+    PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ScalarListDefaultTypeInternal _ScalarList_default_instance_;
+
 inline constexpr Memory::Impl_::Impl_(
     ::_pbi::ConstantInitialized) noexcept
       : address_{::uint64_t{0u}},
@@ -61,6 +80,25 @@ struct IntListDefaultTypeInternal {
 
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
     PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 IntListDefaultTypeInternal _IntList_default_instance_;
+
+inline constexpr BoolList::Impl_::Impl_(
+    ::_pbi::ConstantInitialized) noexcept
+      : values_{},
+        _cached_size_{0} {}
+
+template <typename>
+PROTOBUF_CONSTEXPR BoolList::BoolList(::_pbi::ConstantInitialized)
+    : _impl_(::_pbi::ConstantInitialized()) {}
+struct BoolListDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR BoolListDefaultTypeInternal() : _instance(::_pbi::ConstantInitialized{}) {}
+  ~BoolListDefaultTypeInternal() {}
+  union {
+    BoolList _instance;
+  };
+};
+
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
+    PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 BoolListDefaultTypeInternal _BoolList_default_instance_;
 
 inline constexpr Argument::Impl_::Impl_(
     ::_pbi::ConstantInitialized) noexcept
@@ -136,7 +174,8 @@ inline constexpr Tensor::Impl_::Impl_(
             ::_pbi::ConstantInitialized()),
         memory_{nullptr},
         reshape_{nullptr},
-        scale_{0} {}
+        scale_{0},
+        is_none_{false} {}
 
 template <typename>
 PROTOBUF_CONSTEXPR Tensor::Tensor(::_pbi::ConstantInitialized)
@@ -235,7 +274,7 @@ struct ModelDefaultTypeInternal {
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
     PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ModelDefaultTypeInternal _Model_default_instance_;
 }  // namespace codegen
-static ::_pb::Metadata file_level_metadata_param_2eproto[10];
+static ::_pb::Metadata file_level_metadata_param_2eproto[12];
 static constexpr const ::_pb::EnumDescriptor**
     file_level_enum_descriptors_param_2eproto = nullptr;
 static constexpr const ::_pb::ServiceDescriptor**
@@ -266,12 +305,14 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.memory_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.scale_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.reshape_),
+    PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.is_none_),
     ~0u,
     ~0u,
     ~0u,
     0,
     2,
     1,
+    ~0u,
     ~0u,  // no _has_bits_
     PROTOBUF_FIELD_OFFSET(::codegen::TensorList, _internal_metadata_),
     ~0u,  // no _extensions_
@@ -291,6 +332,24 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     ~0u,  // no sizeof(Split)
     PROTOBUF_FIELD_OFFSET(::codegen::IntList, _impl_.values_),
     ~0u,  // no _has_bits_
+    PROTOBUF_FIELD_OFFSET(::codegen::BoolList, _internal_metadata_),
+    ~0u,  // no _extensions_
+    ~0u,  // no _oneof_case_
+    ~0u,  // no _weak_field_map_
+    ~0u,  // no _inlined_string_donated_
+    ~0u,  // no _split_
+    ~0u,  // no sizeof(Split)
+    PROTOBUF_FIELD_OFFSET(::codegen::BoolList, _impl_.values_),
+    ~0u,  // no _has_bits_
+    PROTOBUF_FIELD_OFFSET(::codegen::ScalarList, _internal_metadata_),
+    ~0u,  // no _extensions_
+    ~0u,  // no _oneof_case_
+    ~0u,  // no _weak_field_map_
+    ~0u,  // no _inlined_string_donated_
+    ~0u,  // no _split_
+    ~0u,  // no sizeof(Split)
+    PROTOBUF_FIELD_OFFSET(::codegen::ScalarList, _impl_.values_),
+    ~0u,  // no _has_bits_
     PROTOBUF_FIELD_OFFSET(::codegen::Argument, _internal_metadata_),
     ~0u,  // no _extensions_
     PROTOBUF_FIELD_OFFSET(::codegen::Argument, _impl_._oneof_case_[0]),
@@ -298,6 +357,8 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     ~0u,  // no _inlined_string_donated_
     ~0u,  // no _split_
     ~0u,  // no sizeof(Split)
+    ::_pbi::kInvalidFieldOffsetTag,
+    ::_pbi::kInvalidFieldOffsetTag,
     ::_pbi::kInvalidFieldOffsetTag,
     ::_pbi::kInvalidFieldOffsetTag,
     ::_pbi::kInvalidFieldOffsetTag,
@@ -371,15 +432,17 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
 static const ::_pbi::MigrationSchema
     schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
         {0, -1, -1, sizeof(::codegen::Memory)},
-        {10, 24, -1, sizeof(::codegen::Tensor)},
-        {30, -1, -1, sizeof(::codegen::TensorList)},
-        {39, -1, -1, sizeof(::codegen::IntList)},
-        {48, -1, -1, sizeof(::codegen::Argument)},
-        {64, 74, -1, sizeof(::codegen::OpOverload_KwargsEntry_DoNotUse)},
-        {76, -1, -1, sizeof(::codegen::OpOverload)},
-        {89, -1, -1, sizeof(::codegen::OpOverloadList)},
-        {99, -1, -1, sizeof(::codegen::Operation)},
-        {113, -1, -1, sizeof(::codegen::Model)},
+        {10, 25, -1, sizeof(::codegen::Tensor)},
+        {32, -1, -1, sizeof(::codegen::TensorList)},
+        {41, -1, -1, sizeof(::codegen::IntList)},
+        {50, -1, -1, sizeof(::codegen::BoolList)},
+        {59, -1, -1, sizeof(::codegen::ScalarList)},
+        {68, -1, -1, sizeof(::codegen::Argument)},
+        {86, 96, -1, sizeof(::codegen::OpOverload_KwargsEntry_DoNotUse)},
+        {98, -1, -1, sizeof(::codegen::OpOverload)},
+        {111, -1, -1, sizeof(::codegen::OpOverloadList)},
+        {121, -1, -1, sizeof(::codegen::Operation)},
+        {135, -1, -1, sizeof(::codegen::Model)},
 };
 
 static const ::_pb::Message* const file_default_instances[] = {
@@ -387,6 +450,8 @@ static const ::_pb::Message* const file_default_instances[] = {
     &::codegen::_Tensor_default_instance_._instance,
     &::codegen::_TensorList_default_instance_._instance,
     &::codegen::_IntList_default_instance_._instance,
+    &::codegen::_BoolList_default_instance_._instance,
+    &::codegen::_ScalarList_default_instance_._instance,
     &::codegen::_Argument_default_instance_._instance,
     &::codegen::_OpOverload_KwargsEntry_DoNotUse_default_instance_._instance,
     &::codegen::_OpOverload_default_instance_._instance,
@@ -396,46 +461,50 @@ static const ::_pb::Message* const file_default_instances[] = {
 };
 const char descriptor_table_protodef_param_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
     "\n\013param.proto\022\007codegen\",\n\006Memory\022\021\n\tpart"
-    "ition\030\001 \001(\005\022\017\n\007address\030\002 \001(\004\"\272\001\n\006Tensor\022"
+    "ition\030\001 \001(\005\022\017\n\007address\030\002 \001(\004\"\313\001\n\006Tensor\022"
     "\014\n\004node\030\001 \001(\t\022\r\n\005shape\030\002 \003(\005\022\r\n\005dtype\030\003 "
     "\001(\t\022$\n\006memory\030\004 \001(\0132\017.codegen.MemoryH\000\210\001"
-    "\001\022\022\n\005scale\030\005 \001(\002H\001\210\001\001\022)\n\007reshape\030\006 \001(\0132\023"
-    ".codegen.OpOverloadH\002\210\001\001B\t\n\007_memoryB\010\n\006_"
-    "scaleB\n\n\010_reshape\".\n\nTensorList\022 \n\007tenso"
-    "rs\030\001 \003(\0132\017.codegen.Tensor\"\031\n\007IntList\022\016\n\006"
-    "values\030\001 \003(\003\"\342\001\n\010Argument\022!\n\006tensor\030\001 \001("
-    "\0132\017.codegen.TensorH\000\022*\n\013tensor_list\030\002 \001("
-    "\0132\023.codegen.TensorListH\000\022$\n\010int_list\030\003 \001"
-    "(\0132\020.codegen.IntListH\000\022\023\n\tint_value\030\004 \001("
-    "\003H\000\022\025\n\013float_value\030\005 \001(\002H\000\022\024\n\nbool_value"
-    "\030\006 \001(\010H\000\022\023\n\tstr_value\030\007 \001(\tH\000B\n\n\010arg_typ"
-    "e\"\312\001\n\nOpOverload\022\014\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001"
-    "(\t\022\016\n\006target\030\003 \001(\t\022\037\n\004args\030\004 \003(\0132\021.codeg"
-    "en.Argument\022/\n\006kwargs\030\005 \003(\0132\037.codegen.Op"
-    "Overload.KwargsEntry\032@\n\013KwargsEntry\022\013\n\003k"
-    "ey\030\001 \001(\t\022 \n\005value\030\002 \001(\0132\021.codegen.Argume"
-    "nt:\0028\001\"D\n\016OpOverloadList\022\014\n\004name\030\001 \001(\t\022$"
-    "\n\007op_list\030\002 \003(\0132\023.codegen.OpOverload\"\300\001\n"
-    "\tOperation\022!\n\002op\030\002 \001(\0132\023.codegen.OpOverl"
-    "oadH\000\022+\n\010fused_op\030\003 \001(\0132\027.codegen.OpOver"
-    "loadListH\000\022!\n\006output\030\004 \001(\0132\017.codegen.Ten"
-    "sorH\001\022&\n\007outputs\030\005 \001(\0132\023.codegen.TensorL"
-    "istH\001B\t\n\007op_typeB\r\n\013return_type\"n\n\005Model"
-    "\022\037\n\006inputs\030\001 \003(\0132\017.codegen.Tensor\022#\n\npar"
-    "ameters\030\002 \003(\0132\017.codegen.Tensor\022\037\n\003ops\030\003 "
-    "\003(\0132\022.codegen.Operationb\006proto3"
+    "\001\022\022\n\005scale\030\005 \001(\001H\001\210\001\001\022)\n\007reshape\030\006 \001(\0132\023"
+    ".codegen.OpOverloadH\002\210\001\001\022\017\n\007is_none\030\007 \001("
+    "\010B\t\n\007_memoryB\010\n\006_scaleB\n\n\010_reshape\".\n\nTe"
+    "nsorList\022 \n\007tensors\030\001 \003(\0132\017.codegen.Tens"
+    "or\"\031\n\007IntList\022\016\n\006values\030\001 \003(\003\"\032\n\010BoolLis"
+    "t\022\016\n\006values\030\001 \003(\010\"\034\n\nScalarList\022\016\n\006value"
+    "s\030\001 \003(\001\"\266\002\n\010Argument\022!\n\006tensor\030\001 \001(\0132\017.c"
+    "odegen.TensorH\000\022*\n\013tensor_list\030\002 \001(\0132\023.c"
+    "odegen.TensorListH\000\022$\n\010int_list\030\003 \001(\0132\020."
+    "codegen.IntListH\000\022\023\n\tint_value\030\004 \001(\003H\000\022\025"
+    "\n\013float_value\030\005 \001(\001H\000\022\024\n\nbool_value\030\006 \001("
+    "\010H\000\022\023\n\tstr_value\030\007 \001(\tH\000\022&\n\tbool_list\030\010 "
+    "\001(\0132\021.codegen.BoolListH\000\022*\n\013scalar_list\030"
+    "\t \001(\0132\023.codegen.ScalarListH\000B\n\n\010arg_type"
+    "\"\312\001\n\nOpOverload\022\014\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001("
+    "\t\022\016\n\006target\030\003 \001(\t\022\037\n\004args\030\004 \003(\0132\021.codege"
+    "n.Argument\022/\n\006kwargs\030\005 \003(\0132\037.codegen.OpO"
+    "verload.KwargsEntry\032@\n\013KwargsEntry\022\013\n\003ke"
+    "y\030\001 \001(\t\022 \n\005value\030\002 \001(\0132\021.codegen.Argumen"
+    "t:\0028\001\"D\n\016OpOverloadList\022\014\n\004name\030\001 \001(\t\022$\n"
+    "\007op_list\030\002 \003(\0132\023.codegen.OpOverload\"\300\001\n\t"
+    "Operation\022!\n\002op\030\002 \001(\0132\023.codegen.OpOverlo"
+    "adH\000\022+\n\010fused_op\030\003 \001(\0132\027.codegen.OpOverl"
+    "oadListH\000\022!\n\006output\030\004 \001(\0132\017.codegen.Tens"
+    "orH\001\022&\n\007outputs\030\005 \001(\0132\023.codegen.TensorLi"
+    "stH\001B\t\n\007op_typeB\r\n\013return_type\"n\n\005Model\022"
+    "\037\n\006inputs\030\001 \003(\0132\017.codegen.Tensor\022#\n\npara"
+    "meters\030\002 \003(\0132\017.codegen.Tensor\022\037\n\003ops\030\003 \003"
+    "(\0132\022.codegen.Operationb\006proto3"
 };
 static ::absl::once_flag descriptor_table_param_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_param_2eproto = {
     false,
     false,
-    1151,
+    1310,
     descriptor_table_protodef_param_2eproto,
     "param.proto",
     &descriptor_table_param_2eproto_once,
     nullptr,
     0,
-    10,
+    12,
     schemas,
     file_default_instances,
     TableStruct_param_2eproto::offsets,
@@ -723,7 +792,13 @@ Tensor::Tensor(
   _impl_.reshape_ = (cached_has_bits & 0x00000002u)
                 ? CreateMaybeMessage<::codegen::OpOverload>(arena, *from._impl_.reshape_)
                 : nullptr;
-  _impl_.scale_ = from._impl_.scale_;
+  ::memcpy(reinterpret_cast<char *>(&_impl_) +
+               offsetof(Impl_, scale_),
+           reinterpret_cast<const char *>(&from._impl_) +
+               offsetof(Impl_, scale_),
+           offsetof(Impl_, is_none_) -
+               offsetof(Impl_, scale_) +
+               sizeof(Impl_::is_none_));
 
   // @@protoc_insertion_point(copy_constructor:codegen.Tensor)
 }
@@ -741,9 +816,9 @@ inline void Tensor::SharedCtor(::_pb::Arena* arena) {
   ::memset(reinterpret_cast<char *>(&_impl_) +
                offsetof(Impl_, memory_),
            0,
-           offsetof(Impl_, scale_) -
+           offsetof(Impl_, is_none_) -
                offsetof(Impl_, memory_) +
-               sizeof(Impl_::scale_));
+               sizeof(Impl_::is_none_));
 }
 Tensor::~Tensor() {
   // @@protoc_insertion_point(destructor:codegen.Tensor)
@@ -781,6 +856,7 @@ PROTOBUF_NOINLINE void Tensor::Clear() {
     }
   }
   _impl_.scale_ = 0;
+  _impl_.is_none_ = false;
   _impl_._has_bits_.Clear();
   _internal_metadata_.Clear<::google::protobuf::UnknownFieldSet>();
 }
@@ -793,15 +869,15 @@ const char* Tensor::_InternalParse(
 
 
 PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
-const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
+const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
   {
     PROTOBUF_FIELD_OFFSET(Tensor, _impl_._has_bits_),
     0, // no _extensions_
-    6, 56,  // max_field_number, fast_idx_mask
+    7, 56,  // max_field_number, fast_idx_mask
     offsetof(decltype(_table_), field_lookup_table),
-    4294967232,  // skipmap
+    4294967168,  // skipmap
     offsetof(decltype(_table_), field_entries),
-    6,  // num_field_entries
+    7,  // num_field_entries
     2,  // num_aux_entries
     offsetof(decltype(_table_), aux_entries),
     &_Tensor_default_instance_._instance,
@@ -820,13 +896,15 @@ const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
     // optional .codegen.Memory memory = 4;
     {::_pbi::TcParser::FastMtS1,
      {34, 0, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.memory_)}},
-    // optional float scale = 5;
-    {::_pbi::TcParser::FastF32S1,
-     {45, 2, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)}},
+    // optional double scale = 5;
+    {::_pbi::TcParser::FastF64S1,
+     {41, 2, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)}},
     // optional .codegen.OpOverload reshape = 6;
     {::_pbi::TcParser::FastMtS1,
      {50, 1, 1, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_)}},
-    {::_pbi::TcParser::MiniParse, {}},
+    // bool is_none = 7;
+    {::_pbi::TcParser::SingularVarintNoZag1<bool, offsetof(Tensor, _impl_.is_none_), 63>(),
+     {56, 63, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_)}},
   }}, {{
     65535, 65535
   }}, {{
@@ -842,12 +920,15 @@ const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
     // optional .codegen.Memory memory = 4;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.memory_), _Internal::kHasBitsOffset + 0, 0,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
-    // optional float scale = 5;
+    // optional double scale = 5;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_), _Internal::kHasBitsOffset + 2, 0,
-    (0 | ::_fl::kFcOptional | ::_fl::kFloat)},
+    (0 | ::_fl::kFcOptional | ::_fl::kDouble)},
     // optional .codegen.OpOverload reshape = 6;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_), _Internal::kHasBitsOffset + 1, 1,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
+    // bool is_none = 7;
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_), -1, 0,
+    (0 | ::_fl::kFcSingular | ::_fl::kBool)},
   }}, {{
     {::_pbi::TcParser::GetTable<::codegen::Memory>()},
     {::_pbi::TcParser::GetTable<::codegen::OpOverload>()},
@@ -899,10 +980,10 @@ const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
         _Internal::memory(this).GetCachedSize(), target, stream);
   }
 
-  // optional float scale = 5;
+  // optional double scale = 5;
   if (cached_has_bits & 0x00000004u) {
     target = stream->EnsureSpace(target);
-    target = ::_pbi::WireFormatLite::WriteFloatToArray(
+    target = ::_pbi::WireFormatLite::WriteDoubleToArray(
         5, this->_internal_scale(), target);
   }
 
@@ -911,6 +992,13 @@ const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
     target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
         6, _Internal::reshape(this),
         _Internal::reshape(this).GetCachedSize(), target, stream);
+  }
+
+  // bool is_none = 7;
+  if (this->_internal_is_none() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteBoolToArray(
+        7, this->_internal_is_none(), target);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -969,12 +1057,17 @@ const ::_pbi::TcParseTable<3, 6, 2, 32, 2> Tensor::_table_ = {
           1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.reshape_);
     }
 
-    // optional float scale = 5;
+    // optional double scale = 5;
     if (cached_has_bits & 0x00000004u) {
-      total_size += 5;
+      total_size += 9;
     }
 
   }
+  // bool is_none = 7;
+  if (this->_internal_is_none() != 0) {
+    total_size += 2;
+  }
+
   return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
 }
 
@@ -1016,6 +1109,9 @@ void Tensor::MergeImpl(::google::protobuf::Message& to_msg, const ::google::prot
     }
     _this->_impl_._has_bits_[0] |= cached_has_bits;
   }
+  if (from._internal_is_none() != 0) {
+    _this->_internal_set_is_none(from._internal_is_none());
+  }
   _this->_internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(from._internal_metadata_);
 }
 
@@ -1043,8 +1139,8 @@ void Tensor::InternalSwap(Tensor* PROTOBUF_RESTRICT other) {
   ::_pbi::ArenaStringPtr::InternalSwap(&_impl_.node_, &other->_impl_.node_, arena);
   ::_pbi::ArenaStringPtr::InternalSwap(&_impl_.dtype_, &other->_impl_.dtype_, arena);
   ::google::protobuf::internal::memswap<
-      PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)
-      + sizeof(Tensor::_impl_.scale_)
+      PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_)
+      + sizeof(Tensor::_impl_.is_none_)
       - PROTOBUF_FIELD_OFFSET(Tensor, _impl_.memory_)>(
           reinterpret_cast<char*>(&_impl_.memory_),
           reinterpret_cast<char*>(&other->_impl_.memory_));
@@ -1432,6 +1528,376 @@ void IntList::InternalSwap(IntList* PROTOBUF_RESTRICT other) {
 }
 // ===================================================================
 
+class BoolList::_Internal {
+ public:
+};
+
+BoolList::BoolList(::google::protobuf::Arena* arena)
+    : ::google::protobuf::Message(arena) {
+  SharedCtor(arena);
+  // @@protoc_insertion_point(arena_constructor:codegen.BoolList)
+}
+inline PROTOBUF_NDEBUG_INLINE BoolList::Impl_::Impl_(
+    ::google::protobuf::internal::InternalVisibility visibility, ::google::protobuf::Arena* arena,
+    const Impl_& from)
+      : values_{visibility, arena, from.values_},
+        _cached_size_{0} {}
+
+BoolList::BoolList(
+    ::google::protobuf::Arena* arena,
+    const BoolList& from)
+    : ::google::protobuf::Message(arena) {
+  BoolList* const _this = this;
+  (void)_this;
+  _internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(
+      from._internal_metadata_);
+  new (&_impl_) Impl_(internal_visibility(), arena, from._impl_);
+
+  // @@protoc_insertion_point(copy_constructor:codegen.BoolList)
+}
+inline PROTOBUF_NDEBUG_INLINE BoolList::Impl_::Impl_(
+    ::google::protobuf::internal::InternalVisibility visibility,
+    ::google::protobuf::Arena* arena)
+      : values_{visibility, arena},
+        _cached_size_{0} {}
+
+inline void BoolList::SharedCtor(::_pb::Arena* arena) {
+  new (&_impl_) Impl_(internal_visibility(), arena);
+}
+BoolList::~BoolList() {
+  // @@protoc_insertion_point(destructor:codegen.BoolList)
+  _internal_metadata_.Delete<::google::protobuf::UnknownFieldSet>();
+  SharedDtor();
+}
+inline void BoolList::SharedDtor() {
+  ABSL_DCHECK(GetArena() == nullptr);
+  _impl_.~Impl_();
+}
+
+PROTOBUF_NOINLINE void BoolList::Clear() {
+// @@protoc_insertion_point(message_clear_start:codegen.BoolList)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  _impl_.values_.Clear();
+  _internal_metadata_.Clear<::google::protobuf::UnknownFieldSet>();
+}
+
+const char* BoolList::_InternalParse(
+    const char* ptr, ::_pbi::ParseContext* ctx) {
+  ptr = ::_pbi::TcParser::ParseLoop(this, ptr, ctx, &_table_.header);
+  return ptr;
+}
+
+
+PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
+const ::_pbi::TcParseTable<0, 1, 0, 0, 2> BoolList::_table_ = {
+  {
+    0,  // no _has_bits_
+    0, // no _extensions_
+    1, 0,  // max_field_number, fast_idx_mask
+    offsetof(decltype(_table_), field_lookup_table),
+    4294967294,  // skipmap
+    offsetof(decltype(_table_), field_entries),
+    1,  // num_field_entries
+    0,  // num_aux_entries
+    offsetof(decltype(_table_), field_names),  // no aux_entries
+    &_BoolList_default_instance_._instance,
+    ::_pbi::TcParser::GenericFallback,  // fallback
+  }, {{
+    // repeated bool values = 1;
+    {::_pbi::TcParser::FastV8P1,
+     {10, 63, 0, PROTOBUF_FIELD_OFFSET(BoolList, _impl_.values_)}},
+  }}, {{
+    65535, 65535
+  }}, {{
+    // repeated bool values = 1;
+    {PROTOBUF_FIELD_OFFSET(BoolList, _impl_.values_), 0, 0,
+    (0 | ::_fl::kFcRepeated | ::_fl::kPackedBool)},
+  }},
+  // no aux_entries
+  {{
+  }},
+};
+
+::uint8_t* BoolList::_InternalSerialize(
+    ::uint8_t* target,
+    ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+  // @@protoc_insertion_point(serialize_to_array_start:codegen.BoolList)
+  ::uint32_t cached_has_bits = 0;
+  (void)cached_has_bits;
+
+  // repeated bool values = 1;
+  if (this->_internal_values_size() > 0) {
+    target = stream->WriteFixedPacked(1, _internal_values(), target);
+  }
+
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target =
+        ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+            _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance), target, stream);
+  }
+  // @@protoc_insertion_point(serialize_to_array_end:codegen.BoolList)
+  return target;
+}
+
+::size_t BoolList::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:codegen.BoolList)
+  ::size_t total_size = 0;
+
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  // repeated bool values = 1;
+  {
+    std::size_t data_size = std::size_t{1} *
+        ::_pbi::FromIntSize(this->_internal_values_size())
+    ;
+    std::size_t tag_size = data_size == 0
+        ? 0
+        : 1 + ::_pbi::WireFormatLite::Int32Size(
+                            static_cast<int32_t>(data_size))
+    ;
+    total_size += tag_size + data_size;
+  }
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
+}
+
+const ::google::protobuf::Message::ClassData BoolList::_class_data_ = {
+    BoolList::MergeImpl,
+    nullptr,  // OnDemandRegisterArenaDtor
+};
+const ::google::protobuf::Message::ClassData* BoolList::GetClassData() const {
+  return &_class_data_;
+}
+
+void BoolList::MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg) {
+  auto* const _this = static_cast<BoolList*>(&to_msg);
+  auto& from = static_cast<const BoolList&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:codegen.BoolList)
+  ABSL_DCHECK_NE(&from, _this);
+  ::uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  _this->_internal_mutable_values()->MergeFrom(from._internal_values());
+  _this->_internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(from._internal_metadata_);
+}
+
+void BoolList::CopyFrom(const BoolList& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:codegen.BoolList)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+PROTOBUF_NOINLINE bool BoolList::IsInitialized() const {
+  return true;
+}
+
+::_pbi::CachedSize* BoolList::AccessCachedSize() const {
+  return &_impl_._cached_size_;
+}
+void BoolList::InternalSwap(BoolList* PROTOBUF_RESTRICT other) {
+  using std::swap;
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  _impl_.values_.InternalSwap(&other->_impl_.values_);
+}
+
+::google::protobuf::Metadata BoolList::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
+      file_level_metadata_param_2eproto[4]);
+}
+// ===================================================================
+
+class ScalarList::_Internal {
+ public:
+};
+
+ScalarList::ScalarList(::google::protobuf::Arena* arena)
+    : ::google::protobuf::Message(arena) {
+  SharedCtor(arena);
+  // @@protoc_insertion_point(arena_constructor:codegen.ScalarList)
+}
+inline PROTOBUF_NDEBUG_INLINE ScalarList::Impl_::Impl_(
+    ::google::protobuf::internal::InternalVisibility visibility, ::google::protobuf::Arena* arena,
+    const Impl_& from)
+      : values_{visibility, arena, from.values_},
+        _cached_size_{0} {}
+
+ScalarList::ScalarList(
+    ::google::protobuf::Arena* arena,
+    const ScalarList& from)
+    : ::google::protobuf::Message(arena) {
+  ScalarList* const _this = this;
+  (void)_this;
+  _internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(
+      from._internal_metadata_);
+  new (&_impl_) Impl_(internal_visibility(), arena, from._impl_);
+
+  // @@protoc_insertion_point(copy_constructor:codegen.ScalarList)
+}
+inline PROTOBUF_NDEBUG_INLINE ScalarList::Impl_::Impl_(
+    ::google::protobuf::internal::InternalVisibility visibility,
+    ::google::protobuf::Arena* arena)
+      : values_{visibility, arena},
+        _cached_size_{0} {}
+
+inline void ScalarList::SharedCtor(::_pb::Arena* arena) {
+  new (&_impl_) Impl_(internal_visibility(), arena);
+}
+ScalarList::~ScalarList() {
+  // @@protoc_insertion_point(destructor:codegen.ScalarList)
+  _internal_metadata_.Delete<::google::protobuf::UnknownFieldSet>();
+  SharedDtor();
+}
+inline void ScalarList::SharedDtor() {
+  ABSL_DCHECK(GetArena() == nullptr);
+  _impl_.~Impl_();
+}
+
+PROTOBUF_NOINLINE void ScalarList::Clear() {
+// @@protoc_insertion_point(message_clear_start:codegen.ScalarList)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  _impl_.values_.Clear();
+  _internal_metadata_.Clear<::google::protobuf::UnknownFieldSet>();
+}
+
+const char* ScalarList::_InternalParse(
+    const char* ptr, ::_pbi::ParseContext* ctx) {
+  ptr = ::_pbi::TcParser::ParseLoop(this, ptr, ctx, &_table_.header);
+  return ptr;
+}
+
+
+PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
+const ::_pbi::TcParseTable<0, 1, 0, 0, 2> ScalarList::_table_ = {
+  {
+    0,  // no _has_bits_
+    0, // no _extensions_
+    1, 0,  // max_field_number, fast_idx_mask
+    offsetof(decltype(_table_), field_lookup_table),
+    4294967294,  // skipmap
+    offsetof(decltype(_table_), field_entries),
+    1,  // num_field_entries
+    0,  // num_aux_entries
+    offsetof(decltype(_table_), field_names),  // no aux_entries
+    &_ScalarList_default_instance_._instance,
+    ::_pbi::TcParser::GenericFallback,  // fallback
+  }, {{
+    // repeated double values = 1;
+    {::_pbi::TcParser::FastF64P1,
+     {10, 63, 0, PROTOBUF_FIELD_OFFSET(ScalarList, _impl_.values_)}},
+  }}, {{
+    65535, 65535
+  }}, {{
+    // repeated double values = 1;
+    {PROTOBUF_FIELD_OFFSET(ScalarList, _impl_.values_), 0, 0,
+    (0 | ::_fl::kFcRepeated | ::_fl::kPackedDouble)},
+  }},
+  // no aux_entries
+  {{
+  }},
+};
+
+::uint8_t* ScalarList::_InternalSerialize(
+    ::uint8_t* target,
+    ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+  // @@protoc_insertion_point(serialize_to_array_start:codegen.ScalarList)
+  ::uint32_t cached_has_bits = 0;
+  (void)cached_has_bits;
+
+  // repeated double values = 1;
+  if (this->_internal_values_size() > 0) {
+    target = stream->WriteFixedPacked(1, _internal_values(), target);
+  }
+
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target =
+        ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+            _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance), target, stream);
+  }
+  // @@protoc_insertion_point(serialize_to_array_end:codegen.ScalarList)
+  return target;
+}
+
+::size_t ScalarList::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:codegen.ScalarList)
+  ::size_t total_size = 0;
+
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  // repeated double values = 1;
+  {
+    std::size_t data_size = std::size_t{8} *
+        ::_pbi::FromIntSize(this->_internal_values_size())
+    ;
+    std::size_t tag_size = data_size == 0
+        ? 0
+        : 1 + ::_pbi::WireFormatLite::Int32Size(
+                            static_cast<int32_t>(data_size))
+    ;
+    total_size += tag_size + data_size;
+  }
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
+}
+
+const ::google::protobuf::Message::ClassData ScalarList::_class_data_ = {
+    ScalarList::MergeImpl,
+    nullptr,  // OnDemandRegisterArenaDtor
+};
+const ::google::protobuf::Message::ClassData* ScalarList::GetClassData() const {
+  return &_class_data_;
+}
+
+void ScalarList::MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg) {
+  auto* const _this = static_cast<ScalarList*>(&to_msg);
+  auto& from = static_cast<const ScalarList&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:codegen.ScalarList)
+  ABSL_DCHECK_NE(&from, _this);
+  ::uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  _this->_internal_mutable_values()->MergeFrom(from._internal_values());
+  _this->_internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(from._internal_metadata_);
+}
+
+void ScalarList::CopyFrom(const ScalarList& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:codegen.ScalarList)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+PROTOBUF_NOINLINE bool ScalarList::IsInitialized() const {
+  return true;
+}
+
+::_pbi::CachedSize* ScalarList::AccessCachedSize() const {
+  return &_impl_._cached_size_;
+}
+void ScalarList::InternalSwap(ScalarList* PROTOBUF_RESTRICT other) {
+  using std::swap;
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  _impl_.values_.InternalSwap(&other->_impl_.values_);
+}
+
+::google::protobuf::Metadata ScalarList::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
+      file_level_metadata_param_2eproto[5]);
+}
+// ===================================================================
+
 class Argument::_Internal {
  public:
   static constexpr ::int32_t kOneofCaseOffset =
@@ -1439,6 +1905,8 @@ class Argument::_Internal {
   static const ::codegen::Tensor& tensor(const Argument* msg);
   static const ::codegen::TensorList& tensor_list(const Argument* msg);
   static const ::codegen::IntList& int_list(const Argument* msg);
+  static const ::codegen::BoolList& bool_list(const Argument* msg);
+  static const ::codegen::ScalarList& scalar_list(const Argument* msg);
 };
 
 const ::codegen::Tensor& Argument::_Internal::tensor(const Argument* msg) {
@@ -1449,6 +1917,12 @@ const ::codegen::TensorList& Argument::_Internal::tensor_list(const Argument* ms
 }
 const ::codegen::IntList& Argument::_Internal::int_list(const Argument* msg) {
   return *msg->_impl_.arg_type_.int_list_;
+}
+const ::codegen::BoolList& Argument::_Internal::bool_list(const Argument* msg) {
+  return *msg->_impl_.arg_type_.bool_list_;
+}
+const ::codegen::ScalarList& Argument::_Internal::scalar_list(const Argument* msg) {
+  return *msg->_impl_.arg_type_.scalar_list_;
 }
 void Argument::set_allocated_tensor(::codegen::Tensor* tensor) {
   ::google::protobuf::Arena* message_arena = GetArena();
@@ -1488,6 +1962,32 @@ void Argument::set_allocated_int_list(::codegen::IntList* int_list) {
     _impl_.arg_type_.int_list_ = int_list;
   }
   // @@protoc_insertion_point(field_set_allocated:codegen.Argument.int_list)
+}
+void Argument::set_allocated_bool_list(::codegen::BoolList* bool_list) {
+  ::google::protobuf::Arena* message_arena = GetArena();
+  clear_arg_type();
+  if (bool_list) {
+    ::google::protobuf::Arena* submessage_arena = bool_list->GetArena();
+    if (message_arena != submessage_arena) {
+      bool_list = ::google::protobuf::internal::GetOwnedMessage(message_arena, bool_list, submessage_arena);
+    }
+    set_has_bool_list();
+    _impl_.arg_type_.bool_list_ = bool_list;
+  }
+  // @@protoc_insertion_point(field_set_allocated:codegen.Argument.bool_list)
+}
+void Argument::set_allocated_scalar_list(::codegen::ScalarList* scalar_list) {
+  ::google::protobuf::Arena* message_arena = GetArena();
+  clear_arg_type();
+  if (scalar_list) {
+    ::google::protobuf::Arena* submessage_arena = scalar_list->GetArena();
+    if (message_arena != submessage_arena) {
+      scalar_list = ::google::protobuf::internal::GetOwnedMessage(message_arena, scalar_list, submessage_arena);
+    }
+    set_has_scalar_list();
+    _impl_.arg_type_.scalar_list_ = scalar_list;
+  }
+  // @@protoc_insertion_point(field_set_allocated:codegen.Argument.scalar_list)
 }
 Argument::Argument(::google::protobuf::Arena* arena)
     : ::google::protobuf::Message(arena) {
@@ -1533,6 +2033,12 @@ Argument::Argument(
         break;
       case kStrValue:
         new (&_impl_.arg_type_.str_value_) decltype(_impl_.arg_type_.str_value_){arena, from._impl_.arg_type_.str_value_};
+        break;
+      case kBoolList:
+        _impl_.arg_type_.bool_list_ = CreateMaybeMessage<::codegen::BoolList>(arena, *from._impl_.arg_type_.bool_list_);
+        break;
+      case kScalarList:
+        _impl_.arg_type_.scalar_list_ = CreateMaybeMessage<::codegen::ScalarList>(arena, *from._impl_.arg_type_.scalar_list_);
         break;
   }
 
@@ -1599,6 +2105,18 @@ void Argument::clear_arg_type() {
       _impl_.arg_type_.str_value_.Destroy();
       break;
     }
+    case kBoolList: {
+      if (GetArena() == nullptr) {
+        delete _impl_.arg_type_.bool_list_;
+      }
+      break;
+    }
+    case kScalarList: {
+      if (GetArena() == nullptr) {
+        delete _impl_.arg_type_.scalar_list_;
+      }
+      break;
+    }
     case ARG_TYPE_NOT_SET: {
       break;
     }
@@ -1626,16 +2144,16 @@ const char* Argument::_InternalParse(
 
 
 PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
-const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
+const ::_pbi::TcParseTable<0, 9, 5, 42, 2> Argument::_table_ = {
   {
     0,  // no _has_bits_
     0, // no _extensions_
-    7, 0,  // max_field_number, fast_idx_mask
+    9, 0,  // max_field_number, fast_idx_mask
     offsetof(decltype(_table_), field_lookup_table),
-    4294967168,  // skipmap
+    4294966784,  // skipmap
     offsetof(decltype(_table_), field_entries),
-    7,  // num_field_entries
-    3,  // num_aux_entries
+    9,  // num_field_entries
+    5,  // num_aux_entries
     offsetof(decltype(_table_), aux_entries),
     &_Argument_default_instance_._instance,
     ::_pbi::TcParser::GenericFallback,  // fallback
@@ -1656,21 +2174,29 @@ const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
     // int64 int_value = 4;
     {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.int_value_), _Internal::kOneofCaseOffset + 0, 0,
     (0 | ::_fl::kFcOneof | ::_fl::kInt64)},
-    // float float_value = 5;
+    // double float_value = 5;
     {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.float_value_), _Internal::kOneofCaseOffset + 0, 0,
-    (0 | ::_fl::kFcOneof | ::_fl::kFloat)},
+    (0 | ::_fl::kFcOneof | ::_fl::kDouble)},
     // bool bool_value = 6;
     {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.bool_value_), _Internal::kOneofCaseOffset + 0, 0,
     (0 | ::_fl::kFcOneof | ::_fl::kBool)},
     // string str_value = 7;
     {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.str_value_), _Internal::kOneofCaseOffset + 0, 0,
     (0 | ::_fl::kFcOneof | ::_fl::kUtf8String | ::_fl::kRepAString)},
+    // .codegen.BoolList bool_list = 8;
+    {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.bool_list_), _Internal::kOneofCaseOffset + 0, 3,
+    (0 | ::_fl::kFcOneof | ::_fl::kMessage | ::_fl::kTvTable)},
+    // .codegen.ScalarList scalar_list = 9;
+    {PROTOBUF_FIELD_OFFSET(Argument, _impl_.arg_type_.scalar_list_), _Internal::kOneofCaseOffset + 0, 4,
+    (0 | ::_fl::kFcOneof | ::_fl::kMessage | ::_fl::kTvTable)},
   }}, {{
     {::_pbi::TcParser::GetTable<::codegen::Tensor>()},
     {::_pbi::TcParser::GetTable<::codegen::TensorList>()},
     {::_pbi::TcParser::GetTable<::codegen::IntList>()},
+    {::_pbi::TcParser::GetTable<::codegen::BoolList>()},
+    {::_pbi::TcParser::GetTable<::codegen::ScalarList>()},
   }}, {{
-    "\20\0\0\0\0\0\0\11"
+    "\20\0\0\0\0\0\0\11\0\0\0\0\0\0\0\0"
     "codegen.Argument"
     "str_value"
   }},
@@ -1710,7 +2236,7 @@ const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
     }
     case kFloatValue: {
       target = stream->EnsureSpace(target);
-      target = ::_pbi::WireFormatLite::WriteFloatToArray(
+      target = ::_pbi::WireFormatLite::WriteDoubleToArray(
           5, this->_internal_float_value(), target);
       break;
     }
@@ -1725,6 +2251,18 @@ const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
       ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
           _s.data(), static_cast<int>(_s.length()), ::google::protobuf::internal::WireFormatLite::SERIALIZE, "codegen.Argument.str_value");
       target = stream->WriteStringMaybeAliased(7, _s, target);
+      break;
+    }
+    case kBoolList: {
+      target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
+          8, _Internal::bool_list(this),
+          _Internal::bool_list(this).GetCachedSize(), target, stream);
+      break;
+    }
+    case kScalarList: {
+      target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
+          9, _Internal::scalar_list(this),
+          _Internal::scalar_list(this).GetCachedSize(), target, stream);
       break;
     }
     default:
@@ -1772,9 +2310,9 @@ const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
           this->_internal_int_value());
       break;
     }
-    // float float_value = 5;
+    // double float_value = 5;
     case kFloatValue: {
-      total_size += 5;
+      total_size += 9;
       break;
     }
     // bool bool_value = 6;
@@ -1786,6 +2324,18 @@ const ::_pbi::TcParseTable<0, 7, 3, 34, 2> Argument::_table_ = {
     case kStrValue: {
       total_size += 1 + ::google::protobuf::internal::WireFormatLite::StringSize(
                                       this->_internal_str_value());
+      break;
+    }
+    // .codegen.BoolList bool_list = 8;
+    case kBoolList: {
+      total_size +=
+          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.arg_type_.bool_list_);
+      break;
+    }
+    // .codegen.ScalarList scalar_list = 9;
+    case kScalarList: {
+      total_size +=
+          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.arg_type_.scalar_list_);
       break;
     }
     case ARG_TYPE_NOT_SET: {
@@ -1843,6 +2393,16 @@ void Argument::MergeImpl(::google::protobuf::Message& to_msg, const ::google::pr
       _this->_internal_set_str_value(from._internal_str_value());
       break;
     }
+    case kBoolList: {
+      _this->_internal_mutable_bool_list()->::codegen::BoolList::MergeFrom(
+          from._internal_bool_list());
+      break;
+    }
+    case kScalarList: {
+      _this->_internal_mutable_scalar_list()->::codegen::ScalarList::MergeFrom(
+          from._internal_scalar_list());
+      break;
+    }
     case ARG_TYPE_NOT_SET: {
       break;
     }
@@ -1874,7 +2434,7 @@ void Argument::InternalSwap(Argument* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Argument::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[4]);
+      file_level_metadata_param_2eproto[6]);
 }
 // ===================================================================
 
@@ -1884,7 +2444,7 @@ OpOverload_KwargsEntry_DoNotUse::OpOverload_KwargsEntry_DoNotUse(::google::proto
 ::google::protobuf::Metadata OpOverload_KwargsEntry_DoNotUse::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[5]);
+      file_level_metadata_param_2eproto[7]);
 }
 // ===================================================================
 
@@ -2206,7 +2766,7 @@ void OpOverload::InternalSwap(OpOverload* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata OpOverload::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[6]);
+      file_level_metadata_param_2eproto[8]);
 }
 // ===================================================================
 
@@ -2422,7 +2982,7 @@ void OpOverloadList::InternalSwap(OpOverloadList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata OpOverloadList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[7]);
+      file_level_metadata_param_2eproto[9]);
 }
 // ===================================================================
 
@@ -2846,7 +3406,7 @@ void Operation::InternalSwap(Operation* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Operation::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[8]);
+      file_level_metadata_param_2eproto[10]);
 }
 // ===================================================================
 
@@ -3084,7 +3644,7 @@ void Model::InternalSwap(Model* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Model::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[9]);
+      file_level_metadata_param_2eproto[11]);
 }
 // @@protoc_insertion_point(namespace_scope)
 }  // namespace codegen

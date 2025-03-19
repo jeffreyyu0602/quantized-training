@@ -12,8 +12,9 @@ message Tensor {
   repeated int32 shape = 2;  // Shape of the tensor
   string dtype = 3;          // Data type (e.g., "float32", "int8")
   optional Memory memory = 4; // Optional memory info
-  optional float scale = 5;  // Optional scale for quantization
+  optional double scale = 5;  // Optional scale for quantization
   optional OpOverload reshape = 6; // Optional fused reshape/slicing
+  bool is_none = 7;
 }
 
 // Wrapper for repeated tensors (since `oneof` doesn't allow repeated fields)
@@ -26,6 +27,14 @@ message IntList {
   repeated int64 values = 1;
 }
 
+message BoolList {
+  repeated bool values = 1;
+}
+
+message ScalarList {
+  repeated double values = 1;
+}
+
 // Represents arguments for operations
 message Argument {
   oneof arg_type {
@@ -33,9 +42,11 @@ message Argument {
     TensorList tensor_list = 2;
     IntList int_list = 3;
     int64 int_value = 4;      
-    float float_value = 5;
+    double float_value = 5;
     bool bool_value = 6;
     string str_value = 7;
+    BoolList bool_list = 8;
+    ScalarList scalar_list = 9;
   }
 }
 

@@ -80,6 +80,8 @@ class ShapeProp:
                     result = getattr(self_obj, node.target)(*args, **kwargs)
                 elif node.op == 'call_module':
                     result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
+                elif node.op == 'output':
+                    result = load_arg(node.args[0])
             except:
                 print(f"Error in node {node}")
                 raise

@@ -35,7 +35,32 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
 
 
-def graph_copy(self: GraphModule, module: GraphModule, source: Node) -> List[Node]:
+def eliminate_dead_code(self):
+    """
+    Remove all dead code from the graph, based on each node's number of
+    users, and whether the nodes have any side effects. The graph must be
+    topologically sorted before calling.
+
+    Returns:
+        bool: Whether the graph was changed as a result of the pass.
+    """
+    # Lint the graph first to make sure its topologically sorted, otherwise
+    # DCE below will not behave as expected.
+    self.lint()
+
+    # Reverse iterate so that when we remove a node, any nodes used as an
+    # input to that node have an updated user count that no longer reflects
+    # the removed node.
+    changed = False
+    for node in reversed(self.nodes):
+        if node.op != 'output' and len(node.users) == 0:
+            self.erase_node(node)
+            changed = True
+
+    return changed
+
+
+def replace_node_with_graph_module(self: GraphModule, module: GraphModule, source: Node) -> List[Node]:
     args_iter = iter(source.all_input_nodes)
     value_remap = {}
     for node in list(module.graph.nodes):
@@ -91,7 +116,7 @@ def _decompose_bmm(model: GraphModule, node: Node):
             return result
 
     gm = capture_pre_autograd_graph(BMM(), (input1, input2))
-    output_nodes = graph_copy(model, gm, node)
+    output_nodes = replace_node_with_graph_module(model, gm, node)
     model.graph.erase_node(node)
     return output_nodes[0]
 
@@ -156,7 +181,7 @@ def _decompose_bmm_mx(model: GraphModule, node: Node):
         if n.target == torch.ops.quantized_ops.matmul_mx.default:
             n.meta['source_fn_stack'] = [(n.name, source_fn[1])]
 
-    output_nodes = graph_copy(model, gm, node)
+    output_nodes = replace_node_with_graph_module(model, gm, node)
     model.graph.erase_node(node)
     return output_nodes[0]
 
@@ -471,8 +496,8 @@ def duplicate_shared_nodes(graph: torch.fx.Graph, nodes: List[Node]) -> List[Nod
 
        # Copy and update the metadata for tracking
         source_fn_st = node.meta.get('source_fn_stack', [])
-        source_fn = source_fn_st[-1] if source_fn_st else new_node.target
-        new_node.meta['source_fn_stack'] = [(new_node.name, source_fn[1])]
+        source_fn = source_fn_st[-1][1] if source_fn_st else new_node.target
+        new_node.meta['source_fn_stack'] = [(new_node.name, source_fn)]
 
     return nodes
 
@@ -968,7 +993,9 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
             dtypes = [t.dtype for t in node.value]
             if (dtype := node.meta.get("dtype", None)) is not None:
                 dtypes = [dt or dtypes[i] for i, dt in enumerate(dtype)]
-            header += f"&#92;n{', '.join([str(d) for d in dtypes])}"
+
+            if any(dtype not in [torch.float, torch.bfloat16] for dtype in dtypes):
+                header += f"&#92;n{', '.join([str(d) for d in dtypes])}"
         else:
             continue
 

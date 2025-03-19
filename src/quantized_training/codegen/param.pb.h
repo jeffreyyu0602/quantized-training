@@ -62,6 +62,9 @@ namespace codegen {
 class Argument;
 struct ArgumentDefaultTypeInternal;
 extern ArgumentDefaultTypeInternal _Argument_default_instance_;
+class BoolList;
+struct BoolListDefaultTypeInternal;
+extern BoolListDefaultTypeInternal _BoolList_default_instance_;
 class IntList;
 struct IntListDefaultTypeInternal;
 extern IntListDefaultTypeInternal _IntList_default_instance_;
@@ -83,6 +86,9 @@ extern OpOverload_KwargsEntry_DoNotUseDefaultTypeInternal _OpOverload_KwargsEntr
 class Operation;
 struct OperationDefaultTypeInternal;
 extern OperationDefaultTypeInternal _Operation_default_instance_;
+class ScalarList;
+struct ScalarListDefaultTypeInternal;
+extern ScalarListDefaultTypeInternal _ScalarList_default_instance_;
 class Tensor;
 struct TensorDefaultTypeInternal;
 extern TensorDefaultTypeInternal _Tensor_default_instance_;
@@ -101,6 +107,189 @@ namespace codegen {
 
 
 // -------------------------------------------------------------------
+
+class ScalarList final :
+    public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.ScalarList) */ {
+ public:
+  inline ScalarList() : ScalarList(nullptr) {}
+  ~ScalarList() override;
+  template<typename = void>
+  explicit PROTOBUF_CONSTEXPR ScalarList(::google::protobuf::internal::ConstantInitialized);
+
+  inline ScalarList(const ScalarList& from)
+      : ScalarList(nullptr, from) {}
+  ScalarList(ScalarList&& from) noexcept
+    : ScalarList() {
+    *this = ::std::move(from);
+  }
+
+  inline ScalarList& operator=(const ScalarList& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline ScalarList& operator=(ScalarList&& from) noexcept {
+    if (this == &from) return *this;
+    if (GetArena() == from.GetArena()
+  #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
+        && GetArena() != nullptr
+  #endif  // !PROTOBUF_FORCE_COPY_IN_MOVE
+    ) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
+  }
+  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+  }
+
+  static const ::google::protobuf::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::google::protobuf::Descriptor* GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::google::protobuf::Reflection* GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const ScalarList& default_instance() {
+    return *internal_default_instance();
+  }
+  static inline const ScalarList* internal_default_instance() {
+    return reinterpret_cast<const ScalarList*>(
+               &_ScalarList_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    5;
+
+  friend void swap(ScalarList& a, ScalarList& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(ScalarList* other) {
+    if (other == this) return;
+  #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() != nullptr &&
+        GetArena() == other->GetArena()) {
+   #else  // PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() == other->GetArena()) {
+  #endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+      InternalSwap(other);
+    } else {
+      ::google::protobuf::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(ScalarList* other) {
+    if (other == this) return;
+    ABSL_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  ScalarList* New(::google::protobuf::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<ScalarList>(arena);
+  }
+  using ::google::protobuf::Message::CopyFrom;
+  void CopyFrom(const ScalarList& from);
+  using ::google::protobuf::Message::MergeFrom;
+  void MergeFrom( const ScalarList& from) {
+    ScalarList::MergeImpl(*this, from);
+  }
+  private:
+  static void MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg);
+  public:
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  ::size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::google::protobuf::internal::ParseContext* ctx) final;
+  ::uint8_t* _InternalSerialize(
+      ::uint8_t* target, ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+
+  private:
+  ::google::protobuf::internal::CachedSize* AccessCachedSize() const final;
+  void SharedCtor(::google::protobuf::Arena* arena);
+  void SharedDtor();
+  void InternalSwap(ScalarList* other);
+
+  private:
+  friend class ::google::protobuf::internal::AnyMetadata;
+  static ::absl::string_view FullMessageName() {
+    return "codegen.ScalarList";
+  }
+  protected:
+  explicit ScalarList(::google::protobuf::Arena* arena);
+  ScalarList(::google::protobuf::Arena* arena, const ScalarList& from);
+  public:
+
+  static const ClassData _class_data_;
+  const ::google::protobuf::Message::ClassData*GetClassData() const final;
+
+  ::google::protobuf::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kValuesFieldNumber = 1,
+  };
+  // repeated double values = 1;
+  int values_size() const;
+  private:
+  int _internal_values_size() const;
+
+  public:
+  void clear_values() ;
+  double values(int index) const;
+  void set_values(int index, double value);
+  void add_values(double value);
+  const ::google::protobuf::RepeatedField<double>& values() const;
+  ::google::protobuf::RepeatedField<double>* mutable_values();
+
+  private:
+  const ::google::protobuf::RepeatedField<double>& _internal_values() const;
+  ::google::protobuf::RepeatedField<double>* _internal_mutable_values();
+
+  public:
+  // @@protoc_insertion_point(class_scope:codegen.ScalarList)
+ private:
+  class _Internal;
+
+  friend class ::google::protobuf::internal::TcParser;
+  static const ::google::protobuf::internal::TcParseTable<
+      0, 1, 0,
+      0, 2>
+      _table_;
+  friend class ::google::protobuf::MessageLite;
+  friend class ::google::protobuf::Arena;
+  template <typename T>
+  friend class ::google::protobuf::Arena::InternalHelper;
+  using InternalArenaConstructable_ = void;
+  using DestructorSkippable_ = void;
+  struct Impl_ {
+
+        inline explicit constexpr Impl_(
+            ::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from);
+    ::google::protobuf::RepeatedField<double> values_;
+    mutable ::google::protobuf::internal::CachedSize _cached_size_;
+    PROTOBUF_TSAN_DECLARE_MEMBER
+  };
+  union { Impl_ _impl_; };
+  friend struct ::TableStruct_param_2eproto;
+};// -------------------------------------------------------------------
 
 class Memory final :
     public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.Memory) */ {
@@ -473,6 +662,189 @@ class IntList final :
   friend struct ::TableStruct_param_2eproto;
 };// -------------------------------------------------------------------
 
+class BoolList final :
+    public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.BoolList) */ {
+ public:
+  inline BoolList() : BoolList(nullptr) {}
+  ~BoolList() override;
+  template<typename = void>
+  explicit PROTOBUF_CONSTEXPR BoolList(::google::protobuf::internal::ConstantInitialized);
+
+  inline BoolList(const BoolList& from)
+      : BoolList(nullptr, from) {}
+  BoolList(BoolList&& from) noexcept
+    : BoolList() {
+    *this = ::std::move(from);
+  }
+
+  inline BoolList& operator=(const BoolList& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline BoolList& operator=(BoolList&& from) noexcept {
+    if (this == &from) return *this;
+    if (GetArena() == from.GetArena()
+  #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
+        && GetArena() != nullptr
+  #endif  // !PROTOBUF_FORCE_COPY_IN_MOVE
+    ) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
+  }
+  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+  }
+
+  static const ::google::protobuf::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::google::protobuf::Descriptor* GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::google::protobuf::Reflection* GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const BoolList& default_instance() {
+    return *internal_default_instance();
+  }
+  static inline const BoolList* internal_default_instance() {
+    return reinterpret_cast<const BoolList*>(
+               &_BoolList_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    4;
+
+  friend void swap(BoolList& a, BoolList& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(BoolList* other) {
+    if (other == this) return;
+  #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() != nullptr &&
+        GetArena() == other->GetArena()) {
+   #else  // PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() == other->GetArena()) {
+  #endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+      InternalSwap(other);
+    } else {
+      ::google::protobuf::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(BoolList* other) {
+    if (other == this) return;
+    ABSL_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  BoolList* New(::google::protobuf::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<BoolList>(arena);
+  }
+  using ::google::protobuf::Message::CopyFrom;
+  void CopyFrom(const BoolList& from);
+  using ::google::protobuf::Message::MergeFrom;
+  void MergeFrom( const BoolList& from) {
+    BoolList::MergeImpl(*this, from);
+  }
+  private:
+  static void MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg);
+  public:
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  ::size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::google::protobuf::internal::ParseContext* ctx) final;
+  ::uint8_t* _InternalSerialize(
+      ::uint8_t* target, ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+
+  private:
+  ::google::protobuf::internal::CachedSize* AccessCachedSize() const final;
+  void SharedCtor(::google::protobuf::Arena* arena);
+  void SharedDtor();
+  void InternalSwap(BoolList* other);
+
+  private:
+  friend class ::google::protobuf::internal::AnyMetadata;
+  static ::absl::string_view FullMessageName() {
+    return "codegen.BoolList";
+  }
+  protected:
+  explicit BoolList(::google::protobuf::Arena* arena);
+  BoolList(::google::protobuf::Arena* arena, const BoolList& from);
+  public:
+
+  static const ClassData _class_data_;
+  const ::google::protobuf::Message::ClassData*GetClassData() const final;
+
+  ::google::protobuf::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kValuesFieldNumber = 1,
+  };
+  // repeated bool values = 1;
+  int values_size() const;
+  private:
+  int _internal_values_size() const;
+
+  public:
+  void clear_values() ;
+  bool values(int index) const;
+  void set_values(int index, bool value);
+  void add_values(bool value);
+  const ::google::protobuf::RepeatedField<bool>& values() const;
+  ::google::protobuf::RepeatedField<bool>* mutable_values();
+
+  private:
+  const ::google::protobuf::RepeatedField<bool>& _internal_values() const;
+  ::google::protobuf::RepeatedField<bool>* _internal_mutable_values();
+
+  public:
+  // @@protoc_insertion_point(class_scope:codegen.BoolList)
+ private:
+  class _Internal;
+
+  friend class ::google::protobuf::internal::TcParser;
+  static const ::google::protobuf::internal::TcParseTable<
+      0, 1, 0,
+      0, 2>
+      _table_;
+  friend class ::google::protobuf::MessageLite;
+  friend class ::google::protobuf::Arena;
+  template <typename T>
+  friend class ::google::protobuf::Arena::InternalHelper;
+  using InternalArenaConstructable_ = void;
+  using DestructorSkippable_ = void;
+  struct Impl_ {
+
+        inline explicit constexpr Impl_(
+            ::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from);
+    ::google::protobuf::RepeatedField<bool> values_;
+    mutable ::google::protobuf::internal::CachedSize _cached_size_;
+    PROTOBUF_TSAN_DECLARE_MEMBER
+  };
+  union { Impl_ _impl_; };
+  friend struct ::TableStruct_param_2eproto;
+};// -------------------------------------------------------------------
+
 class Argument final :
     public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.Argument) */ {
  public:
@@ -535,6 +907,8 @@ class Argument final :
     kFloatValue = 5,
     kBoolValue = 6,
     kStrValue = 7,
+    kBoolList = 8,
+    kScalarList = 9,
     ARG_TYPE_NOT_SET = 0,
   };
 
@@ -543,7 +917,7 @@ class Argument final :
                &_Argument_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    4;
+    6;
 
   friend void swap(Argument& a, Argument& b) {
     a.Swap(&b);
@@ -623,6 +997,8 @@ class Argument final :
     kFloatValueFieldNumber = 5,
     kBoolValueFieldNumber = 6,
     kStrValueFieldNumber = 7,
+    kBoolListFieldNumber = 8,
+    kScalarListFieldNumber = 9,
   };
   // .codegen.Tensor tensor = 1;
   bool has_tensor() const;
@@ -692,15 +1068,15 @@ class Argument final :
   void _internal_set_int_value(::int64_t value);
 
   public:
-  // float float_value = 5;
+  // double float_value = 5;
   bool has_float_value() const;
   void clear_float_value() ;
-  float float_value() const;
-  void set_float_value(float value);
+  double float_value() const;
+  void set_float_value(double value);
 
   private:
-  float _internal_float_value() const;
-  void _internal_set_float_value(float value);
+  double _internal_float_value() const;
+  void _internal_set_float_value(double value);
 
   public:
   // bool bool_value = 6;
@@ -731,6 +1107,44 @@ class Argument final :
   std::string* _internal_mutable_str_value();
 
   public:
+  // .codegen.BoolList bool_list = 8;
+  bool has_bool_list() const;
+  private:
+  bool _internal_has_bool_list() const;
+
+  public:
+  void clear_bool_list() ;
+  const ::codegen::BoolList& bool_list() const;
+  PROTOBUF_NODISCARD ::codegen::BoolList* release_bool_list();
+  ::codegen::BoolList* mutable_bool_list();
+  void set_allocated_bool_list(::codegen::BoolList* value);
+  void unsafe_arena_set_allocated_bool_list(::codegen::BoolList* value);
+  ::codegen::BoolList* unsafe_arena_release_bool_list();
+
+  private:
+  const ::codegen::BoolList& _internal_bool_list() const;
+  ::codegen::BoolList* _internal_mutable_bool_list();
+
+  public:
+  // .codegen.ScalarList scalar_list = 9;
+  bool has_scalar_list() const;
+  private:
+  bool _internal_has_scalar_list() const;
+
+  public:
+  void clear_scalar_list() ;
+  const ::codegen::ScalarList& scalar_list() const;
+  PROTOBUF_NODISCARD ::codegen::ScalarList* release_scalar_list();
+  ::codegen::ScalarList* mutable_scalar_list();
+  void set_allocated_scalar_list(::codegen::ScalarList* value);
+  void unsafe_arena_set_allocated_scalar_list(::codegen::ScalarList* value);
+  ::codegen::ScalarList* unsafe_arena_release_scalar_list();
+
+  private:
+  const ::codegen::ScalarList& _internal_scalar_list() const;
+  ::codegen::ScalarList* _internal_mutable_scalar_list();
+
+  public:
   void clear_arg_type();
   ArgTypeCase arg_type_case() const;
   // @@protoc_insertion_point(class_scope:codegen.Argument)
@@ -743,14 +1157,16 @@ class Argument final :
   void set_has_float_value();
   void set_has_bool_value();
   void set_has_str_value();
+  void set_has_bool_list();
+  void set_has_scalar_list();
 
   inline bool has_arg_type() const;
   inline void clear_has_arg_type();
 
   friend class ::google::protobuf::internal::TcParser;
   static const ::google::protobuf::internal::TcParseTable<
-      0, 7, 3,
-      34, 2>
+      0, 9, 5,
+      42, 2>
       _table_;
   friend class ::google::protobuf::MessageLite;
   friend class ::google::protobuf::Arena;
@@ -773,9 +1189,11 @@ class Argument final :
       ::codegen::TensorList* tensor_list_;
       ::codegen::IntList* int_list_;
       ::int64_t int_value_;
-      float float_value_;
+      double float_value_;
       bool bool_value_;
       ::google::protobuf::internal::ArenaStringPtr str_value_;
+      ::codegen::BoolList* bool_list_;
+      ::codegen::ScalarList* scalar_list_;
     } arg_type_;
     mutable ::google::protobuf::internal::CachedSize _cached_size_;
     ::uint32_t _oneof_case_[1];
@@ -845,7 +1263,7 @@ class OpOverload final :
                &_OpOverload_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    6;
+    8;
 
   friend void swap(OpOverload& a, OpOverload& b) {
     a.Swap(&b);
@@ -1210,6 +1628,7 @@ class Tensor final :
     kMemoryFieldNumber = 4,
     kReshapeFieldNumber = 6,
     kScaleFieldNumber = 5,
+    kIsNoneFieldNumber = 7,
   };
   // repeated int32 shape = 2;
   int shape_size() const;
@@ -1291,15 +1710,25 @@ class Tensor final :
   ::codegen::OpOverload* _internal_mutable_reshape();
 
   public:
-  // optional float scale = 5;
+  // optional double scale = 5;
   bool has_scale() const;
   void clear_scale() ;
-  float scale() const;
-  void set_scale(float value);
+  double scale() const;
+  void set_scale(double value);
 
   private:
-  float _internal_scale() const;
-  void _internal_set_scale(float value);
+  double _internal_scale() const;
+  void _internal_set_scale(double value);
+
+  public:
+  // bool is_none = 7;
+  void clear_is_none() ;
+  bool is_none() const;
+  void set_is_none(bool value);
+
+  private:
+  bool _internal_is_none() const;
+  void _internal_set_is_none(bool value);
 
   public:
   // @@protoc_insertion_point(class_scope:codegen.Tensor)
@@ -1308,7 +1737,7 @@ class Tensor final :
 
   friend class ::google::protobuf::internal::TcParser;
   static const ::google::protobuf::internal::TcParseTable<
-      3, 6, 2,
+      3, 7, 2,
       32, 2>
       _table_;
   friend class ::google::protobuf::MessageLite;
@@ -1333,7 +1762,8 @@ class Tensor final :
     ::google::protobuf::internal::ArenaStringPtr dtype_;
     ::codegen::Memory* memory_;
     ::codegen::OpOverload* reshape_;
-    float scale_;
+    double scale_;
+    bool is_none_;
     PROTOBUF_TSAN_DECLARE_MEMBER
   };
   union { Impl_ _impl_; };
@@ -1582,7 +2012,7 @@ class OpOverloadList final :
                &_OpOverloadList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    7;
+    9;
 
   friend void swap(OpOverloadList& a, OpOverloadList& b) {
     a.Swap(&b);
@@ -1795,7 +2225,7 @@ class Operation final :
                &_Operation_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    8;
+    10;
 
   friend void swap(Operation& a, Operation& b) {
     a.Swap(&b);
@@ -2066,7 +2496,7 @@ class Model final :
                &_Model_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    9;
+    11;
 
   friend void swap(Model& a, Model& b) {
     a.Swap(&b);
@@ -2543,7 +2973,7 @@ inline void Tensor::set_allocated_memory(::codegen::Memory* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.memory)
 }
 
-// optional float scale = 5;
+// optional double scale = 5;
 inline bool Tensor::has_scale() const {
   bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
   return value;
@@ -2553,19 +2983,19 @@ inline void Tensor::clear_scale() {
   _impl_.scale_ = 0;
   _impl_._has_bits_[0] &= ~0x00000004u;
 }
-inline float Tensor::scale() const {
+inline double Tensor::scale() const {
   // @@protoc_insertion_point(field_get:codegen.Tensor.scale)
   return _internal_scale();
 }
-inline void Tensor::set_scale(float value) {
+inline void Tensor::set_scale(double value) {
   _internal_set_scale(value);
   // @@protoc_insertion_point(field_set:codegen.Tensor.scale)
 }
-inline float Tensor::_internal_scale() const {
+inline double Tensor::_internal_scale() const {
   PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
   return _impl_.scale_;
 }
-inline void Tensor::_internal_set_scale(float value) {
+inline void Tensor::_internal_set_scale(double value) {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_._has_bits_[0] |= 0x00000004u;
   _impl_.scale_ = value;
@@ -2667,6 +3097,29 @@ inline void Tensor::set_allocated_reshape(::codegen::OpOverload* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.reshape)
 }
 
+// bool is_none = 7;
+inline void Tensor::clear_is_none() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.is_none_ = false;
+}
+inline bool Tensor::is_none() const {
+  // @@protoc_insertion_point(field_get:codegen.Tensor.is_none)
+  return _internal_is_none();
+}
+inline void Tensor::set_is_none(bool value) {
+  _internal_set_is_none(value);
+  // @@protoc_insertion_point(field_set:codegen.Tensor.is_none)
+}
+inline bool Tensor::_internal_is_none() const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.is_none_;
+}
+inline void Tensor::_internal_set_is_none(bool value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ;
+  _impl_.is_none_ = value;
+}
+
 // -------------------------------------------------------------------
 
 // TensorList
@@ -2765,6 +3218,104 @@ inline const ::google::protobuf::RepeatedField<::int64_t>& IntList::_internal_va
   return _impl_.values_;
 }
 inline ::google::protobuf::RepeatedField<::int64_t>* IntList::_internal_mutable_values() {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return &_impl_.values_;
+}
+
+// -------------------------------------------------------------------
+
+// BoolList
+
+// repeated bool values = 1;
+inline int BoolList::_internal_values_size() const {
+  return _internal_values().size();
+}
+inline int BoolList::values_size() const {
+  return _internal_values_size();
+}
+inline void BoolList::clear_values() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.values_.Clear();
+}
+inline bool BoolList::values(int index) const {
+  // @@protoc_insertion_point(field_get:codegen.BoolList.values)
+  return _internal_values().Get(index);
+}
+inline void BoolList::set_values(int index, bool value) {
+  _internal_mutable_values()->Set(index, value);
+  // @@protoc_insertion_point(field_set:codegen.BoolList.values)
+}
+inline void BoolList::add_values(bool value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _internal_mutable_values()->Add(value);
+  // @@protoc_insertion_point(field_add:codegen.BoolList.values)
+}
+inline const ::google::protobuf::RepeatedField<bool>& BoolList::values() const
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_list:codegen.BoolList.values)
+  return _internal_values();
+}
+inline ::google::protobuf::RepeatedField<bool>* BoolList::mutable_values()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_mutable_list:codegen.BoolList.values)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  return _internal_mutable_values();
+}
+inline const ::google::protobuf::RepeatedField<bool>& BoolList::_internal_values()
+    const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.values_;
+}
+inline ::google::protobuf::RepeatedField<bool>* BoolList::_internal_mutable_values() {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return &_impl_.values_;
+}
+
+// -------------------------------------------------------------------
+
+// ScalarList
+
+// repeated double values = 1;
+inline int ScalarList::_internal_values_size() const {
+  return _internal_values().size();
+}
+inline int ScalarList::values_size() const {
+  return _internal_values_size();
+}
+inline void ScalarList::clear_values() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.values_.Clear();
+}
+inline double ScalarList::values(int index) const {
+  // @@protoc_insertion_point(field_get:codegen.ScalarList.values)
+  return _internal_values().Get(index);
+}
+inline void ScalarList::set_values(int index, double value) {
+  _internal_mutable_values()->Set(index, value);
+  // @@protoc_insertion_point(field_set:codegen.ScalarList.values)
+}
+inline void ScalarList::add_values(double value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _internal_mutable_values()->Add(value);
+  // @@protoc_insertion_point(field_add:codegen.ScalarList.values)
+}
+inline const ::google::protobuf::RepeatedField<double>& ScalarList::values() const
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_list:codegen.ScalarList.values)
+  return _internal_values();
+}
+inline ::google::protobuf::RepeatedField<double>* ScalarList::mutable_values()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_mutable_list:codegen.ScalarList.values)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  return _internal_mutable_values();
+}
+inline const ::google::protobuf::RepeatedField<double>& ScalarList::_internal_values()
+    const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.values_;
+}
+inline ::google::protobuf::RepeatedField<double>* ScalarList::_internal_mutable_values() {
   PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
   return &_impl_.values_;
 }
@@ -3037,7 +3588,7 @@ inline void Argument::_internal_set_int_value(::int64_t value) {
   _impl_.arg_type_.int_value_ = value;
 }
 
-// float float_value = 5;
+// double float_value = 5;
 inline bool Argument::has_float_value() const {
   return arg_type_case() == kFloatValue;
 }
@@ -3051,21 +3602,21 @@ inline void Argument::clear_float_value() {
     clear_has_arg_type();
   }
 }
-inline float Argument::float_value() const {
+inline double Argument::float_value() const {
   // @@protoc_insertion_point(field_get:codegen.Argument.float_value)
   return _internal_float_value();
 }
-inline void Argument::set_float_value(float value) {
+inline void Argument::set_float_value(double value) {
   _internal_set_float_value(value);
   // @@protoc_insertion_point(field_set:codegen.Argument.float_value)
 }
-inline float Argument::_internal_float_value() const {
+inline double Argument::_internal_float_value() const {
   if (arg_type_case() == kFloatValue) {
     return _impl_.arg_type_.float_value_;
   }
   return 0;
 }
-inline void Argument::_internal_set_float_value(float value) {
+inline void Argument::_internal_set_float_value(double value) {
   if (arg_type_case() != kFloatValue) {
     clear_arg_type();
     set_has_float_value();
@@ -3192,6 +3743,158 @@ inline void Argument::set_allocated_str_value(std::string* value) {
     _impl_.arg_type_.str_value_.InitAllocated(value, GetArena());
   }
   // @@protoc_insertion_point(field_set_allocated:codegen.Argument.str_value)
+}
+
+// .codegen.BoolList bool_list = 8;
+inline bool Argument::has_bool_list() const {
+  return arg_type_case() == kBoolList;
+}
+inline bool Argument::_internal_has_bool_list() const {
+  return arg_type_case() == kBoolList;
+}
+inline void Argument::set_has_bool_list() {
+  _impl_._oneof_case_[0] = kBoolList;
+}
+inline void Argument::clear_bool_list() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (arg_type_case() == kBoolList) {
+    if (GetArena() == nullptr) {
+      delete _impl_.arg_type_.bool_list_;
+    }
+    clear_has_arg_type();
+  }
+}
+inline ::codegen::BoolList* Argument::release_bool_list() {
+  // @@protoc_insertion_point(field_release:codegen.Argument.bool_list)
+  if (arg_type_case() == kBoolList) {
+    clear_has_arg_type();
+    auto* temp = _impl_.arg_type_.bool_list_;
+    if (GetArena() != nullptr) {
+      temp = ::google::protobuf::internal::DuplicateIfNonNull(temp);
+    }
+    _impl_.arg_type_.bool_list_ = nullptr;
+    return temp;
+  } else {
+    return nullptr;
+  }
+}
+inline const ::codegen::BoolList& Argument::_internal_bool_list() const {
+  return arg_type_case() == kBoolList ? *_impl_.arg_type_.bool_list_ : reinterpret_cast<::codegen::BoolList&>(::codegen::_BoolList_default_instance_);
+}
+inline const ::codegen::BoolList& Argument::bool_list() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:codegen.Argument.bool_list)
+  return _internal_bool_list();
+}
+inline ::codegen::BoolList* Argument::unsafe_arena_release_bool_list() {
+  // @@protoc_insertion_point(field_unsafe_arena_release:codegen.Argument.bool_list)
+  if (arg_type_case() == kBoolList) {
+    clear_has_arg_type();
+    auto* temp = _impl_.arg_type_.bool_list_;
+    _impl_.arg_type_.bool_list_ = nullptr;
+    return temp;
+  } else {
+    return nullptr;
+  }
+}
+inline void Argument::unsafe_arena_set_allocated_bool_list(::codegen::BoolList* value) {
+  // We rely on the oneof clear method to free the earlier contents
+  // of this oneof. We can directly use the pointer we're given to
+  // set the new value.
+  clear_arg_type();
+  if (value) {
+    set_has_bool_list();
+    _impl_.arg_type_.bool_list_ = value;
+  }
+  // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Argument.bool_list)
+}
+inline ::codegen::BoolList* Argument::_internal_mutable_bool_list() {
+  if (arg_type_case() != kBoolList) {
+    clear_arg_type();
+    set_has_bool_list();
+    _impl_.arg_type_.bool_list_ = CreateMaybeMessage<::codegen::BoolList>(GetArena());
+  }
+  return _impl_.arg_type_.bool_list_;
+}
+inline ::codegen::BoolList* Argument::mutable_bool_list() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::codegen::BoolList* _msg = _internal_mutable_bool_list();
+  // @@protoc_insertion_point(field_mutable:codegen.Argument.bool_list)
+  return _msg;
+}
+
+// .codegen.ScalarList scalar_list = 9;
+inline bool Argument::has_scalar_list() const {
+  return arg_type_case() == kScalarList;
+}
+inline bool Argument::_internal_has_scalar_list() const {
+  return arg_type_case() == kScalarList;
+}
+inline void Argument::set_has_scalar_list() {
+  _impl_._oneof_case_[0] = kScalarList;
+}
+inline void Argument::clear_scalar_list() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (arg_type_case() == kScalarList) {
+    if (GetArena() == nullptr) {
+      delete _impl_.arg_type_.scalar_list_;
+    }
+    clear_has_arg_type();
+  }
+}
+inline ::codegen::ScalarList* Argument::release_scalar_list() {
+  // @@protoc_insertion_point(field_release:codegen.Argument.scalar_list)
+  if (arg_type_case() == kScalarList) {
+    clear_has_arg_type();
+    auto* temp = _impl_.arg_type_.scalar_list_;
+    if (GetArena() != nullptr) {
+      temp = ::google::protobuf::internal::DuplicateIfNonNull(temp);
+    }
+    _impl_.arg_type_.scalar_list_ = nullptr;
+    return temp;
+  } else {
+    return nullptr;
+  }
+}
+inline const ::codegen::ScalarList& Argument::_internal_scalar_list() const {
+  return arg_type_case() == kScalarList ? *_impl_.arg_type_.scalar_list_ : reinterpret_cast<::codegen::ScalarList&>(::codegen::_ScalarList_default_instance_);
+}
+inline const ::codegen::ScalarList& Argument::scalar_list() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:codegen.Argument.scalar_list)
+  return _internal_scalar_list();
+}
+inline ::codegen::ScalarList* Argument::unsafe_arena_release_scalar_list() {
+  // @@protoc_insertion_point(field_unsafe_arena_release:codegen.Argument.scalar_list)
+  if (arg_type_case() == kScalarList) {
+    clear_has_arg_type();
+    auto* temp = _impl_.arg_type_.scalar_list_;
+    _impl_.arg_type_.scalar_list_ = nullptr;
+    return temp;
+  } else {
+    return nullptr;
+  }
+}
+inline void Argument::unsafe_arena_set_allocated_scalar_list(::codegen::ScalarList* value) {
+  // We rely on the oneof clear method to free the earlier contents
+  // of this oneof. We can directly use the pointer we're given to
+  // set the new value.
+  clear_arg_type();
+  if (value) {
+    set_has_scalar_list();
+    _impl_.arg_type_.scalar_list_ = value;
+  }
+  // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Argument.scalar_list)
+}
+inline ::codegen::ScalarList* Argument::_internal_mutable_scalar_list() {
+  if (arg_type_case() != kScalarList) {
+    clear_arg_type();
+    set_has_scalar_list();
+    _impl_.arg_type_.scalar_list_ = CreateMaybeMessage<::codegen::ScalarList>(GetArena());
+  }
+  return _impl_.arg_type_.scalar_list_;
+}
+inline ::codegen::ScalarList* Argument::mutable_scalar_list() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::codegen::ScalarList* _msg = _internal_mutable_scalar_list();
+  // @@protoc_insertion_point(field_mutable:codegen.Argument.scalar_list)
+  return _msg;
 }
 
 inline bool Argument::has_arg_type() const {
