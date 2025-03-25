@@ -2,6 +2,7 @@ import argparse
 import logging
 
 import torch
+import transformers
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
@@ -159,6 +160,24 @@ if __name__ == "__main__":
                 module.padding = 0
 
         quantizer.set_module_name("fc", None)
+
+        # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
+        if (
+            args.activation is not None
+            and "microscaling" in args.activation
+            and args.model in ["resnet18", "resnet50"]
+        ):
+            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+
+            bias_qspec = DerivedQuantizationSpec(
+                derived_from=None,
+                derive_qparams_fn=derive_bias_qparams_fn,
+                dtype=None,
+            )
+
+            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+            quantizer.set_module_name("conv1", qconfig)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
@@ -531,8 +550,6 @@ if __name__ == "__main__":
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
     elif args.model == "llama_decode":
-        import transformers
-
         model_id = "meta-llama/Meta-Llama-3-8B"
 
         pipeline = transformers.pipeline("text-generation", model=model_id, model_kwargs={"torch_dtype": torch.bfloat16}, device_map="auto")
