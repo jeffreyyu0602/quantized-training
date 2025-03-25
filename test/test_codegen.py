@@ -26,6 +26,7 @@ from quantized_training import (
     prepare_pt2e,
     transform,
     compile,
+    derive_bias_qparams_fn
 )
 from quantized_training.codegen.utils import (
     eliminate_dtype_conversion,

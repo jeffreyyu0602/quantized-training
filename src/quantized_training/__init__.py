@@ -23,6 +23,7 @@ __all__ = [
     "QuantizationSpec",
     "add_qspec_args",
     "convert",
+    "derive_bias_qparams_fn",
     "dispatch_model",
     "dtype_byte_size",
     "get_aten_graph_module",
