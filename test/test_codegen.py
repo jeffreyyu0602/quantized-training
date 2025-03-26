@@ -278,7 +278,7 @@ if __name__ == "__main__":
                 self.classifier = model.classifier
 
             def forward(self, *args, **kwargs):
-                hidden_states = self.mobilebert.encoder(*args, **kwargs)[0]
+                hidden_states = self.mobilebert.encoder(*args, **kwargs, return_dict=False)[0]
                 first_token_tensor = hidden_states[:, 0]
                 output = self.classifier(first_token_tensor)
                 return output
@@ -318,7 +318,9 @@ if __name__ == "__main__":
                 input_ids=batch["input_ids"],
                 token_type_ids=batch["token_type_ids"]
             )
-            extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
+            extended_attention_mask = model.mobilebert.get_extended_attention_mask(
+                batch["attention_mask"], input_shape
+            )
             gm(embedding_output, extended_attention_mask, head_mask)
 
             if step == 9:
@@ -402,7 +404,7 @@ if __name__ == "__main__":
                 self.classifier = model.classifier
 
             def forward(self, *args, **kwargs):
-                hidden_states = self.bert.encoder(*args, **kwargs)[0]
+                hidden_states = self.bert.encoder(*args, **kwargs, return_dict=False)[0]
                 first_token_tensor = hidden_states[:, 0]
                 output = self.classifier(first_token_tensor)
                 return output
