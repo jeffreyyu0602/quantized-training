@@ -29,7 +29,6 @@ from quantized_training import (
     derive_bias_qparams_fn
 )
 from quantized_training.codegen.utils import (
-    eliminate_dtype_conversion,
     get_conv_bn_layers,
     pad_vit_embeddings_output,
     replace_interpolate,
@@ -101,6 +100,12 @@ if __name__ == "__main__":
         "--use_mixed_qscheme",
         action="store_true",
         help="Quantize attention matrix multiplication using per-tensor symmetric quantization"
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=512,
+        help="Context length for the LLM decoding."
     )
     add_qspec_args(parser)
     args = parser.parse_args()
@@ -241,53 +246,13 @@ if __name__ == "__main__":
     elif args.model == "mobilebert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "google/mobilebert-uncased"
-        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
-        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
-        input_shape = input_ids.size()
-        attention_mask = torch.ones(input_shape)
-        token_type_ids = torch.zeros(input_shape, dtype=torch.long)
-        position_ids = torch.ones((1, 128), dtype=torch.long)
-        head_mask = None
+        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
 
         if args.bf16:
             model.bfloat16()
 
-        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-        # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = model.mobilebert.get_extended_attention_mask(attention_mask, input_shape)
-
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = model.mobilebert.get_head_mask(head_mask, model.config.num_hidden_layers)
-
-        embedding_output = model.mobilebert.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            token_type_ids=token_type_ids,
-        )
-        example_args = (embedding_output, extended_attention_mask, head_mask)
-
-        class MobileBertNoEmbed(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.mobilebert = model.mobilebert
-                self.classifier = model.classifier
-
-            def forward(self, *args, **kwargs):
-                hidden_states = self.mobilebert.encoder(*args, **kwargs, return_dict=False)[0]
-                first_token_tensor = hidden_states[:, 0]
-                output = self.classifier(first_token_tensor)
-                return output
-
-        quantizer.set_module_name("classifier", None)
-
-        gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
-
-        # calibration
+        # Setup SST-2 dataset
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
         raw_datasets = load_dataset("glue", args.task_name)
 
@@ -310,8 +275,35 @@ if __name__ == "__main__":
         )
 
         train_dataset = processed_datasets["train"]
-
         train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
+
+        batch = next(iter(train_dataloader))
+        embedding_output = model.mobilebert.embeddings(
+            input_ids=batch["input_ids"],
+            token_type_ids=batch["token_type_ids"]
+        )
+        extended_attention_mask = model.mobilebert.get_extended_attention_mask(
+            batch["attention_mask"], batch["input_ids"].size()
+        )
+        head_mask = model.mobilebert.get_head_mask(None, model.config.num_hidden_layers)
+
+        example_args = (embedding_output, extended_attention_mask, head_mask)
+
+        class MobileBertNoEmbed(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mobilebert = model.mobilebert
+                self.classifier = model.classifier
+
+            def forward(self, *args, **kwargs):
+                hidden_states = self.mobilebert.encoder(*args, **kwargs, return_dict=False)[0]
+                first_token_tensor = hidden_states[:, 0]
+                output = self.classifier(first_token_tensor)
+                return output
+
+        quantizer.set_module_name("classifier", None)
+
+        gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
 
         for step, batch in enumerate(tqdm(train_dataloader)):
             embedding_output = model.mobilebert.embeddings(
@@ -319,7 +311,7 @@ if __name__ == "__main__":
                 token_type_ids=batch["token_type_ids"]
             )
             extended_attention_mask = model.mobilebert.get_extended_attention_mask(
-                batch["attention_mask"], input_shape
+                batch["attention_mask"], batch["input_ids"].size()
             )
             gm(embedding_output, extended_attention_mask, head_mask)
 
@@ -423,7 +415,7 @@ if __name__ == "__main__":
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
-    elif args.model == "llama":
+    elif args.model == "llm_prefill" or args.model == "llm_decode":
         from transformers import AutoModelForCausalLM
 
         if args.model_name_or_path is None:
@@ -433,6 +425,7 @@ if __name__ == "__main__":
             args.model_name_or_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="eager", # turn off flash attention
+            device_map="auto",
         )
 
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -440,7 +433,47 @@ if __name__ == "__main__":
         test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
 
-        input_ids = encodings.input_ids[:,:128]
+        if args.model == "llm_decode":
+            model_inputs = tokenizer(["A list of colors: red, blue"], return_tensors="pt").to("cuda")
+            # print(model_inputs)
+            input_ids = model_inputs["input_ids"]
+            # input_ids = encodings.input_ids[:,:args.context_length].to("cuda")
+
+            # First forward pass to get initial logits and past_key_values
+            with torch.no_grad():
+                outputs = model(input_ids)
+                logits = outputs.logits
+                past_key_values = outputs.past_key_values
+
+            # Get the last token logits and sample/argmax next token
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+
+            # Collect generated tokens
+            generated_tokens = [next_token]
+
+            # Generate up to N new tokens
+            num_new_tokens = 50
+            for _ in range(num_new_tokens):
+                with torch.no_grad():
+                    outputs = model(input_ids=next_token, past_key_values=past_key_values)
+                    logits = outputs.logits
+                    past_key_values = outputs.past_key_values  # update cache
+
+                next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                generated_tokens.append(next_token)
+
+            # Concatenate generated tokens
+            generated_sequence = torch.cat([input_ids] + generated_tokens, dim=1)
+            decoded_output = tokenizer.decode(generated_sequence[0], skip_special_tokens=True)
+            print("Generated sequence:\n" + decoded_output)
+
+            generated_ids = model.generate(input_ids, do_sample=False, max_new_tokens=51)
+            outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            print("model.generate output:\n" + outputs)
+            exit(0)
+
+        input_ids = encodings.input_ids[:,:512]
+
         inputs_embeds = model.model.embed_tokens(input_ids)
         cache_position = torch.arange(0, inputs_embeds.shape[1])
         position_ids = cache_position.unsqueeze(0)
@@ -452,6 +485,7 @@ if __name__ == "__main__":
         position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
 
         example_args = (inputs_embeds, causal_mask, position_embeddings)
+        example_kwargs = {'use_cache': False}
 
         class LlamaWrapper(torch.nn.Module):
             def __init__(self):
@@ -470,17 +504,18 @@ if __name__ == "__main__":
                 logits = self.lm_head(hidden_states)
                 return logits
 
-        gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args)
+        gm = prepare_pt2e(model, quantizer, example_args, example_kwargs)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
 
-        eliminate_dtype_conversion(gm)
-
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(
+            gm, example_args, example_kwargs=example_kwargs, patterns=vector_stages
+        )
+
         compile(gm, example_args, **compile_args)
     elif args.model == "llama_decoder":
         from transformers import AutoModelForCausalLM
@@ -552,11 +587,6 @@ if __name__ == "__main__":
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
-    elif args.model == "llama_decode":
-        model_id = "meta-llama/Meta-Llama-3-8B"
-
-        pipeline = transformers.pipeline("text-generation", model=model_id, model_kwargs={"torch_dtype": torch.bfloat16}, device_map="auto")
-        pipeline("Hey how are you doing today?")
     elif args.model == "vit":
         from transformers import ViTForImageClassification
 
