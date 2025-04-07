@@ -19,7 +19,6 @@ __all__ = [
     "convert_cat_and_stack_as_stack_on_dim0",
     "convert_cat_with_mismatched_shapes_to_stack",
     "convert_expand_to_memory_copy",
-    "eliminate_dtype_conversion",
     "get_conv_bn_layers",
     "pad_matmul_inputs_for_unroll_alignment",
     "pad_vit_embeddings_output",
@@ -468,24 +467,6 @@ def replace_quantize_mx_with_reduce(model: torch.fx.GraphModule):
 
     graph.lint()
     graph.eliminate_dead_code()
-    model.recompile()
-    return model
-
-
-def eliminate_dtype_conversion(model: torch.fx.GraphModule):
-    for node in list(model.graph.nodes):
-        # Eliminate dtype conversion nodes.
-        if node.target == torch.ops.aten.to.dtype:
-            node.replace_all_uses_with(node.args[0])
-            model.graph.erase_node(node)
-            continue
-
-        # Remove the dtype argument from softmax nodes.
-        if node.target == torch.ops.aten.softmax.int and len(node.args) > 2:
-            node.args = node.args[:-1]
-
-    model.graph.lint()
-    model.graph.eliminate_dead_code()
     model.recompile()
     return model
 

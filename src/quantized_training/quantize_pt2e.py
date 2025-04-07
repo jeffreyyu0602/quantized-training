@@ -7,7 +7,6 @@ from typing import Dict, Tuple, Any, Optional, Callable, List
 
 import torch
 from torch import Tensor
-from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
 from torch.ao.quantization.quantizer import (
@@ -237,15 +236,21 @@ def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
     from torch.ao.quantization.pt2e import prepare
     from torch.ao.quantization.quantize_pt2e import prepare_pt2e
 
-    # HACK replace the default implementation of _create_obs_or_fq_from_qspec
+    from transformers.utils.import_utils import is_torch_greater_or_equal
+
+    # replace the default implementation of _create_obs_or_fq_from_qspec
     prepare._get_obs_or_fq_map = _get_obs_or_fq_map
 
-    model = capture_pre_autograd_graph(
-        model,
-        args=args,
-        kwargs=kwargs,
-        dynamic_shapes=dynamic_shapes,
-    )
+    if is_torch_greater_or_equal("2.5"):
+        from torch.export import export_for_training
+
+        model = export_for_training(model, args, kwargs, dynamic_shapes=dynamic_shapes).module()
+    else:
+        from torch._export import capture_pre_autograd_graph
+
+        model = capture_pre_autograd_graph(
+            model, args, kwargs, dynamic_shapes=dynamic_shapes
+        )
 
     model = prepare_pt2e(model, quantizer)
     return model
@@ -599,9 +604,10 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             user_device = user.args[1]
 
             with graph.inserting_before(user):
-                kwarg1 = graph.call_function(
-                    torch.Tensor.to, (code_node, user_device)
-                )
+                if kwarg1 is not None:
+                    kwarg1 = graph.call_function(
+                        torch.Tensor.to, (code_node, user_device)
+                    )
 
                 kwarg2 = graph.call_function(
                     torch.Tensor.to, (scale_node, user_device)

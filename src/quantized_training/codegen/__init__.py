@@ -11,7 +11,6 @@ __all__ = [
     "convert_cat_with_mismatched_shapes_to_stack",
     "convert_expand_to_memory_copy",
     "convert_cat_and_stack_as_stack_on_dim0",
-    "eliminate_dtype_conversion",
     "fuse_operator",
     "gen_code",
     "gen_compute_graph",

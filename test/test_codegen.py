@@ -2,7 +2,6 @@ import argparse
 import logging
 
 import torch
-import transformers
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
@@ -11,6 +10,7 @@ from transformers import (
     AutoModelForSemanticSegmentation,
     AutoImageProcessor,
     AutoTokenizer,
+    StaticCache,
     default_data_collator,
 )
 from tqdm import tqdm
@@ -97,15 +97,15 @@ if __name__ == "__main__":
         help="Output directory for generated tensor files"
     )
     parser.add_argument(
-        "--use_mixed_qscheme",
-        action="store_true",
-        help="Quantize attention matrix multiplication using per-tensor symmetric quantization"
-    )
-    parser.add_argument(
         "--context_length",
         type=int,
         default=512,
         help="Context length for the LLM decoding."
+    )
+    parser.add_argument(
+        "--remove_duplicate",
+        action="store_true",
+        help="Only compiler for a single encoder/decoder layer in Transformer models."
     )
     add_qspec_args(parser)
     args = parser.parse_args()
@@ -117,24 +117,6 @@ if __name__ == "__main__":
         bias=args.bias,
         force_scale_power_of_two=args.force_scale_power_of_two,
     )
-
-    if args.use_mixed_qscheme:
-        qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-        qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-
-        qconfig = QuantizationConfig(qspec, None, qspec, None)
-        quantizer.set_object_type(torch.ops.aten.matmul.default, qconfig)
-
-        from quantized_training.quantize_pt2e import derive_bias_qparams_fn
-
-        bias_qspec = DerivedQuantizationSpec(
-            derived_from=None,
-            derive_qparams_fn=derive_bias_qparams_fn,
-            dtype=None,
-        )
-
-        qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
-        quantizer.set_module_name("conv1", qconfig)
 
     torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
@@ -247,7 +229,10 @@ if __name__ == "__main__":
         if args.model_name_or_path is None:
             args.model_name_or_path = "google/mobilebert-uncased"
 
-        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
+        model = AutoModelForSequenceClassification.from_pretrained(
+            args.model_name_or_path,
+            attn_implementation="eager",
+        ).eval()
 
         if args.bf16:
             model.bfloat16()
@@ -278,91 +263,64 @@ if __name__ == "__main__":
         train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
 
         batch = next(iter(train_dataloader))
+        input_ids = batch["input_ids"]
+        input_shape = input_ids.size()
+
         embedding_output = model.mobilebert.embeddings(
-            input_ids=batch["input_ids"],
+            input_ids=input_ids,
             token_type_ids=batch["token_type_ids"]
         )
-        extended_attention_mask = model.mobilebert.get_extended_attention_mask(
-            batch["attention_mask"], batch["input_ids"].size()
-        )
+
+        extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
+
         head_mask = model.mobilebert.get_head_mask(None, model.config.num_hidden_layers)
 
         example_args = (embedding_output, extended_attention_mask, head_mask)
 
-        class MobileBertNoEmbed(torch.nn.Module):
+        class MobileBertWrapper(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.mobilebert = model.mobilebert
                 self.classifier = model.classifier
 
-            def forward(self, *args, **kwargs):
-                hidden_states = self.mobilebert.encoder(*args, **kwargs, return_dict=False)[0]
+            def forward(self, hidden_states, attention_mask, head_mask):
+                for i, layer_module in enumerate(self.mobilebert.encoder.layer):
+                    layer_outputs = layer_module(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        head_mask=head_mask[i],
+                    )
+                    hidden_states = layer_outputs[0]
+
+                    if args.remove_duplicate:
+                        break
+
                 first_token_tensor = hidden_states[:, 0]
                 output = self.classifier(first_token_tensor)
                 return output
 
         quantizer.set_module_name("classifier", None)
 
-        gm = prepare_pt2e(MobileBertNoEmbed(), quantizer, example_args)
+        gm = prepare_pt2e(MobileBertWrapper(), quantizer, example_args)
 
         for step, batch in enumerate(tqdm(train_dataloader)):
             embedding_output = model.mobilebert.embeddings(
                 input_ids=batch["input_ids"],
                 token_type_ids=batch["token_type_ids"]
             )
-            extended_attention_mask = model.mobilebert.get_extended_attention_mask(
-                batch["attention_mask"], batch["input_ids"].size()
-            )
             gm(embedding_output, extended_attention_mask, head_mask)
 
-            if step == 9:
+            if step == args.calibration_steps:
                 break
 
         convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
-    elif args.model == "mobilebert_encoder":
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "google/mobilebert-uncased"
-        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path).eval()
-
-        if args.bf16:
-            model.bfloat16()
-
-        example_args = (
-            torch.randn(1, 128, 512, dtype=torch_dtype),
-            torch.ones(1, 128, 128, dtype=torch_dtype),
-            None,
-        )
-
-        class MobileBertEncoder(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-
-            def forward(self, *args, **kwargs):
-                output = model.mobilebert.encoder.layer[0](*args, **kwargs)
-                return output[0][0]
-
-        gm = prepare_pt2e(MobileBertEncoder(), quantizer, example_args)
-
-        for i in range(3):
-            gm(*example_args)
-
-        for name, module in gm.named_modules():
-            if hasattr(module, "scale"):
-                print(module.scale)
-
-        convert_pt2e(gm, args.bias)
-
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
-        compile(gm, example_args, **compile_args)
-
-        orig_output = orig_output[0]
-        new_output = new_output[0]
     elif args.model == "bert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "bert-base-uncased"
+
         model = AutoModelForSequenceClassification.from_pretrained(
             args.model_name_or_path,
             attn_implementation="eager",
@@ -373,10 +331,18 @@ if __name__ == "__main__":
 
         input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
         input_shape = input_ids.size()
-        attention_mask = torch.ones(input_shape)
+
         token_type_ids = torch.zeros(input_shape, dtype=torch.long)
-        position_ids = torch.ones((1, 128), dtype=torch.long)
+        position_ids = torch.ones(input_shape, dtype=torch.long)
         head_mask = None
+
+        embedding_output = model.bert.embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+        )
+
+        attention_mask = torch.ones(input_shape)
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
@@ -389,28 +355,33 @@ if __name__ == "__main__":
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = model.bert.get_head_mask(head_mask, model.config.num_hidden_layers)
 
-        class BertNoEmbed(torch.nn.Module):
+        class BertWrapper(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.bert = model.bert
                 self.classifier = model.classifier
 
-            def forward(self, *args, **kwargs):
-                hidden_states = self.bert.encoder(*args, **kwargs, return_dict=False)[0]
+            def forward(self, hidden_states, attention_mask, head_mask):
+                for i, layer_module in enumerate(self.bert.encoder.layer):
+                    layer_outputs = layer_module(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        head_mask=head_mask[i],
+                    )
+                    hidden_states = layer_outputs[0]
+
+                    if args.remove_duplicate:
+                        break
+
                 first_token_tensor = hidden_states[:, 0]
                 output = self.classifier(first_token_tensor)
                 return output
 
-        embedding_output = model.bert.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            token_type_ids=token_type_ids,
-        )
         example_args = (embedding_output, extended_attention_mask, head_mask)
 
         quantizer.set_module_name("classifier", None)
 
-        gm = prepare_pt2e(BertNoEmbed(), quantizer, example_args)
+        gm = prepare_pt2e(BertWrapper(), quantizer, example_args)
         convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
@@ -425,7 +396,6 @@ if __name__ == "__main__":
             args.model_name_or_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="eager", # turn off flash attention
-            device_map="auto",
         )
 
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -433,59 +403,46 @@ if __name__ == "__main__":
         test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
 
+        input_ids = encodings.input_ids[:,:args.context_length]
+
+        past_key_values = None
+
         if args.model == "llm_decode":
-            model_inputs = tokenizer(["A list of colors: red, blue"], return_tensors="pt").to("cuda")
-            # print(model_inputs)
-            input_ids = model_inputs["input_ids"]
-            # input_ids = encodings.input_ids[:,:args.context_length].to("cuda")
+            max_generated_length = input_ids.shape[1] + 64
+            past_key_values = StaticCache(
+                config=model.config,
+                max_batch_size=1,
+                max_cache_len=max_generated_length,
+                device=model.device,
+                dtype=model.dtype
+            )
 
-            # First forward pass to get initial logits and past_key_values
             with torch.no_grad():
-                outputs = model(input_ids)
-                logits = outputs.logits
-                past_key_values = outputs.past_key_values
+                outputs = model(input_ids, past_key_values=past_key_values, use_cache=True)
 
-            # Get the last token logits and sample/argmax next token
-            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-
-            # Collect generated tokens
-            generated_tokens = [next_token]
-
-            # Generate up to N new tokens
-            num_new_tokens = 50
-            for _ in range(num_new_tokens):
-                with torch.no_grad():
-                    outputs = model(input_ids=next_token, past_key_values=past_key_values)
-                    logits = outputs.logits
-                    past_key_values = outputs.past_key_values  # update cache
-
-                next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                generated_tokens.append(next_token)
-
-            # Concatenate generated tokens
-            generated_sequence = torch.cat([input_ids] + generated_tokens, dim=1)
-            decoded_output = tokenizer.decode(generated_sequence[0], skip_special_tokens=True)
-            print("Generated sequence:\n" + decoded_output)
-
-            generated_ids = model.generate(input_ids, do_sample=False, max_new_tokens=51)
-            outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            print("model.generate output:\n" + outputs)
-            exit(0)
-
-        input_ids = encodings.input_ids[:,:512]
+            input_ids = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
+            past_key_values = outputs.past_key_values
 
         inputs_embeds = model.model.embed_tokens(input_ids)
-        cache_position = torch.arange(0, inputs_embeds.shape[1])
-        position_ids = cache_position.unsqueeze(0)
-        causal_mask = model.model._update_causal_mask(
-            None, inputs_embeds, cache_position, None, None
+
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
         )
+
+        position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = model.model._update_causal_mask(
+            None, inputs_embeds, cache_position, past_key_values, None
+        )
+
+        hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
 
-        example_args = (inputs_embeds, causal_mask, position_embeddings)
-        example_kwargs = {'use_cache': False}
+        example_args = (inputs_embeds, causal_mask, position_embeddings, cache_position)
+        example_kwargs = {}
 
         class LlamaWrapper(torch.nn.Module):
             def __init__(self):
@@ -493,18 +450,37 @@ if __name__ == "__main__":
                 self.model = model.model
                 self.lm_head = model.lm_head
 
-            def forward(self, hidden_states, causal_mask, position_embeddings):
+                self.static_cache = past_key_values
+
+                if self.static_cache is not None:
+                    for i in range(len(self.static_cache.key_cache)):
+                        self.register_buffer(f"key_cache_{i}", self.static_cache.key_cache[i], persistent=False)
+                        self.register_buffer(f"value_cache_{i}", self.static_cache.value_cache[i], persistent=False)
+
+            def forward(
+                self,
+                hidden_states,
+                attention_mask,
+                position_embeddings,
+                cache_position=None,
+            ):
                 for decoder_layer in self.model.layers:
                     layer_outputs = decoder_layer(
                         hidden_states,
-                        attention_mask=causal_mask,
+                        attention_mask=attention_mask,
                         position_embeddings=position_embeddings,
+                        past_key_value=self.static_cache,
+                        cache_position=cache_position,
                     )
                     hidden_states = layer_outputs[0]
+
+                    if args.remove_duplicate:
+                        break
+
                 logits = self.lm_head(hidden_states)
                 return logits
 
-        gm = prepare_pt2e(model, quantizer, example_args, example_kwargs)
+        gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
@@ -516,76 +492,6 @@ if __name__ == "__main__":
             gm, example_args, example_kwargs=example_kwargs, patterns=vector_stages
         )
 
-        compile(gm, example_args, **compile_args)
-    elif args.model == "llama_decoder":
-        from transformers import AutoModelForCausalLM
-
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "meta-llama/Llama-3.2-1B"
-
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="eager", # turn off flash attention
-        )
-
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-
-        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
-
-        input_ids = encodings.input_ids[:,:128]
-        inputs_embeds = model.model.embed_tokens(input_ids)
-        cache_position = torch.arange(0, inputs_embeds.shape[1])
-        position_ids = cache_position.unsqueeze(0)
-        causal_mask = model.model._update_causal_mask(
-            None, inputs_embeds, cache_position, None, None
-        )
-
-        # no matter the length, we just slice it
-        causal_mask = causal_mask[:, :, :, : input_ids.shape[-1]]
-
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
-
-        class LLamaDecoder(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.model = model.model
-
-            def forward(self, hidden_states, causal_mask, position_embeddings):
-                layer_outputs = self.model.layers[0](
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_embeddings=position_embeddings,
-                )
-                return layer_outputs[0]
-
-        example_args = (inputs_embeds, causal_mask, position_embeddings)
-        model = LLamaDecoder()
-
-        gm = prepare_pt2e(model, quantizer, example_args)
-
-        # Calibrate using random inputs
-        for i in range(3):
-            calib_input = (inputs_embeds.clone(), causal_mask, position_embeddings)
-            gm(*calib_input)
-
-        hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
-        example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
-        replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
-
-        eliminate_dtype_conversion(gm)
-
-        convert_pt2e(gm, args.bias)
-
-        # Generate float32 model
-        if not args.bf16:
-            gm.float()
-            position_embeddings = tuple(t.float() for t in position_embeddings)
-            example_args = (inputs_embeds.float(), causal_mask.float(), position_embeddings)
-
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
         compile(gm, example_args, **compile_args)
     elif args.model == "vit":
         from transformers import ViTForImageClassification

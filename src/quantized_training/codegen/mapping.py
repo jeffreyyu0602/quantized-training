@@ -817,6 +817,8 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
     manager.take_snapshot()
 
+    eliminate_dead_code(model.graph)
+
     # Run through reverse nodes and record the first instance of a use
     # of a given node. This represents the *last* use of the node in the
     # execution order of the program, which we will use to free unused
@@ -896,7 +898,13 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
-        next_node = next(iter(node.users))
+        try:
+            next_node = next(iter(node.users))
+        except StopIteration:
+            model.graph.print_tabular()
+            print(f"Node {node} has no users")
+            raise
+
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             first_node = next_node.args[0][0]
             tensor_sizes = [n.value.numel() * get_num_bytes(n) for n in next_node.args[0]]

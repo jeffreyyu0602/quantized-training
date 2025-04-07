@@ -248,16 +248,9 @@ def get_node_name_to_scope(model: GraphModule) -> Dict[str, Tuple[str, type, int
             node_name_to_scope[n.name] = [("", type(None))]
             continue
 
-        def _normalize_path(n):
-            prefix = 0
-            # TODO This is non standard behavior and should be removed when we migrate off capture_pre_autograd_graph.
-            if n.startswith("L['self']."):
-                prefix = len("L['self'].")
-            return n[prefix:]
-
         current_scope = []
         for bt in nn_module_stack.values():
-            module_path = _normalize_path(bt[0])
+            module_path = bt[0]
             cur_object_type_idx = \
                 submodule_to_object_type_to_cur_idx[module_path][n.target]
             submodule_to_object_type_to_cur_idx[module_path][n.target] += 1

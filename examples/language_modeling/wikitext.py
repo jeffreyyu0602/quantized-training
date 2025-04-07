@@ -42,7 +42,7 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
-    parser.add_argument('--mp', action='store_true', help='Use mixed precision')
+    parser.add_argument('--qscheme', default=None, help='Quantization scheme for the model')
     parser.add_argument('--reserved_memory', type=int, default=8, help='GPU memory reserved for storing activations')
     add_qspec_args(parser)
     return parser.parse_args()
@@ -72,35 +72,22 @@ def main(args):
         force_scale_power_of_two=args.force_scale_power_of_two,
     )
 
-    # gm = get_aten_graph_module(model, example_args, example_kwargs, dynamic_shapes)
-    # gm.graph.print_tabular()
-    # print_node_scope_tabular(gm)
+    quantizer.set_module_name_object_type_order(
+        r"model.rotary_emb", torch.ops.aten.matmul.default, 0, None
+    )
 
-    quantizer.set_module_name_object_type_order("model.rotary_emb", torch.ops.aten.matmul.default, 0, None)
-
-    # Quantize query and attention probs to INT6 with no outlier thresholding
-    if args.activation is not None and args.mp:
-        matmul_qconfig = quantizer.object_type_config[torch.ops.aten.matmul.default]
-        print(matmul_qconfig)
-
-        matmul_qconfig.input_activation.dtype = "int6"
-        matmul_qconfig.input_activation.quant_max = 31
-        matmul_qconfig.input_activation.outlier_threshold = None
-
-        # matmul_qconfig.weight.dtype = "int6"
-        # matmul_qconfig.weight.quant_max = 31
-        # matmul_qconfig.weight.outlier_threshold = None
-
-        print("Updated matmul_qconfig:")
-        print(matmul_qconfig)
-
-        quantizer.set_object_type(torch.ops.aten.matmul.default, matmul_qconfig)
+    from prepare_model import set_qscheme
+    set_qscheme(quantizer, args.qscheme)
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     example_args = (input_ids,)
     example_kwargs = {"labels": input_ids.clone(), 'use_cache': False}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}, "use_cache": None}
+
+    gm = get_aten_graph_module(model, example_args, example_kwargs, dynamic_shapes)
+    gm.graph.print_tabular()
+    print_node_scope_tabular(gm)
 
     # New LLaMA implementation includes @torch.no_grad() statement, which will turn
     # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().

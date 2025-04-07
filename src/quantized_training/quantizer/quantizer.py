@@ -9,6 +9,8 @@ from torch.ao.quantization.qconfig import _ObserverOrFakeQuantizeConstructor
 from torch.ao.quantization.quantizer.quantizer import QuantizationSpecBase
 from torch.fx import Node
 
+from quantized_training.fake_quantize import FusedAmaxObsFakeQuantize
+
 __all__ = [
     "QuantizationSpec",
 ]
@@ -72,7 +74,7 @@ class QuantizationSpec(QuantizationSpecBase):
     """
 
     dtype: str
-    observer_or_fake_quant_ctr: Optional[_ObserverOrFakeQuantizeConstructor] = None
+    observer_or_fake_quant_ctr: _ObserverOrFakeQuantizeConstructor = FusedAmaxObsFakeQuantize
     quant_max: Optional[float] = None
     qscheme: Optional[QScheme] = None
     amax_history_len: Optional[int] = None

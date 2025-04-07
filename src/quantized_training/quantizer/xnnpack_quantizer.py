@@ -31,6 +31,7 @@ def _get_module_name_filter(module_name: str):
     >> print(module_name_filter(node))
     True  # the node is from "blocks.sub" based on the fully qualified name "blocks.sub.linear1"
     """
+    import re
 
     def module_name_filter(n: Node) -> bool:
         # example: {
@@ -48,7 +49,7 @@ def _get_module_name_filter(module_name: str):
             return n[prefix:]
 
         names = [_normalize_path(n) for n, _ in nn_module_stack.values()]
-        return module_name in names
+        return module_name in names or any(re.search(module_name, name) for name in names)
 
     return module_name_filter
 
@@ -123,13 +124,14 @@ def _get_module_name_object_type_order_filter(
     >>     model, "mobilebert.encoder.layer[0].attention.self", torch.ops.aten.linear.default, 0)
     >> print(module_name_object_type_order_filter(node))
     """
+    import re
     from ..pt2e_utils import get_node_name_to_scope
     node_name_to_scope = get_node_name_to_scope(model)
 
     def module_name_object_type_order_filter(n: Node) -> bool:
         current_scope = node_name_to_scope[n.name]
         return (
-            module_name == current_scope[0] and
+            (module_name == current_scope[0] or re.search(current_scope[0], module_name)) and
             object_type == n.target and
             index == current_scope[2]
         )
