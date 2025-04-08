@@ -4,9 +4,15 @@ from quantized_training import QuantizationSpec, QuantizationConfig
 
 QUANTIZATION_CONFIG = {
     "q_4_4_6": {
-        r"self_attn\.[qkvo]_proj$": "nf4,qs=microscaling,bs=64,ax=-1",
-        r"mlp.(?:gate|up|down)_proj$": ["nf4,qs=microscaling,bs=64,ax=-1", "nf4,qs=microscaling,bs=64,ax=-1"],
-        torch.ops.aten.matmul.default: ["int6,qs=microscaling,bs=64,ax=-1", "int6,qs=microscaling,bs=64,ax=-2"],
+        r"self_attn\.[qkvo]_proj$": "nf4,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        r"mlp.(?:gate|up|down)_proj$": [
+            "nf4,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3"
+        ],
+        torch.ops.aten.matmul.default: [
+            "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3"
+        ],
     },
     "q_1": {
         r"self_attn\.[qkvo]_proj$": "nf4,qs=microscaling,bs=64,ax=-1",

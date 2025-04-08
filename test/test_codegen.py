@@ -1,5 +1,7 @@
 import argparse
 import logging
+import os
+import sys
 
 import torch
 from datasets import load_dataset
@@ -34,6 +36,12 @@ from quantized_training.codegen.utils import (
     replace_interpolate,
     replace_rmsnorm_with_layer_norm,
 )
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+target_path = os.path.join(script_dir, '../examples/language_modeling')
+sys.path.append(os.path.abspath(target_path))
+
+from prepare_model import set_qscheme
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +114,11 @@ if __name__ == "__main__":
         "--remove_duplicate",
         action="store_true",
         help="Only compiler for a single encoder/decoder layer in Transformer models."
+    )
+    parser.add_argument(
+        "--qscheme",
+        default=None,
+        help="Quantization scheme to use for LLMs."
     )
     add_qspec_args(parser)
     args = parser.parse_args()
@@ -479,6 +492,8 @@ if __name__ == "__main__":
 
                 logits = self.lm_head(hidden_states)
                 return logits
+
+        set_qscheme(quantizer, args.qscheme)
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 
