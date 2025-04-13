@@ -15,7 +15,7 @@ __all__ = [
     "gen_code",
     "gen_compute_graph",
     "get_conv_bn_layers",
-    "pad_matmul_inputs_for_unroll_alignment",
+    "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_target_with_vmap",
     "replace_interpolate",

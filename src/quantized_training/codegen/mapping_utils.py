@@ -355,6 +355,7 @@ def _is_nop(node: Node) -> bool:
         torch.ops.aten.reshape.default,
         torch.ops.aten.squeeze.dim,
         torch.ops.aten.squeeze.dims,
+        torch.ops.aten.to.dtype,
         torch.ops.aten.unsqueeze.default,
         torch.ops.aten.view.default,
     ]

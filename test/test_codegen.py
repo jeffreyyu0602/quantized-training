@@ -35,6 +35,7 @@ from quantized_training.codegen.utils import (
     pad_vit_embeddings_output,
     replace_interpolate,
     replace_rmsnorm_with_layer_norm,
+    strip_softmax_dtype,
 )
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -496,6 +497,8 @@ if __name__ == "__main__":
         set_qscheme(quantizer, args.qscheme)
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
+
+        strip_softmax_dtype(gm)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
