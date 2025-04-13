@@ -560,7 +560,7 @@ def fuse_reshape_with_input(
         and not _is_nop(current_node)
         and not is_select_after_tranpose
     ):
-        logger.warning(f"Cannot fuse {reshape_node} with {current_node}")
+        logger.info(f"Cannot fuse {reshape_node} with {current_node}")
         return []
 
     # If there's a branching point, perform fusion on each branch
@@ -633,6 +633,13 @@ def fuse_op_with_input(
     fused_nodes.append(current_node)
 
     if id(current_node) != id(node_to_fuse) and _is_elementwise_op(current_node):
+        # Only address generator 0 support slicing op
+        if node_to_fuse.target == torch.ops.aten.slice.Tensor:
+            group = search_group(current_node, candidates)
+            if group is not None and current_node.prev in group:
+                logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
+                return
+
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
         if (group := search_group(current_node, candidates)) is not None:
             group.extend(n for n in fused_nodes if n not in group)
@@ -642,7 +649,7 @@ def fuse_op_with_input(
         return
 
     if id(current_node) != id(node_to_fuse) and not _is_nop(current_node):
-        logger.warning(f"Cannot fuse {node_to_fuse} with {current_node}")
+        logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
         return
 
     for user in list(current_node.users):
@@ -682,7 +689,7 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
             while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
                 if not _is_nop(input_node):
-                    logger.warning(f"Cannot fuse {reshape_node} with {input_node}")
+                    logger.info(f"Cannot fuse {reshape_node} with {input_node}")
                     match_found = False
                     break
 

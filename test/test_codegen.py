@@ -449,6 +449,7 @@ if __name__ == "__main__":
         causal_mask = model.model._update_causal_mask(
             None, inputs_embeds, cache_position, past_key_values, None
         )
+        causal_mask = causal_mask[:, :, :, : args.context_length]
 
         hidden_states = inputs_embeds
 
