@@ -175,10 +175,10 @@ def _annotate_conv(
             input_qspec_map[bias] = bias_qspec
             partition.append(bias)
 
-        if _is_annotated(partition):
+        if _is_annotated([n]):
             continue
 
-        if filter_fn and any(not filter_fn(n) for n in partition):
+        if filter_fn and not filter_fn(n):
             continue
 
         conv_node.meta["quantization_annotation"] = QuantizationAnnotation(
@@ -236,17 +236,20 @@ def _annotate_residual(
     filter_fn: Optional[Callable[[Node], bool]] = None,
 ) -> Optional[List[List[Node]]]:
     node_order = {node: i for i, node in enumerate(gm.graph.nodes)}
-    add_partitions = get_source_partitions(
-        gm.graph, [operator.add, torch.add, operator.iadd]
-    )
-    add_partitions = list(itertools.chain.from_iterable(add_partitions.values()))
     annotated_partitions = []
-    for add_partition in add_partitions:
-        annotated_partitions.append(add_partition.nodes)
-        add_node = add_partition.output_nodes[0]
-        if filter_fn and not filter_fn(add_node):
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or node.target not in [
+            torch.ops.aten.add.Tensor,
+            torch.ops.aten.add_.Tensor,
+        ]:
             continue
-        if _is_annotated([add_node]):
+        add_node = node
+        partition = [add_node]
+
+        if _is_annotated(partition):
+            continue
+
+        if filter_fn and any(not filter_fn(n) for n in partition):
             continue
 
         input_act_qspec = quantization_config.input_activation
@@ -272,6 +275,7 @@ def _annotate_residual(
             output_qspec=output_act_qspec,
             _annotated=True,
         )
+        annotated_partitions.append(partition)
     return annotated_partitions
 
 
@@ -281,15 +285,20 @@ def _annotate_add(
     quantization_config: Optional[QuantizationConfig],
     filter_fn: Optional[Callable[[Node], bool]] = None,
 ) -> Optional[List[List[Node]]]:
-    add_partitions = get_source_partitions(
-        gm.graph, [operator.add, torch.add, operator.iadd], filter_fn
-    )
-    add_partitions = list(itertools.chain.from_iterable(add_partitions.values()))
     annotated_partitions = []
-    for add_partition in add_partitions:
-        annotated_partitions.append(add_partition.nodes)
-        add_node = add_partition.output_nodes[0]
-        if _is_annotated([add_node]):
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or node.target not in [
+            torch.ops.aten.add.Tensor,
+            torch.ops.aten.add_.Tensor,
+        ]:
+            continue
+        add_node = node
+        partition = [add_node]
+
+        if _is_annotated(partition):
+            continue
+
+        if filter_fn and any(not filter_fn(n) for n in partition):
             continue
 
         input_act_qspec = quantization_config.input_activation
@@ -309,6 +318,7 @@ def _annotate_add(
             output_qspec=output_act_qspec,
             _annotated=True,
         )
+        annotated_partitions.append(partition)
     return annotated_partitions
 
 
@@ -318,15 +328,20 @@ def _annotate_mul(
     quantization_config: Optional[QuantizationConfig],
     filter_fn: Optional[Callable[[Node], bool]] = None,
 ) -> Optional[List[List[Node]]]:
-    mul_partitions = get_source_partitions(
-        gm.graph, ["mul", "mul_", operator.mul, torch.mul, operator.imul], filter_fn
-    )
-    mul_partitions = list(itertools.chain.from_iterable(mul_partitions.values()))
     annotated_partitions = []
-    for mul_partition in mul_partitions:
-        annotated_partitions.append(mul_partition.nodes)
-        mul_node = mul_partition.output_nodes[0]
-        if _is_annotated([mul_node]):
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or node.target not in [
+            torch.ops.aten.mul.Tensor,
+            torch.ops.aten.mul_.Tensor,
+        ]:
+            continue
+
+        mul_node = node
+        partition = [mul_node]
+        if _is_annotated(partition):
+            continue
+
+        if filter_fn and any(not filter_fn(n) for n in partition):
             continue
 
         input_act_qspec = quantization_config.input_activation
@@ -346,6 +361,7 @@ def _annotate_mul(
             output_qspec=output_act_qspec,
             _annotated=True,
         )
+        annotated_partitions.append(partition)
     return annotated_partitions
 
 

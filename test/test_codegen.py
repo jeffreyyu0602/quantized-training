@@ -164,11 +164,7 @@ if __name__ == "__main__":
         quantizer.set_module_name("fc", None)
 
         # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
-        if (
-            args.activation is not None
-            and "microscaling" in args.activation
-            and args.model in ["resnet18", "resnet50"]
-        ):
+        if args.activation is not None and "microscaling" in args.activation:
             qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
             qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
 
@@ -179,7 +175,7 @@ if __name__ == "__main__":
             )
 
             qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
-            quantizer.set_module_name("conv1", qconfig)
+            quantizer.set_module_name("^conv1$", qconfig)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
