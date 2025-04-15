@@ -83,6 +83,30 @@ vector_stages = [
 ]
 
 
+LLAMA_MP_QSCHEME = {
+    r"self_attn\.q_proj$": [
+        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+    ],
+    r"self_attn\.k_proj$": [
+        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+    ],
+    r"self_attn\.v_proj$": [
+        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+    ],
+    r"self_attn\.o_proj$": [
+        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+    ],
+    torch.ops.aten.matmul.default: [
+        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
+    ],
+}
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     torch.set_printoptions(precision=10)
@@ -117,8 +141,8 @@ if __name__ == "__main__":
         help="Only compiler for a single encoder/decoder layer in Transformer models."
     )
     parser.add_argument(
-        "--qscheme",
-        default=None,
+        "--mixed_precision",
+        action="store_true",
         help="Quantization scheme to use for LLMs."
     )
     add_qspec_args(parser)
@@ -491,7 +515,8 @@ if __name__ == "__main__":
                 logits = self.lm_head(hidden_states)
                 return logits
 
-        set_qscheme(quantizer, args.qscheme)
+        if args.mixed_precision:
+            set_qscheme(quantizer, LLAMA_MP_QSCHEME)
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 

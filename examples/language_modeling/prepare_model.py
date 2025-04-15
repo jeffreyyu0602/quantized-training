@@ -13,30 +13,11 @@ QUANTIZATION_CONFIG = {
             "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
             "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3"
         ],
-    },
-    "q_1": {
-        r"self_attn\.[qkvo]_proj$": "nf4_5,qs=microscaling,bs=64,ax=-1",
-        r"\[[0-9]\].mlp.(?:gate|up|down)_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "int2,qs=microscaling,bs=64,ax=-1"],
-        torch.ops.aten.matmul.default: ["int6,qs=microscaling,bs=64,ax=-1", "int6,qs=microscaling,bs=64,ax=-2"],
-    },
-    "q_2": {
-        r"self_attn\.[qkvo]_proj$": "nf4_5,qs=microscaling,bs=64,ax=-1",
-        r"mlp.gate_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "nf4_5,qs=microscaling,bs=64,ax=-1"],
-        r"mlp.up_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "nf4_5,qs=microscaling,bs=64,ax=-1"],
-        r"mlp.down_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "int2,qs=microscaling,bs=64,ax=-1"],
-        torch.ops.aten.matmul.default: ["int6,qs=microscaling,bs=64,ax=-1", "int6,qs=microscaling,bs=64,ax=-2"],
-    },
-    "q_3": {
-        r"self_attn\.[qkvo]_proj$": "nf4_5,qs=microscaling,bs=64,ax=-1",
-        r"mlp.gate_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "nf4_5,qs=microscaling,bs=64,ax=-1"],
-        r"mlp.up_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "nf4_5,qs=microscaling,bs=64,ax=-1"],
-        r"\[(?:30|31)\].mlp.down_proj$": ["nf4_5,qs=microscaling,bs=64,ax=-1", "int2,qs=microscaling,bs=64,ax=-1"],
-        torch.ops.aten.matmul.default: ["int6,qs=microscaling,bs=64,ax=-1", "int6,qs=microscaling,bs=64,ax=-2"],
-    },
+    }
 }
 
 def set_qscheme(quantizer, qscheme):
-    for module_name_or_op_type, qspec in QUANTIZATION_CONFIG.get(qscheme, {}).items():
+    for module_name_or_op_type, qspec in qscheme.items():
         if qspec is None:
             qconfig = None
         elif isinstance(qspec, str):
