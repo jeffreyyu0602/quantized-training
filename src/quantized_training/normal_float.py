@@ -34,14 +34,29 @@ def quantize_to_nf(
     k: int = 4,
     use_extra_value=True,
     int_bits=None,
-):
-    values = create_normal_map(k=k, use_extra_value=use_extra_value)
-    if int_bits is not None:
-        values = torch.round(values * (2**int_bits - 1))
-    values = values.to(input.device, dtype=input.dtype)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantizes input tensor to normal distribution values.
 
+    Args:
+        input: The input tensor to quantize
+        k: Bit-width for quantization (2^k values)
+        use_extra_value: Whether to use asymmetric quantization with an extra value
+        int_bits: If specified, scales values to integers with this many bits
+
+    Returns:
+        tuple containing:
+            - indices: Tensor of quantized indices
+            - values: The corresponding quantization values/levels
+    """
+    values = create_normal_map(k=k, use_extra_value=use_extra_value)
+
+    if int_bits is not None:
+        scale_factor = 2**(int_bits - 1) - 1
+        values = torch.round(values * scale_factor)
+
+    values = values.to(device=input.device, dtype=input.dtype)
+    input = torch.clamp(input, min=values.amin(), max=values.amax())
     indices = torch.argmin(torch.abs(values - input.unsqueeze(-1)), dim=-1)
-    indices = torch.where(input < values.amin(), 0, indices)
-    indices = torch.where(input > values.amax(), 2 ** k - 1, indices)
 
     return indices, values

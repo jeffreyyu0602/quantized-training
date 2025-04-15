@@ -50,7 +50,8 @@ def vmap(input: torch.Tensor, code: torch.Tensor, chunk_size=65536) -> torch.Ten
 
 
 quantized_decomposed_lib.define(
-    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, int? block_size=None) -> Tensor"
+    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, int? block_size=None, "
+    "Tensor quant_code=None) -> Tensor"
 )
 
 
@@ -61,6 +62,7 @@ def quantize(
     dtype: Optional[str],
     code: torch.Tensor,
     block_size: Optional[int] = None,
+    quant_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """ Affine quantization for the Tensor using the same quantization parameters to map
     from floating point to quantized values
@@ -271,7 +273,7 @@ def calculate_mx_qparam(
 
 quantized_decomposed_lib.define(
     "quantize_mx(Tensor self, int axis, float quant_max, int block_size, str dtype, Tensor code, "
-    "bool force_scale_power_of_two=False, Tensor scale_code=None) -> (Tensor, Tensor)"
+    "bool force_scale_power_of_two=False, Tensor scale_code=None, Tensor quant_code=None) -> (Tensor, Tensor)"
 )
 
 
@@ -285,9 +287,15 @@ def quantize_mx(
     code: torch.Tensor,
     force_scale_power_of_two: bool = False,
     scale_code: Optional[torch.Tensor] = None,
+    quant_code: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor]:
     scale = calculate_mx_qparam(
-        input, axis, quant_max, block_size, force_scale_power_of_two, scale_code
+        input,
+        axis=axis,
+        quant_max=quant_max,
+        block_size=block_size,
+        force_scale_power_of_two=force_scale_power_of_two,
+        code=scale_code,
     )
     input = quantize(input, scale, dtype, code, block_size)
     return scale, input

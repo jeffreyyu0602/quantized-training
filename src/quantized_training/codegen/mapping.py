@@ -956,10 +956,11 @@ def gen_code(model, args, output_dir=None):
             set_tensor_field(tensor, node, output_dir, True)
             model_params.inputs.append(tensor)
             continue
-        elif node.op == 'get_attr' and "memory" in node.meta:
+        elif node.op == 'get_attr':
             tensor = Tensor()
             set_tensor_field(tensor, node, output_dir, True)
-            model_params.parameters.append(tensor)
+            if "memory" in node.meta:
+                model_params.parameters.append(tensor)
             continue
         elif node.op == 'call_function':
             op.op.CopyFrom(map_node(node, output_dir))

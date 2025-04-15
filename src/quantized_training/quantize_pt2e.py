@@ -461,12 +461,15 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     code = get_quantization_map(activation_post_process.dtype, device)
 
     if isinstance(code, tuple):
-        indices = code[0]
+        indices, codebook = code
+        midpoints = (codebook[:-1] + codebook[1:]) / 2
         with graph.inserting_before(node):
-            code_node = create_getattr_from_value(model, graph, "code_", code[1])
+            dequant_code = create_getattr_from_value(model, graph, "code_", codebook)
+            quant_code = create_getattr_from_value(model, graph, "code_", midpoints)
     else:
         indices = activation_post_process.code
-        code_node = None
+        dequant_code = None
+        quant_code = None
 
     if input_node.op == 'get_attr':
         # quantize model parameter and remove the fq module
@@ -492,7 +495,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             scale_node = create_getattr_from_value(
                 model, graph, input_node.name + "_scale_", scale)
             quantized_node = create_getattr_from_value(
-                model, graph, input_node.name + "_weight_", weight)
+                model, graph, input_node.name + "_quantized_", weight)
     elif activation_post_process.ch_axis == -2:
         with model.graph.inserting_before(node):
             calculate_qparam_op_inputs = [
@@ -526,6 +529,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 activation_post_process.dtype,
                 get_attr_node,
                 activation_post_process.block_size,
+                quant_code,
             ]
             quantized_node = model.graph.call_function(
                 torch.ops.quantized_ops.quantize.default,
@@ -541,6 +545,11 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 model, model.graph, "code_", indices,
             )
 
+            scale_code_node = None
+            if activation_post_process.scale_code is not None:
+                scale_code_node = create_getattr_from_value(
+                    model, model.graph, "code_", activation_post_process.scale_code)
+
             quantize_mx_inputs = [
                 input_node,
                 activation_post_process.ch_axis,
@@ -549,12 +558,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 activation_post_process.dtype,
                 get_attr_node,
                 activation_post_process.force_scale_power_of_two,
+                scale_code_node,
+                quant_code,
             ]
-
-            if activation_post_process.scale_code is not None:
-                scale_code_node = create_getattr_from_value(
-                    model, model.graph, "code_", activation_post_process.scale_code)
-                quantize_mx_inputs.append(scale_code_node)
 
             quantize_mx_node = model.graph.call_function(
                 torch.ops.quantized_ops.quantize_mx.default,
@@ -597,7 +603,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
     for user in orig_fq_users:
         # Keep the original nodes for other users
-        kwarg1, kwarg2 = code_node, scale_node
+        kwarg1, kwarg2 = dequant_code, scale_node
 
         # Skip device alignment node
         if user.target == torch.Tensor.to:
@@ -606,7 +612,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             with graph.inserting_before(user):
                 if kwarg1 is not None:
                     kwarg1 = graph.call_function(
-                        torch.Tensor.to, (code_node, user_device)
+                        torch.Tensor.to, (dequant_code, user_device)
                     )
 
                 kwarg2 = graph.call_function(
