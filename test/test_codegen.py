@@ -89,16 +89,16 @@ LLAMA_MP_QSCHEME = {
         "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
     ],
     r"self_attn\.k_proj$": [
-        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
     ],
     r"self_attn\.v_proj$": [
-        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
         "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
     ],
     r"self_attn\.o_proj$": [
         "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "nf4_5,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
     ],
     torch.ops.aten.matmul.default: [
         "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
