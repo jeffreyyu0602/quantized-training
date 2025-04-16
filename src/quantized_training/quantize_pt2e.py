@@ -462,8 +462,8 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     code = get_quantization_map(activation_post_process.dtype, device)
 
     if isinstance(code, tuple):
-        match = re.search(r'\d+', activation_post_process.dtype)
-        N = int(match.group())
+        numbers = re.findall(r'\d+', activation_post_process.dtype)
+        N = int(numbers[0])
         activation_post_process.dtype = f"int{N}"
 
         indices, values = code
@@ -474,6 +474,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         with graph.inserting_before(node):
             dequant_code = create_getattr_from_value(model, graph, "code_", values)
             quant_code = create_getattr_from_value(model, graph, "code_", midpoints)
+
+        if len(numbers) > 1:
+            dequant_code.meta["dtype"] = f"int{numbers[1]}"
     else:
         dequant_code, quant_code = None, None
 
