@@ -1,6 +1,7 @@
 import copy
 import itertools
 import operator
+import re
 from collections import OrderedDict
 from dataclasses import asdict, replace
 from typing import Dict, Tuple, Any, Optional, Callable, List
@@ -461,15 +462,20 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     code = get_quantization_map(activation_post_process.dtype, device)
 
     if isinstance(code, tuple):
-        indices, codebook = code
-        midpoints = (codebook[:-1] + codebook[1:]) / 2
+        match = re.search(r'\d+', activation_post_process.dtype)
+        N = int(match.group())
+        activation_post_process.dtype = f"int{N}"
+
+        indices, values = code
+
+        activation_post_process.code = indices
+
+        midpoints = (values[:-1] + values[1:]) / 2
         with graph.inserting_before(node):
-            dequant_code = create_getattr_from_value(model, graph, "code_", codebook)
+            dequant_code = create_getattr_from_value(model, graph, "code_", values)
             quant_code = create_getattr_from_value(model, graph, "code_", midpoints)
     else:
-        indices = activation_post_process.code
-        dequant_code = None
-        quant_code = None
+        dequant_code, quant_code = None, None
 
     if input_node.op == 'get_attr':
         # quantize model parameter and remove the fq module
@@ -487,7 +493,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             param.data,
             scale,
             activation_post_process.dtype,
-            indices,
+            activation_post_process.code,
             activation_post_process.block_size,
         )
 
@@ -521,7 +527,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 scale_node.meta["dtype"] = activation_post_process.scale_dtype
 
             get_attr_node = create_getattr_from_value(
-                model, model.graph, "code_", indices,
+                model, model.graph, "code_", activation_post_process.code,
             )
             quantize_op_inputs = [
                 input_node,
@@ -542,7 +548,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     else:
         with model.graph.inserting_before(node):
             get_attr_node = create_getattr_from_value(
-                model, model.graph, "code_", indices,
+                model, model.graph, "code_", activation_post_process.code,
             )
 
             scale_code_node = None
