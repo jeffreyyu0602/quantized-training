@@ -860,6 +860,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         else:
             return dtype_byte_size(n.value.dtype)
 
+    def align_size(size, alignment=64):
+        if alignment is not None:
+            size = (size + alignment - 1) // alignment * alignment
+        return size
+
     for node in model.graph.nodes:
         if node.op not in ["call_function", "call_module"]:
             continue
@@ -876,7 +881,11 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             if "dtype" in input_node.meta:
                 dtypes = [dt or dtypes[i] for i, dt in enumerate(input_node.meta["dtype"])]
 
-            sizes = [t.numel() * dtype_byte_size(dtypes[i]) for i, t in enumerate(input_node.value)]
+            sizes = [
+                align_size(t.numel() * dtype_byte_size(dt), manager.bank_width)
+                for t, dt in zip(input_node.value, dtypes)
+            ]
+
             start_offset = input_node.meta["memory"].start + sum(sizes[:node.args[1]])
             size = sizes[node.args[1]]
             node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
@@ -913,8 +922,12 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             raise
 
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            tensor_sizes = [
+                align_size(n.value.numel() * get_num_bytes(n), manager.bank_width)
+                for n in next_node.args[0]
+            ]
+
             first_node = next_node.args[0][0]
-            tensor_sizes = [n.value.numel() * get_num_bytes(n) for n in next_node.args[0]]
             if (memory := first_node.meta.get("memory", None)) is None:
                 memory = manager.allocate_memory(first_node, sum(tensor_sizes))
                 first_node.meta["memory"] = memory

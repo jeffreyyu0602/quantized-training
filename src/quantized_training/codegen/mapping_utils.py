@@ -7,6 +7,7 @@ import torch
 from torch.fx import Node
 from torch.fx.operator_schemas import normalize_function
 
+from .memory import align_size
 from .param_pb2 import Argument, Memory, OpOverload, Tensor
 from ..pt2e_utils import dtype_byte_size
 
@@ -108,7 +109,10 @@ def set_output_field(param, node, output_dir):
                 memory=Memory(partition=partition, address=int(address)),
             ))
 
-            address += tensor.numel() * dtype_byte_size(dtypes[i])
+            address += align_size(
+                tensor.numel() * dtype_byte_size(dtypes[i]),
+                node.meta.get("bank_width"),
+            )
 
             if output_dir is not None:
                 save_tensor(tensor, os.path.join(output_dir, f"{node.name}_{i}.bin"))

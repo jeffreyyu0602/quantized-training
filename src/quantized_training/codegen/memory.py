@@ -27,6 +27,12 @@ class Partition:
         return f"Partition(start={self.start}, end={self.end}, partition_id={self.partition_id})"
 
 
+def align_size(size, alignment=64):
+    if alignment is not None:
+        size = (size + alignment - 1) // alignment * alignment
+    return size
+
+
 class MemoryManager:
     """
     This class implements a simple first-fit memory manager for allocating memory partitions to tensors.
@@ -53,6 +59,10 @@ class MemoryManager:
             print(f"Node {node} does not have a value attribute")
             return None
 
+        if isinstance(node.value, torch.Tensor) and node.value.numel() == 1:
+            print(f"Skipping allocation for scalar tensor {node.name}")
+            return None
+
         def is_conv2d_input(n):
             if n.op == 'get_attr':
                 return False
@@ -63,9 +73,11 @@ class MemoryManager:
 
                 if user.op == 'call_module':
                     gm = user.meta['submodule']
-                    for sn in gm.graph.nodes:
-                        if sn.name == n.name and is_conv2d_input(sn):
-                            return True
+                    placeholder = next(
+                        sn for sn in gm.graph.nodes if sn.name == n.name
+                    )
+                    if is_conv2d_input(placeholder):
+                        return True
             return False
 
         if size is not None:
@@ -81,23 +93,23 @@ class MemoryManager:
             if is_conv2d_input(node) and node.value.shape[1] < 16:
                 logger.warning(f"Node {node} requires replication. Increase memory size.")
                 tensor_size *= 2
+
+            tensor_size = align_size(tensor_size, self.bank_width)
         elif isinstance(node.value, (tuple, list)):
             dtypes = [t.dtype for t in node.value]
             if "dtype" in node.meta:
                 dtypes = [dt or dtypes[i] for i, dt in enumerate(node.meta["dtype"])]
 
-            tensor_size = 0
-            for i, t in enumerate(node.value):
-                tensor_size += t.numel() * dtype_byte_size(dtypes[i])
+            tensor_size = sum(
+                align_size(t.numel() * dtype_byte_size(dt), self.bank_width)
+                for t, dt in zip(node.value, dtypes)
+            )
+            node.meta["bank_width"] = self.bank_width
         else:
             logger.warning(f"Node {node} has a non-tensor output")
             return None
 
-        # Make sure the tensor size is a multiple of the bank width for alignment
-        if self.bank_width is not None:
-            tensor_size = (tensor_size + self.bank_width - 1) // self.bank_width * self.bank_width
-
-        for partition in self.memory_partitions:
+        for index, partition in enumerate(self.memory_partitions):
             if partition.node is None and (partition.end - partition.start) >= tensor_size:
                 if (partition.end - partition.start) > tensor_size:
                     new_partition = Partition(
@@ -106,7 +118,7 @@ class MemoryManager:
                         partition_id=self.partition_id,
                     )
                     partition.end = partition.start + tensor_size
-                    self.memory_partitions.insert(self.memory_partitions.index(partition) + 1, new_partition)
+                    self.memory_partitions.insert(index + 1, new_partition)
                 self.tensor_memory_map[node] = partition
                 partition.node = node
                 return Partition(start=partition.start, end=partition.end, partition_id=self.partition_id)
