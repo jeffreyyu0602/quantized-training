@@ -665,24 +665,22 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
-    partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.dequantize.default]
-    )
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
-        dequantized_node = partition.output_nodes[0]
+    for node in model.graph.nodes:
+        if node.target != torch.ops.quantized_ops.dequantize.default:
+            continue
 
-        scale_node = dequantized_node.args[1]
+        scale_node = node.args[1]
         scale = model.get_buffer(scale_node.target)
         if torch.any(scale != 1):
             continue
 
-        dtype = dequantized_node.args[2]
-        if dtype is not None:
+        # During integer quantization, the dequantize node also perform a
+        # quantization to the output dtype
+        if node.args[2] is not None:
             continue
 
-        dequantized_node.replace_all_uses_with(dequantized_node.args[0])
-        model.graph.erase_node(dequantized_node)
+        node.replace_all_uses_with(node.args[0])
+        model.graph.erase_node(node)
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
@@ -761,16 +759,14 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     # First, move the dequantize nodes before the stack and view nodes that
     # are inserted during MHA splitting. Then try to move quantize nodes forward
     # to immediately after their previous ops (nodes that are not NOP).
-    partitions = get_source_partitions(model.graph, [
-        torch.ops.quantized_ops.dequantize.default,
-        torch.ops.quantized_ops.quantize.default
-    ])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
+    for node in list(model.graph.nodes):
+        if node.target not in [
+            torch.ops.quantized_ops.dequantize.default,
+            torch.ops.quantized_ops.quantize.default
+        ]:
+            continue
 
-    node_order = {n: i for i, n in enumerate(graph.nodes)}
-    nodes_to_process = sorted(partitions, key=lambda p: node_order[p.output_nodes[0]])
-    for partition in nodes_to_process:
-        output_node = partition.output_nodes[0]
+        output_node = node
         nodes_on_path = find_prev_op_and_move_node(output_node)
         if nodes_on_path is None:
             continue

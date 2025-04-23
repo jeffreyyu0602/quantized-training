@@ -561,6 +561,8 @@ if __name__ == "__main__":
         example_args = (inputs.pixel_values.to(torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
 
+        strip_softmax_dtype(gm)
+
         for i in tqdm(range(10)):
             inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
             with torch.no_grad():

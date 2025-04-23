@@ -188,16 +188,15 @@ def _decompose_bmm_mx(model: GraphModule, node: Node):
 
 def split_multi_head_attention(model: GraphModule):
     graph = model.graph
-    partitions = get_source_partitions(graph, [torch.matmul])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
+
     grouped_nodes = defaultdict(list)
-    for partition in partitions:
-        matmul_node = partition.output_nodes[0]
-        if (nn_module_stack := matmul_node.meta.get('nn_module_stack', None)) is None:
+    for node in list(graph.nodes):
+        if node.target != torch.ops.aten.matmul.default:
             continue
 
-        bt = list(nn_module_stack.values())[-1]
-        grouped_nodes[bt[0]].append(matmul_node)
+        if (nn_module_stack := node.meta.get('nn_module_stack', None)) is not None:
+            bt = list(nn_module_stack.values())[-1]
+            grouped_nodes[bt[0]].append(node)
 
     for nodes in grouped_nodes.values():
         if len(nodes) != 2:
@@ -671,16 +670,17 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     and perform fusion on each branch.
     """
     nodes_map = {}
+    fused_nodes_list = []
+
+    if operations is not None:
+        fused_nodes_list = find_sequential_nodes(model, operations)
 
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
 
-    fused_nodes_list = find_sequential_nodes(model, operations) if operations else []
-
-    partitions = get_source_partitions(graph, ['permute', 'transpose'])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    while len(partitions) > 0:
-        reshape_node = partitions.pop(0).output_nodes[0]
+    for reshape_node in list(graph.nodes):
+        if not _is_reshape_op(reshape_node):
+            continue
 
         if not is_tranpose(reshape_node):
             match_found = True
@@ -688,17 +688,12 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
             input_node = reshape_node.all_input_nodes[0]
 
             while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
-                if not _is_nop(input_node):
-                    logger.info(f"Cannot fuse {reshape_node} with {input_node}")
-                    match_found = False
-                    break
-
-                # Reshape cannot be fused with a node that has multiple users or inputs
                 if (
                     len(input_node.users) > 1 or
                     len(input_node.all_input_nodes) != 1 or
-                    _is_reshape_op(input_node)
+                    not _is_nop(input_node)
                 ):
+                    logger.debug(f"Cannot fuse {reshape_node} with {input_node}")
                     match_found = False
                     break
 
@@ -720,33 +715,27 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
             if n.target == torch.ops.aten.transpose.int:
                 move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
-    partitions = get_source_partitions(graph, [operator.getitem])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    while len(partitions) > 0:
-        slice_node = partitions.pop(0).output_nodes[0]
-
-        if slice_node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
-            logger.warning(f"Unrecognized getitem operation: {slice_node.target}")
+    for node in list(graph.nodes):
+        if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
             continue
 
-        if _is_nop(slice_node) or (
-            slice_node.target == torch.ops.aten.select.int and slice_node.args[1] == 0
+        if _is_nop(node) or (
+            node.target == torch.ops.aten.select.int and node.args[1] == 0
         ):
-            logger.info(f"Node {slice_node} is a nop or can be handled by memory planner.")
+            logger.info(f"Node {node} is a nop or can be handled by memory planner.")
             continue
 
-        fuse_op_with_input(graph, fused_nodes_list, nodes_map, slice_node)
+        fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)
 
-    partitions = get_source_partitions(graph, [torch.ops.quantized_ops.dequantize.default])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    while len(partitions) > 0:
-        dequantized_node = partitions.pop(0).output_nodes[0]
+    for node in list(graph.nodes):
+        if node.target != torch.ops.quantized_ops.dequantize.default:
+            continue
 
         # If the node is already fused, skip it
-        if search_group(dequantized_node, fused_nodes_list) is not None:
+        if search_group(node, fused_nodes_list) is not None:
             continue
 
-        fuse_op_with_input(graph, fused_nodes_list, nodes_map, dequantized_node)
+        fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)
 
     # Fuse nodes that appear earlier in the graph first
     nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
@@ -785,17 +774,13 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
         # Update the metadata of all the user nodes that consumes the new node
         for user in list(node.users):
-            if user.op != "call_module":
-                continue
+            if user.op == "call_module":
+                submodule = named_modules[user.target]
+                submodule_nodes = [n for n in submodule.graph.nodes if n.op == 'placeholder']
 
-            index = user.args.index(node)
-            submodule = named_modules[user.target]
-
-            submodule_nodes = [
-                n for n in submodule.graph.nodes if n.op == 'placeholder'
-            ]
-
-            submodule_nodes[index].meta['source_node'] = node
+                index = user.args.index(node)
+                submodule_nodes[index].meta['source_node'] = node
+                submodule_nodes[index].name = node.name
 
     graph.lint()
 

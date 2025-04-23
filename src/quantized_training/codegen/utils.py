@@ -580,7 +580,7 @@ def pad_vit_embeddings_output(
             user.replace_input_with(vit_embed_out, pad_node)
 
     for node in model.graph.nodes:
-        if node.target == torch.ops.aten.view.default:
+        if node.target in [torch.ops.aten.view.default, torch.ops.aten.reshape.default]:
             new_size = [x if x != orig_dim else x + pad for x in node.args[1]]
             node.args = (node.args[0], new_size)
 
