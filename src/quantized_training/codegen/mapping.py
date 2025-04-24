@@ -191,7 +191,10 @@ def split_multi_head_attention(model: GraphModule):
 
     grouped_nodes = defaultdict(list)
     for node in list(graph.nodes):
-        if node.target != torch.ops.aten.matmul.default:
+        if node.target not in [
+            torch.ops.aten.matmul.default,
+            torch.ops.quantized_ops.matmul_mx.default,
+        ]:
             continue
 
         if (nn_module_stack := node.meta.get('nn_module_stack', None)) is not None:
