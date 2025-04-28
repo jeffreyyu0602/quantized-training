@@ -59,7 +59,11 @@ class MemoryManager:
             print(f"Node {node} does not have a value attribute")
             return None
 
-        if isinstance(node.value, torch.Tensor) and node.value.numel() == 1:
+        # Skip allocation for quantization scaling factors
+        if isinstance(node.value, torch.Tensor) and node.value.numel() == 1 and next(iter(node.users)).target in [
+            torch.ops.quantized_ops.quantize.default,
+            torch.ops.quantized_ops.dequantize.default,
+        ]:
             print(f"Skipping allocation for scalar tensor {node.name}")
             return None
 
