@@ -15,6 +15,8 @@ from .histogram import *
 from .quantize_pt2e import fuse_quantize_dequantize_with_previous_op
 from google.protobuf import text_format
 import operator
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 __all__ = [
@@ -55,19 +57,22 @@ per_tensor_symmetric: qscheme = QScheme.PER_TENSOR_SYMMETRIC
 per_channel_symmetric: qscheme = QScheme.PER_CHANNEL_SYMMETRIC
 microscaling: qscheme = QScheme.MICROSCALING
 
+quantized_ops = torch.ops.quantized_ops
 OPERATOR_MAPPINGS = {
-    "gemm": [torch.nn.Conv2d, torch.nn.Linear, torch.matmul, operator.matmul],
+    "gemm": [nn.Conv2d, nn.Linear, F.conv2d, F.linear, torch.matmul, operator.matmul],
     "add": ["add", "add_", operator.add, torch.add, operator.iadd],
     "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
     "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
     "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
-    "relu": [torch.nn.ReLU, torch.nn.functional.relu, torch.nn.functional.relu_],
-    "gelu": [torch.nn.GELU, torch.nn.functional.gelu],
-    "silu": [torch.nn.SiLU, torch.nn.functional.silu],
-    "maxpool2d": [torch.nn.MaxPool2d, torch.nn.functional.max_pool2d],
-    "avgpool2d": [torch.nn.AdaptiveAvgPool2d, torch.nn.functional.adaptive_avg_pool2d],
-    "quantize": [torch.ops.quantized_ops.quantize.default, torch.ops.quantized_ops.quantize_mx.default],
-    "dequantize": [torch.ops.quantized_ops.dequantize.default],
+    "relu": [nn.ReLU, F.relu, F.relu_],
+    "gelu": [nn.GELU, F.gelu],
+    "silu": [nn.SiLU, F.silu],
+    "maxpool2d": [nn.MaxPool2d, F.max_pool2d],
+    "avgpool2d": [nn.AdaptiveAvgPool2d, F.adaptive_avg_pool2d],
+    "layer_norm": ["layer_norm", nn.LayerNorm, F.layer_norm],
+    "softmax": ["softmax", nn.Softmax, F.softmax],
+    "quantize": [quantized_ops.quantize.default, quantized_ops.quantize_mx.default],
+    "dequantize": [quantized_ops.dequantize.default],
 }
 
 
@@ -76,6 +81,8 @@ def transform(
     example_args,
     example_kwargs=None,
     patterns=None,
+    transpose_weight=False,
+    transpose_fc=False,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -85,6 +92,22 @@ def transform(
 
     from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
+
+    if transpose_weight:
+        insert_permute_adapters_for_conv2d(model)
+        transpose_linear_weights(model, transpose_fc=transpose_fc)
+
+        replace_target(
+            model,
+            torch.ops.aten.max_pool2d.default,
+            torch.ops.quantized_ops.max_pool2d.default
+        )
+
+        replace_target(
+            model,
+            torch.ops.aten.adaptive_avg_pool2d.default,
+            torch.ops.quantized_ops.adaptive_avg_pool2d.default
+        )
 
     # Turn batched matmul into multiple matmuls
     ShapeProp(model).propagate(*flatten_args)
@@ -124,6 +147,8 @@ def compile(
     example_kwargs=None,
     total_memory=None,
     bank_width=None,
+    bank_size=None,
+    weight_persistent=True,
     output_dir=None,
     output_file="compute_graph",
 ):
@@ -132,20 +157,21 @@ def compile(
 
     ShapeProp(model).propagate(*flatten_args)
 
-    manager = MemoryManager(total_memory, bank_width=bank_width)
-    allocate_weights(model, manager)
-    allocate_activations(model, manager)
+    allocator = MemoryAllocator(total_memory, bank_width=bank_width, bank_size=bank_size)
+    run_memory_mapping(model, allocator, weight_persistent)
+    allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
     model_params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:
         f.write(text_format.MessageToString(model_params))
 
+    operations = [
+        op.op.name if op.WhichOneof('op_type') == 'op' else op.fused_op.name
+        for op in model_params.ops if op.op.op != 'nop'
+    ]
+
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
-        for op in model_params.ops:
-            if op.WhichOneof('op_type') == 'fused_op':
-                f.write(op.fused_op.name + '\n')
-            elif op.op.op != 'nop':
-                f.write(op.op.name + '\n')
+        f.write('\n'.join(operations))
 
     gen_compute_graph(model, os.path.join(output_dir, output_file))

@@ -8,7 +8,6 @@ from typing import List, Dict, Callable
 
 import graphviz
 import torch
-from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
@@ -24,11 +23,11 @@ from .mapping_utils import (
     set_output_field,
     set_tensor_field,
 )
-from .memory import MemoryManager, Partition
+from .memory import MemoryAllocator, Segment
 from .param_pb2 import Model, Operation, Tensor
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
-from ..quantize_pt2e import create_getattr_from_value
+from ..quantize_pt2e import create_getattr_from_value, export_model
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +114,7 @@ def _decompose_bmm(model: GraphModule, node: Node):
             result = result.view(*batch_shape, *result.shape[-2:])
             return result
 
-    gm = capture_pre_autograd_graph(BMM(), (input1, input2))
+    gm = export_model(BMM(), (input1, input2))
     output_nodes = replace_node_with_graph_module(model, gm, node)
     model.graph.erase_node(node)
     return output_nodes[0]
@@ -168,7 +167,7 @@ def _decompose_bmm_mx(model: GraphModule, node: Node):
         'weight_code': weight_code.value if weight_code is not None else None,
     }
 
-    gm = capture_pre_autograd_graph(BMM(), (input1, input2), kwargs)
+    gm = export_model(BMM(), (input1, input2), kwargs)
 
     # Remove unused placeholder nodes
     for n in gm.graph.nodes:
@@ -793,24 +792,26 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     return model
 
 
-def allocate_weights(model: GraphModule, manager: MemoryManager = None):
-    if manager is None:
-        manager = MemoryManager(DEFAULT_MEMORY_SIZE)
+def run_memory_mapping(
+    model: GraphModule,
+    allocator: MemoryAllocator = None,
+    weight_persistent: bool = False,
+):
+    if allocator is None:
+        allocator = MemoryAllocator(DEFAULT_MEMORY_SIZE)
 
-    for node in model.graph.nodes:
-        if node.op == "get_attr" and "code" not in node.name:
-            node.meta["memory"] = manager.allocate_memory(node)
+    # Store all the weights in memory if persistent is enabled
+    if weight_persistent:
+        for node in model.graph.nodes:
+            if node.op == "get_attr" and "code" not in node.name:
+                node.meta["memory"] = allocator.allocate_memory(node)
 
-
-def allocate_activations(model: GraphModule, manager: MemoryManager = None):
-    if manager is None:
-        manager = MemoryManager(DEFAULT_MEMORY_SIZE)
-
+    # Store inputs to the model in memory
     for node in model.graph.nodes:
         if node.op == "placeholder":
-            node.meta["memory"] = manager.allocate_memory(node)
+            node.meta["memory"] = allocator.allocate_memory(node)
 
-    manager.take_snapshot()
+    allocator.snapshot()
 
     eliminate_dead_code(model.graph)
 
@@ -822,7 +823,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
     user_to_last_uses : Dict[Node, List[Node]] = {}
 
     def register_last_uses(n: Node, user: Node):
-        if n.op != 'get_attr' and n not in node_to_last_use:
+        if n not in node_to_last_use:
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
 
@@ -838,6 +839,8 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         """
         nodes_to_delete = user_to_last_uses.get(user, [])
         for n in list(nodes_to_delete):
+            if weight_persistent and n.op == "get_attr":
+                continue
             if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
                 nodes_to_delete.extend(delete_unused_values(n))
         return nodes_to_delete
@@ -847,11 +850,6 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             return dtype_byte_size(n.meta['dtype'])
         else:
             return dtype_byte_size(n.value.dtype)
-
-    def align_size(size, alignment=64):
-        if alignment is not None:
-            size = (size + alignment - 1) // alignment * alignment
-        return size
 
     for node in model.graph.nodes:
         if node.op not in ["call_function", "call_module"]:
@@ -864,19 +862,10 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         if node.target == operator.getitem:
             input_node = node.args[0]
-
-            dtypes = [t.dtype for t in input_node.value]
-            if "dtype" in input_node.meta:
-                dtypes = [dt or dtypes[i] for i, dt in enumerate(input_node.meta["dtype"])]
-
-            sizes = [
-                align_size(t.numel() * dtype_byte_size(dt), manager.bank_width)
-                for t, dt in zip(input_node.value, dtypes)
-            ]
-
-            start_offset = input_node.meta["memory"].start + sum(sizes[:node.args[1]])
-            size = sizes[node.args[1]]
-            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
+            output_sizes = node.meta["output_sizes"]
+            start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
+            size = output_sizes[node.args[1]]
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
             continue
 
         # We do not allocate new memory for select operations. Instead, calculate
@@ -888,7 +877,7 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
         ):
             size = node.value.numel() * get_num_bytes(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
-            node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
             continue
 
         # We use the partition of the first input tensor since it preallocates
@@ -899,6 +888,12 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
             else:
                 node.meta["memory"] = copy.deepcopy(node.args[0][0].meta["memory"])
                 continue
+
+        # Allocate memory for input parameters
+        if not weight_persistent:
+            for n in node.all_input_nodes:
+                if n.op == "get_attr" and "code" not in n.name:
+                    n.meta["memory"] = allocator.allocate_memory(n)
 
         # For stacked layers, place them next to each other so that we can
         # read them using a single memory access in the next operation
@@ -911,29 +906,28 @@ def allocate_activations(model: GraphModule, manager: MemoryManager = None):
 
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             tensor_sizes = [
-                align_size(n.value.numel() * get_num_bytes(n), manager.bank_width)
+                allocator.align_size(n.value.numel() * get_num_bytes(n))
                 for n in next_node.args[0]
             ]
 
             first_node = next_node.args[0][0]
             if (memory := first_node.meta.get("memory", None)) is None:
-                memory = manager.allocate_memory(first_node, sum(tensor_sizes))
+                memory = allocator.allocate_memory(first_node, sum(tensor_sizes))
                 first_node.meta["memory"] = memory
 
             index = next_node.args[0].index(node)
             if index > 0:
                 start_offset = memory.start + sum(tensor_sizes[:index])
                 size = tensor_sizes[index]
-                node.meta["memory"] = Partition(start_offset, start_offset + size, manager.partition_id)
+                node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
         else:
-            node.meta["memory"] = manager.allocate_memory(node)
+            node.meta["memory"] = allocator.allocate_memory(node)
+
+        allocator.snapshot()
 
         nodes_to_delete = delete_unused_values(node)
         for n in nodes_to_delete:
-            if n in manager.tensor_memory_map:
-                manager.free_memory(n)
-
-        manager.take_snapshot()
+            allocator.free_memory(n)
 
 
 def gen_code(model, args, output_dir=None):
@@ -994,8 +988,8 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        if node.op == "get_attr" or not hasattr(node, "value"):
-            continue
+        # if node.op == "get_attr" or not hasattr(node, "value"):
+        #     continue
 
         header = node.name
 

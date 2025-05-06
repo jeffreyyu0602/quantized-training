@@ -233,26 +233,37 @@ def get_default_quantizer(
         .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
 
 
-def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
-    from torch.ao.quantization.pt2e import prepare
-    from torch.ao.quantization.quantize_pt2e import prepare_pt2e
-
+def export_model(
+    model: torch.nn.Module,
+    args: Tuple[Any, ...],
+    kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    dynamic_shapes: Optional[Dict[str, Any]] = None,
+):
     from transformers.utils.import_utils import is_torch_greater_or_equal
-
-    # replace the default implementation of _create_obs_or_fq_from_qspec
-    prepare._get_obs_or_fq_map = _get_obs_or_fq_map
-
     if is_torch_greater_or_equal("2.5"):
         from torch.export import export_for_training
 
         model = export_for_training(model, args, kwargs, dynamic_shapes=dynamic_shapes).module()
-    else:
+    elif is_torch_greater_or_equal("2.0"):
         from torch._export import capture_pre_autograd_graph
 
         model = capture_pre_autograd_graph(
             model, args, kwargs, dynamic_shapes=dynamic_shapes
         )
+    else:
+        raise RuntimeError("Torch version is not supported. Please use torch >= 2.0")
+    return model
 
+
+def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
+    from torch.ao.quantization.pt2e import prepare
+    from torch.ao.quantization.quantize_pt2e import prepare_pt2e
+
+    # replace the default implementation of _create_obs_or_fq_from_qspec
+    prepare._get_obs_or_fq_map = _get_obs_or_fq_map
+
+    model = export_model(model, args, kwargs, dynamic_shapes=dynamic_shapes)
     model = prepare_pt2e(model, quantizer)
     return model
 

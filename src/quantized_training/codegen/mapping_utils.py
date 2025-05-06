@@ -7,9 +7,7 @@ import torch
 from torch.fx import Node
 from torch.fx.operator_schemas import normalize_function
 
-from .memory import align_size
 from .param_pb2 import Argument, Memory, OpOverload, Tensor
-from ..pt2e_utils import dtype_byte_size
 
 logger = logging.getLogger(__name__)
 
@@ -94,28 +92,29 @@ def set_output_field(param, node, output_dir):
     if isinstance(node.value, torch.Tensor):
          set_tensor_field(param.output, node, output_dir, True)
     elif isinstance(node.value, (tuple, list)):
-        partition = node.meta["memory"].partition_id
-        address = node.meta["memory"].start
+        if (memory := node.meta.get("memory", None)) is not None:
+            partition = memory.partition_id
+            address = memory.start
 
         dtypes = [str(t.dtype).split(".")[1] for t in node.value]
         if "dtype" in node.meta:
             dtypes = [dt or dtypes[i] for i, dt in enumerate(node.meta["dtype"])]
 
-        for i, tensor in enumerate(node.value):
-            param.outputs.tensors.append(Tensor(
+        for i, t in enumerate(node.value):
+            tensor = Tensor(
                 node=f"{node.name}_{i}",
-                shape=list(tensor.shape),
+                shape=list(t.shape),
                 dtype=dtypes[i],
-                memory=Memory(partition=partition, address=int(address)),
-            ))
-
-            address += align_size(
-                tensor.numel() * dtype_byte_size(dtypes[i]),
-                node.meta.get("bank_width"),
             )
 
+            if memory is not None:
+                tensor.memory = Memory(partition=partition, address=int(address)),
+                address += node.meta.get("output_sizes")[i]
+
             if output_dir is not None:
-                save_tensor(tensor, os.path.join(output_dir, f"{node.name}_{i}.bin"))
+                save_tensor(t, os.path.join(output_dir, f"{node.name}_{i}.bin"))
+
+            param.outputs.tensors.append(tensor)
     else:
         logger.warning(f"Unsupported output type: {type(node.value)}")
 
@@ -349,6 +348,9 @@ def _is_nop(node: Node) -> bool:
         default_args = [0, None, None, 1]
         dim, start, end, step = list(node.args[1:]) + default_args[len(node.args) - 1:]
         return start == 0 and end > input_shape[dim] and step == 1
+
+    if node.target == torch.ops.aten.expand.default:
+        return all(x == 1 or x == -1 for x in node.args[1])
 
     return node.target in [
         torch.ops.aten.clone.default,

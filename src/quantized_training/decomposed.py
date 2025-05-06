@@ -12,6 +12,71 @@ from .mx_utils import _reshape_to_blocks, _shared_exponents
 # name is not too long
 quantized_decomposed_lib = Library("quantized_ops", "DEF")
 
+quantized_decomposed_lib.define(
+    "conv2d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, "
+    "SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "conv2d", "CompositeExplicitAutograd")
+def conv2d(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None,
+    stride: Union[int, Tuple[int]] = 1,
+    padding: Union[int, Tuple[int]] = 0,
+    dilation: Union[int, Tuple[int]] = 1,
+    groups: int = 1,
+) -> torch.Tensor:
+    return F.conv2d(
+        input.permute(0, 3, 1, 2),
+        weight.permute(2, 3, 0, 1),
+        bias,
+        stride,
+        padding,
+        dilation,
+        groups,
+    ).permute(0, 2, 3, 1)
+
+
+quantized_decomposed_lib.define(
+    "linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "linear", "CompositeExplicitAutograd")
+def linear(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+    return F.linear(input, weight.T, bias)
+
+quantized_decomposed_lib.define(
+    "max_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, "
+    "int[2] dilation=1, bool ceil_mode=False) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "max_pool2d", "CompositeExplicitAutograd")
+def max_pool2d(
+    self: torch.Tensor,
+    kernel_size: Union[int, Tuple[int]] = 1,
+    stride: Union[int, Tuple[int]] = None,
+    padding: Union[int, Tuple[int]] = 0,
+    dilation: Union[int, Tuple[int]] = 1,
+    ceil_mode: bool = False,
+) -> torch.Tensor:
+    return F.max_pool2d(
+        self.permute(0, 3, 1, 2),
+        kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        ceil_mode=ceil_mode,
+    ).permute(0, 2, 3, 1)
+
+quantized_decomposed_lib.define(
+    "adaptive_avg_pool2d(Tensor self, SymInt[2] output_size) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "adaptive_avg_pool2d", "CompositeExplicitAutograd")
+def adaptive_avg_pool2d(self: torch.Tensor, output_size: Union[int, Tuple[int]] = 1) -> torch.Tensor:
+    return F.adaptive_avg_pool2d(self.permute(0, 3, 1, 2), output_size).permute(0, 2, 3, 1)
+
 def expand(input, shape, block_size):
     while input.ndim < len(shape):
         input = input.unsqueeze(0)
@@ -151,7 +216,7 @@ def conv2d_mx(
     if weight_scale is not None:
         weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
+    return conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 
 quantized_decomposed_lib.define(
@@ -183,7 +248,7 @@ def linear_mx(
     if weight_scale is not None:
         weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    return F.linear(input, weight, bias)
+    return linear(input, weight, bias)
 
 
 quantized_decomposed_lib.define(

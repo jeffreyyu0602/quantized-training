@@ -60,13 +60,6 @@ task_to_keys = {
 }
 
 
-TORCHVISION_MODELS = {
-    "resnet18": models.resnet18,
-    "resnet50": models.resnet50,
-    "mobilenet": models.mobilenet_v2,
-}
-
-
 vector_stages = [
     [
         ["gemm"],
@@ -77,7 +70,7 @@ vector_stages = [
         ["div", "quantize"],
     ],
     [
-        ["layer_norm", torch.nn.Softmax, torch.nn.functional.softmax],
+        ["layer_norm", "softmax"],
         ["quantize"],
     ]
 ]
@@ -145,6 +138,32 @@ if __name__ == "__main__":
         action="store_true",
         help="Quantization scheme to use for LLMs."
     )
+    parser.add_argument(
+        "--bank_size",
+        type=int,
+        default=None,
+        help="Total memory size in bytes in each bank of memory."
+    )
+    parser.add_argument(
+        "--weight_persistent",
+        action="store_true",
+        help="Whether to keep weights in memory during inference."
+    )
+    parser.add_argument(
+        "--transpose_weight",
+        action="store_true",
+        help="Whether to transpose weights for executing on the accelerator."
+    )
+    parser.add_argument(
+        "--transpose_fc",
+        action="store_true",
+        help="Whether to transpose the weight of the fully connected layer."
+    )
+    parser.add_argument(
+        "--use_maxpool_2x2",
+        action="store_true",
+        help="Whether to use 2x2 maxpool for resnet18 and resnet50."
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
@@ -158,18 +177,31 @@ if __name__ == "__main__":
 
     torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
 
+    transform_args = {
+        "patterns": vector_stages,
+        "transpose_weight": args.transpose_weight,
+        "transpose_fc": args.transpose_fc,
+    }
+
     compile_args = {
         "bank_width": args.bank_width,
+        "bank_size": args.bank_size,
+        "weight_persistent": args.weight_persistent,
         "output_dir": args.output_dir,
         "output_file": args.model,
     }
 
-    if args.model in TORCHVISION_MODELS:
-        model = TORCHVISION_MODELS[args.model](pretrained=True).eval()
+    if args.model in models.__dict__:
+        try:
+            model = models.__dict__[args.model](weights=args.model_name_or_path)
+        except Exception as e:
+            model = models.__dict__[args.model](pretrained=True)
 
-        if args.model_name_or_path:
-            checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
+            if args.model_name_or_path:
+                checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
+                model.load_state_dict(checkpoint['state_dict'], strict=False)
+
+        model.eval()
 
         if args.bf16:
             model.bfloat16()
@@ -179,11 +211,12 @@ if __name__ == "__main__":
             model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
 
         # Accelerator only supports 2x2 maxpool
-        for module in model.modules():
-            if isinstance(module, torch.nn.MaxPool2d):
-                module.kernel_size = 2
-                module.stride = 2
-                module.padding = 0
+        if args.use_maxpool_2x2:
+            for module in model.modules():
+                if isinstance(module, torch.nn.MaxPool2d):
+                    module.kernel_size = 2
+                    module.stride = 2
+                    module.padding = 0
 
         quantizer.set_module_name("fc", None)
 
@@ -215,7 +248,7 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(gm, example_args, **transform_args)
         compile(gm, example_args, **compile_args)
     elif args.model == "segformer":
         replace_interpolate()
@@ -254,7 +287,7 @@ if __name__ == "__main__":
         convert_pt2e(gm, args.bias)
 
         # TODO why the output is different after replacing gelu with vmap
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(gm, example_args, **transform_args)
         compile(gm, example_args, **compile_args)
 
         orig_output = orig_output.logits
@@ -349,7 +382,7 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(gm, example_args, **transform_args)
         compile(gm, example_args, **compile_args)
     elif args.model == "bert":
         if args.model_name_or_path is None:
@@ -418,7 +451,7 @@ if __name__ == "__main__":
         gm = prepare_pt2e(BertWrapper(), quantizer, example_args)
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(gm, example_args, **transform_args)
         compile(gm, example_args, **compile_args)
     elif args.model == "llm_prefill" or args.model == "llm_decode":
         from transformers import AutoModelForCausalLM
@@ -531,7 +564,7 @@ if __name__ == "__main__":
         convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(
-            gm, example_args, example_kwargs=example_kwargs, patterns=vector_stages
+            gm, example_args, example_kwargs=example_kwargs, **transform_args
         )
 
         compile(gm, example_args, **compile_args)
@@ -572,7 +605,7 @@ if __name__ == "__main__":
 
         pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        orig_output, new_output = transform(gm, example_args, **transform_args)
         compile(gm, example_args, **compile_args)
 
         orig_output = orig_output.logits

@@ -3,12 +3,13 @@ from collections import defaultdict
 from typing import Dict, Tuple, Callable, Any, Union, List
 
 import torch
-from torch._export import capture_pre_autograd_graph
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
 from torch.fx import GraphModule, Node
 from torch.fx.graph import map_arg
 from accelerate.big_modeling import infer_auto_device_map
 from accelerate.utils import get_max_memory
+
+from .quantize_pt2e import export_model
 
 
 __all__ = [
@@ -228,7 +229,7 @@ def get_aten_graph_module(
     """
     if is_cuda:
         example_inputs = tuple([x.cuda() if isinstance(x, torch.Tensor) else x for x in example_inputs])
-    aten_pattern = capture_pre_autograd_graph(
+    aten_pattern = export_model(
         pattern,
         example_inputs,
         example_kwargs,

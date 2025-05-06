@@ -1,16 +1,16 @@
 import itertools
 import logging
-from typing import Callable, List
+from typing import Callable, List, Set
 
 import torch
-from torch._export import capture_pre_autograd_graph
-from torch.fx import GraphModule
+from torch.fx import GraphModule, Node
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import replace_node_with_graph_module
+from .mapping_utils import _is_elementwise_op
 from ..pt2e_utils import get_aten_graph_module
-from ..quantize_pt2e import create_getattr_from_value
+from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
 logger = logging.getLogger(__name__)
@@ -20,12 +20,16 @@ __all__ = [
     "convert_cat_with_mismatched_shapes_to_stack",
     "convert_expand_to_memory_copy",
     "get_conv_bn_layers",
+    "insert_permute_adapters_for_conv2d",
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_target_with_vmap",
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",
+    "replace_target",
     "rewrite_quantize_mx_for_lastdim",
+    "transpose_linear_weights",
+    "strip_softmax_dtype",
 ]
 
 
@@ -212,7 +216,7 @@ def convert_cat_with_mismatched_shapes_to_stack(model: GraphModule):
                 output = torch.stack(result, dim=0)
                 return output.reshape(*shape, *output.shape[1:])
 
-        gm = capture_pre_autograd_graph(Concat(), (*args[0],))
+        gm = export_model(Concat(), (*args[0],))
         replace_node_with_graph_module(model, gm, node)
 
     model.graph.lint()
@@ -271,10 +275,7 @@ def convert_expand_to_memory_copy(model: torch.fx.GraphModule):
 
                 return input
 
-        gm: torch.fx.GraphModule = capture_pre_autograd_graph(
-            Expand(), (input_node.meta["val"],)
-        )
-
+        gm = export_model(Expand(), (input_node.meta["val"],))
         replace_node_with_graph_module(model, gm, node)
         model.graph.erase_node(node)
 
@@ -587,3 +588,146 @@ def pad_vit_embeddings_output(
     model.graph.lint()
     model.recompile()
     return model
+
+
+def is_conv2d(node: Node) -> bool:
+    return node.op == "call_function" and node.target == torch.ops.aten.conv2d.default
+
+
+def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[Node]:
+    """DFS downstream traversal to find conv2d nodes connected through elementwise ops."""
+    stack = [start]
+    chain = set()
+
+    while stack:
+        node = stack.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+
+        chain.add(node)
+
+        for user in node.users:
+            if is_conv2d(user) or _is_elementwise_op(user) or user.target in [
+                torch.ops.aten.adaptive_avg_pool2d.default,
+                torch.ops.aten.max_pool2d.default,
+            ]:
+                stack.append(user)
+
+    return chain
+
+
+def insert_permute_adapters_for_conv2d(model: GraphModule):
+    graph = model.graph
+    visited: Set[Node] = set()
+
+    for node in graph.nodes:
+        if not is_conv2d(node) or node in visited:
+            continue
+
+        print(f"Processing conv2d node: {node}")
+
+        conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
+
+        print(f"Conv chain: {conv_chain}")
+
+        input_nodes = set()
+        output_nodes = set()
+        conv_nodes = set()
+
+        for n in conv_chain:
+            for arg in n.all_input_nodes:
+                if arg not in conv_chain and arg.op != "get_attr":
+                    input_nodes.add(arg)
+
+            for user in n.users:
+                if user not in conv_chain:
+                    output_nodes.add(n)
+
+            if is_conv2d(n):
+                conv_nodes.add(n)
+
+        print(f"Input nodes: {input_nodes}")
+        print(f"Output nodes: {output_nodes}")
+        print(f"Conv nodes: {conv_nodes}")
+
+        # Insert pre-permute before each input point
+        permute_nodes = {}
+        for n in conv_chain:
+            for arg in n.all_input_nodes:
+                if arg not in conv_chain and arg.op != "get_attr":
+                    if arg not in permute_nodes:
+                        with graph.inserting_after(arg):
+                            permute_nodes[arg] = graph.call_function(
+                                torch.ops.aten.permute.default,
+                                args=(arg, (0, 2, 3, 1))
+                            )
+                    n.replace_input_with(arg, permute_nodes[arg])
+
+        # Insert post-permute after each output point
+        for n in output_nodes:
+            print(f"Insert post-permute for {n}")
+            with graph.inserting_after(n):
+                permute_node = graph.call_function(
+                    torch.ops.aten.permute.default,
+                    args=(n, (0, 3, 1, 2))
+                )
+            n.replace_all_uses_with(permute_node)
+            permute_node.replace_input_with(permute_node, n)
+
+        for n in conv_nodes:
+            print(f"Replace conv2d with permute for {n}")
+            print(n, n.args)
+            weight_node = n.args[1]
+            param = model.get_parameter(weight_node.target)
+            param.data = param.data.permute(2, 3, 0, 1)
+
+            with graph.inserting_before(n):
+                conv_node = graph.call_function(
+                    torch.ops.quantized_ops.conv2d.default, args=n.args
+                )
+            n.replace_all_uses_with(conv_node)
+            graph.erase_node(n)
+
+    model.graph.print_tabular()
+
+    graph.lint()
+    model.recompile()
+    return model
+
+
+def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
+    for node in model.graph.nodes:
+        if node.target != torch.ops.aten.linear.default:
+            continue
+
+        input_node = node.args[0]
+        input_shape = input_node.meta["val"].shape
+        if not transpose_fc and sum(input_shape[:-1]) == 1:
+            continue
+
+        weight_node = node.args[1]
+        weight = model.get_parameter(weight_node.target)
+        weight.data = weight.data.T
+
+        with model.graph.inserting_before(node):
+            linear_node = model.graph.call_function(
+                torch.ops.quantized_ops.linear.default, args=node.args
+            )
+
+        node.replace_all_uses_with(linear_node)
+        model.graph.erase_node(node)
+
+    model.graph.lint()
+    model.recompile()
+    return model
+
+
+def replace_target(module: torch.fx.GraphModule, target_to_replace, new_target):
+    class ReplaceTarget(torch.fx.Transformer):
+        def call_function(self, target, args, kwargs):
+            if target != target_to_replace:
+                return super().call_function(target, args, kwargs)
+            return super().call_function(new_target, args, kwargs)
+
+    return ReplaceTarget(module).transform()
