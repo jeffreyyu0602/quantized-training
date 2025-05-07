@@ -57,6 +57,7 @@ per_tensor_symmetric: qscheme = QScheme.PER_TENSOR_SYMMETRIC
 per_channel_symmetric: qscheme = QScheme.PER_CHANNEL_SYMMETRIC
 microscaling: qscheme = QScheme.MICROSCALING
 
+aten = torch.ops.aten
 quantized_ops = torch.ops.quantized_ops
 OPERATOR_MAPPINGS = {
     "gemm": [nn.Conv2d, nn.Linear, F.conv2d, F.linear, torch.matmul, operator.matmul],
@@ -93,36 +94,37 @@ def transform(
     from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
+    ShapeProp(model).propagate(*flatten_args)
+
+    # replace_conv2d_with_im2col(model)
+
     if transpose_weight:
         insert_permute_adapters_for_conv2d(model)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
 
         replace_target(
-            model,
-            torch.ops.aten.max_pool2d.default,
-            torch.ops.quantized_ops.max_pool2d.default
+            model, aten.max_pool2d.default, quantized_ops.max_pool2d.default
         )
 
         replace_target(
-            model,
-            torch.ops.aten.adaptive_avg_pool2d.default,
-            torch.ops.quantized_ops.adaptive_avg_pool2d.default
+            model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default
         )
 
     # Turn batched matmul into multiple matmuls
-    ShapeProp(model).propagate(*flatten_args)
     split_multi_head_attention(model)
 
     # Convert torch.expand in Grouped Query Attention to memory copy
     convert_expand_to_memory_copy(model)
 
-    # Perform transformations to the model
     ShapeProp(model).propagate(*flatten_args)
+
+    # Perform transformations to the model
     convert_cat_and_stack_as_stack_on_dim0(model)
     convert_cat_with_mismatched_shapes_to_stack(model)
 
-    # Move quantize and dequantize ops to the end of last compute op
     ShapeProp(model).propagate(*flatten_args)
+
+    # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
 
     for pattern in patterns:
@@ -159,6 +161,8 @@ def compile(
 
     allocator = MemoryAllocator(total_memory, bank_width=bank_width, bank_size=bank_size)
     run_memory_mapping(model, allocator, weight_persistent)
+
+    os.makedirs(output_dir, exist_ok=True)
     allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
     model_params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))

@@ -16,6 +16,7 @@ __all__ = [
     "insert_permute_adapters_for_conv2d",
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
+    "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",

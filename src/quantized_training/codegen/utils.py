@@ -1,5 +1,7 @@
+import collections
 import itertools
 import logging
+from itertools import repeat
 from typing import Callable, List, Set
 
 import torch
@@ -23,6 +25,7 @@ __all__ = [
     "insert_permute_adapters_for_conv2d",
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
+    "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",
@@ -622,14 +625,16 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
     visited: Set[Node] = set()
 
     for node in graph.nodes:
-        if not is_conv2d(node) or node in visited:
+        if not is_conv2d(node) and node.target not in [
+            torch.ops.aten.adaptive_avg_pool2d.default,
+            torch.ops.aten.max_pool2d.default,
+        ]:
             continue
 
-        print(f"Processing conv2d node: {node}")
+        if node in visited:
+            continue
 
         conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
-
-        print(f"Conv chain: {conv_chain}")
 
         input_nodes = set()
         output_nodes = set()
@@ -647,10 +652,6 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             if is_conv2d(n):
                 conv_nodes.add(n)
 
-        print(f"Input nodes: {input_nodes}")
-        print(f"Output nodes: {output_nodes}")
-        print(f"Conv nodes: {conv_nodes}")
-
         # Insert pre-permute before each input point
         permute_nodes = {}
         for n in conv_chain:
@@ -666,7 +667,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
         # Insert post-permute after each output point
         for n in output_nodes:
-            print(f"Insert post-permute for {n}")
+            logger.info(f"Insert post-permute for {n}")
             with graph.inserting_after(n):
                 permute_node = graph.call_function(
                     torch.ops.aten.permute.default,
@@ -676,8 +677,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             permute_node.replace_input_with(permute_node, n)
 
         for n in conv_nodes:
-            print(f"Replace conv2d with permute for {n}")
-            print(n, n.args)
+            logger.info(f"Replace conv2d with permute for {n}")
             weight_node = n.args[1]
             param = model.get_parameter(weight_node.target)
             param.data = param.data.permute(2, 3, 0, 1)
@@ -686,10 +686,9 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
                 conv_node = graph.call_function(
                     torch.ops.quantized_ops.conv2d.default, args=n.args
                 )
+            conv_node.meta = n.meta
             n.replace_all_uses_with(conv_node)
             graph.erase_node(n)
-
-    model.graph.print_tabular()
 
     graph.lint()
     model.recompile()
@@ -697,6 +696,16 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
 
 def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
+    """
+    Transpose the weights of linear layers in the given FX graph module.
+
+    Args:
+        model (GraphModule): The FX graph module to transform.
+        transpose_fc (bool): If True, transpose the weights of fully connected layers.
+
+    Returns:
+        GraphModule: The transformed FX graph module with transposed weights.
+    """
     for node in model.graph.nodes:
         if node.target != torch.ops.aten.linear.default:
             continue
@@ -715,6 +724,8 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
                 torch.ops.quantized_ops.linear.default, args=node.args
             )
 
+        linear_node.meta = node.meta
+
         node.replace_all_uses_with(linear_node)
         model.graph.erase_node(node)
 
@@ -723,11 +734,114 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     return model
 
 
-def replace_target(module: torch.fx.GraphModule, target_to_replace, new_target):
-    class ReplaceTarget(torch.fx.Transformer):
-        def call_function(self, target, args, kwargs):
-            if target != target_to_replace:
-                return super().call_function(target, args, kwargs)
-            return super().call_function(new_target, args, kwargs)
+def replace_target(model: torch.fx.GraphModule, target_to_replace, new_target):
+    graph = model.graph
+    for node in graph.nodes:
+        if node.target != target_to_replace:
+            continue
+        with graph.inserting_after(node):
+            new_node = graph.call_function(new_target, node.args)
+        new_node.meta = node.meta
+        node.replace_all_uses_with(new_node)
+        graph.erase_node(node)
+    graph.lint()
+    graph.eliminate_dead_code()
+    model.recompile()
 
-    return ReplaceTarget(module).transform()
+
+def _ntuple(n, name="parse"):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return tuple(x)
+        return tuple(repeat(x, n))
+
+    parse.__name__ = name
+    return parse
+
+
+_single = _ntuple(1, "_single")
+_pair = _ntuple(2, "_pair")
+
+
+def replace_conv2d_with_im2col(model: GraphModule):
+    """
+    Replace Conv2d operations with In2col operations in the given FX graph module.
+
+    Args:
+        model (GraphModule): The FX graph module to transform.
+
+    Returns:
+        GraphModule: The transformed FX graph module.
+    """
+    for node in model.graph.nodes:
+        if node.target != torch.ops.aten.conv2d.default:
+            continue
+
+        input_node = node.args[0]
+        weight_node = node.args[1]
+
+        if input_node.value.shape[1] != 3:
+            continue
+
+        N, C_in, H_in, W_in = input_node.value.shape
+        C_out, _, kH, kW = weight_node.value.shape
+
+        args = [None, None, None, 1, 0, 1, 1]
+        args[:len(node.args)] = node.args
+
+        stride = _pair(args[3])
+        padding = _pair(args[4])
+        dilation = _pair(args[5])
+
+        H_out = (H_in + 2 * padding[0] - dilation[0] * (kH - 1) - 1) // stride[0] + 1
+        W_out = (W_in + 2 * padding[1] - dilation[1] * (kW - 1) - 1) // stride[1] + 1
+
+        param = model.get_parameter(weight_node.target)
+        param.data = param.data.reshape(C_out, -1)
+
+        bias_node = args[2]
+        if bias_node is not None:
+            param = model.get_parameter(bias_node.target)
+            param.data = param.data.reshape(C_out, 1)
+
+        with model.graph.inserting_before(node):
+            in2col_node = model.graph.call_function(
+                torch.ops.aten.im2col.default,
+                (input_node, (kH, kW), dilation, padding, stride),
+            )
+            matmul_node = model.graph.call_function(
+                torch.ops.aten.matmul.default,
+                (weight_node, in2col_node),
+            )
+            add_node = model.graph.call_function(
+                torch.ops.aten.add.Tensor,
+                (matmul_node, bias_node),
+            )
+            reshape_node = model.graph.call_function(
+                torch.ops.aten.reshape.default,
+                (add_node, (N, C_out, H_out, W_out)),
+            )
+
+        node.replace_all_uses_with(reshape_node)
+        model.graph.erase_node(node)
+
+    model.graph.lint()
+    model.recompile()
+    return model
+
+
+def extract_input_preprocessor(model: GraphModule):
+    """
+    Extract the input preprocessor from the model.
+
+    Args:
+        model (GraphModule): The FX graph module to transform.
+
+    Returns:
+        GraphModule: The transformed FX graph module with the input preprocessor extracted.
+    """
+    placeholder = next(iter(n for n in model.graph.nodes if n.op == "placeholder"))
+
+    model.graph.lint()
+    model.recompile()
+    return model
