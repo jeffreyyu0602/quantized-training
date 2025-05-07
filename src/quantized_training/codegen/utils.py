@@ -680,7 +680,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             logger.info(f"Replace conv2d with permute for {n}")
             weight_node = n.args[1]
             param = model.get_parameter(weight_node.target)
-            param.data = param.data.permute(2, 3, 0, 1)
+            param.data = param.data.permute(2, 3, 1, 0)
 
             with graph.inserting_before(n):
                 conv_node = graph.call_function(

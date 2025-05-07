@@ -29,7 +29,7 @@ def conv2d(
 ) -> torch.Tensor:
     return F.conv2d(
         input.permute(0, 3, 1, 2),
-        weight.permute(2, 3, 0, 1),
+        weight.permute(3, 2, 0, 1),
         bias,
         stride,
         padding,
