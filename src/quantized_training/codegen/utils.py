@@ -711,7 +711,7 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
             continue
 
         input_node = node.args[0]
-        input_shape = input_node.meta["val"].shape
+        input_shape = input_node.value.shape
         if not transpose_fc and sum(input_shape[:-1]) == 1:
             continue
 
