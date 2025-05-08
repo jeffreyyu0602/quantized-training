@@ -76,28 +76,29 @@ vector_stages = [
 ]
 
 
-LLAMA_MP_QSCHEME = {
-    r"self_attn\.q_proj$": [
-        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-    ],
-    r"self_attn\.k_proj$": [
-        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-    ],
-    r"self_attn\.v_proj$": [
-        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "int2,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-    ],
-    r"self_attn\.o_proj$": [
-        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-    ],
-    torch.ops.aten.matmul.default: [
-        "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
-    ],
-}
+def get_mp_qscheme(bs=64):
+    return {
+        r"self_attn\.q_proj$": [
+            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
+        r"self_attn\.k_proj$": [
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
+        r"self_attn\.v_proj$": [
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
+        r"self_attn\.o_proj$": [
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
+        torch.ops.aten.matmul.default: [
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"int6,qs=microscaling,bs={bs},ax=-2,scale=fp8_e5m3",
+        ],
+    }
 
 
 if __name__ == "__main__":
@@ -137,6 +138,12 @@ if __name__ == "__main__":
         "--mixed_precision",
         action="store_true",
         help="Quantization scheme to use for LLMs."
+    )
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        default=64,
+        help="Block size for quantization."
     )
     parser.add_argument(
         "--bank_size",
@@ -551,7 +558,7 @@ if __name__ == "__main__":
                 return logits
 
         if args.mixed_precision:
-            set_qscheme(quantizer, LLAMA_MP_QSCHEME)
+            set_qscheme(quantizer, get_mp_qscheme(bs=args.block_size))
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 
