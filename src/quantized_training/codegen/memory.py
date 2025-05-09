@@ -112,11 +112,18 @@ class MemoryAllocator:
                 num_bytes = dtype_byte_size(node.value.dtype)
             tensor_size = node.value.numel() * num_bytes
 
-            # TODO the hardware unroll dimension is hardcoded
-            conv2d_user = get_user_with_target(node, torch.ops.aten.conv2d.default)
-            if conv2d_user is not None and conv2d_user.args[0] == node and node.value.shape[1] < 16:
-                logger.warning(f"Node {node} requires replication. Increase memory size.")
-                tensor_size *= 2
+            # This logic is going to be removed in the future
+            conv2d_user = get_user_with_target(node, [
+                torch.ops.aten.conv2d.default,
+                torch.ops.quantized_ops.conv2d.default,
+            ])
+            
+            if conv2d_user is not None:
+                input_node = conv2d_user.args[0]
+                input_node = input_node.meta.get('source_node', input_node)
+                if input_node == node and node.value.shape[1] < 16:
+                    logger.warning(f"Node {node} requires replication. Increase memory size.")
+                    tensor_size *= 2
 
             tensor_size = self.align_size(tensor_size)
         elif isinstance(node.value, (tuple, list)):
