@@ -108,7 +108,8 @@ def set_output_field(param, node, output_dir):
             )
 
             if memory is not None:
-                tensor.memory = Memory(partition=partition, address=int(address)),
+                tensor.memory.partition = partition
+                tensor.memory.address = int(address)
                 address += node.meta.get("output_sizes")[i]
 
             if output_dir is not None:
@@ -209,6 +210,8 @@ def _is_gemm_op(node: Node) -> bool:
         torch.ops.aten.conv2d.default,
         torch.ops.aten.linear.default,
         torch.ops.aten.matmul.default,
+        torch.ops.quantized_ops.conv2d.default,
+        torch.ops.quantized_ops.linear.default,
         torch.ops.quantized_ops.conv2d_mx.default,
         torch.ops.quantized_ops.linear_mx.default,
         torch.ops.quantized_ops.matmul_mx.default,

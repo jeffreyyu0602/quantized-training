@@ -1,8 +1,9 @@
 import collections
 import itertools
 import logging
+import operator
 from itertools import repeat
-from typing import Callable, List, Set
+from typing import Callable, List, Set, Tuple, Union
 
 import torch
 from torch.fx import GraphModule, Node
@@ -329,14 +330,14 @@ def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
     _matches: List[InternalMatch] = matcher.match(original_graph)
     print(f"Found {len(_matches)} matches")
 
-    get_attr_node = next(iter(n for n in pattern_graph.nodes if n.name == "_param_constant0"))
+    weight_node = next(iter(n for n in pattern_graph.nodes if n.target == "weight"))
 
     for match in _matches:
         input_node = match.placeholder_nodes[0]
         output_node = match.returning_nodes[0]
         input_shape = input_node.meta["val"].shape
-        new_get_attr_node = match.nodes_map[get_attr_node]
-        layer_norm_inputs = [input_node, [input_shape[-1]], new_get_attr_node]
+        new_weight_node = match.nodes_map[weight_node]
+        layer_norm_inputs = [input_node, [input_shape[-1]], new_weight_node]
 
         with original_graph.inserting_before(output_node):
             new_node = original_graph.call_function(
@@ -593,8 +594,48 @@ def pad_vit_embeddings_output(
     return model
 
 
+def _ntuple(n, name="parse"):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return tuple(x)
+        return tuple(repeat(x, n))
+
+    parse.__name__ = name
+    return parse
+
+
+_pair = _ntuple(2, "_pair")
+
+
+def conv2d_transposed(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None,
+    stride: Union[int, Tuple[int]] = 1,
+    padding: Union[int, Tuple[int]] = 0,
+    dilation: Union[int, Tuple[int]] = 1,
+    groups: int = 1,
+) -> torch.Tensor:
+    return torch.ops.aten.conv2d.default(
+        input.permute(0, 3, 1, 2),
+        weight.permute(3, 2, 0, 1),
+        bias,
+        _pair(stride),
+        _pair(padding),
+        _pair(dilation),
+        groups,
+    ).permute(0, 2, 3, 1)
+
+
+def linear_transposed(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+    return torch.ops.aten.linear.default(input, weight.T, bias)
+
+
 def is_conv2d(node: Node) -> bool:
-    return node.op == "call_function" and node.target == torch.ops.aten.conv2d.default
+    return node.op == "call_function" and node.target in [
+        torch.ops.aten.conv2d.default,
+        torch.ops.quantized_ops.conv2d_mx.default
+    ]
 
 
 def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[Node]:
@@ -610,19 +651,34 @@ def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[N
 
         chain.add(node)
 
-        for user in node.users:
+        for user in list(node.users.keys()) + node.all_input_nodes:
             if is_conv2d(user) or _is_elementwise_op(user) or user.target in [
                 torch.ops.aten.adaptive_avg_pool2d.default,
                 torch.ops.aten.max_pool2d.default,
+                torch.ops.quantized_ops.quantize_mx.default,
+                operator.getitem,
             ]:
                 stack.append(user)
 
     return chain
 
 
+def get_parameter_or_buffer(model: torch.nn.Module, name: str):
+    """Retrieve a parameter or buffer from the model by name."""
+    if name in dict(model.named_parameters()):
+        return model.get_parameter(name)
+    if name in dict(model.named_buffers()):
+        return model.get_buffer(name)
+    if hasattr(model, name):
+        return getattr(model, name)
+    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
+
+
 def insert_permute_adapters_for_conv2d(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
+
+    torch.nn.functional.conv2d = conv2d_transposed
 
     for node in graph.nodes:
         if not is_conv2d(node) and node.target not in [
@@ -636,59 +692,63 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
         conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
 
-        input_nodes = set()
-        output_nodes = set()
-        conv_nodes = set()
-
-        for n in conv_chain:
-            for arg in n.all_input_nodes:
-                if arg not in conv_chain and arg.op != "get_attr":
-                    input_nodes.add(arg)
-
-            for user in n.users:
-                if user not in conv_chain:
-                    output_nodes.add(n)
-
-            if is_conv2d(n):
-                conv_nodes.add(n)
-
         # Insert pre-permute before each input point
-        permute_nodes = {}
+        pre_permute_nodes = {}
+        post_permute_nodes = {}
+        node_map = {}
         for n in conv_chain:
             for arg in n.all_input_nodes:
-                if arg not in conv_chain and arg.op != "get_attr":
-                    if arg not in permute_nodes:
-                        with graph.inserting_after(arg):
-                            permute_nodes[arg] = graph.call_function(
-                                torch.ops.aten.permute.default,
-                                args=(arg, (0, 2, 3, 1))
-                            )
-                    n.replace_input_with(arg, permute_nodes[arg])
+                if arg in conv_chain or arg.op == "get_attr" or arg in node_map:
+                    continue
+                logger.debug(f"Insert pre-permute for {arg}")
+                if arg not in pre_permute_nodes:
+                    with graph.inserting_after(arg):
+                        pre_permute_nodes[arg] = graph.call_function(
+                            torch.ops.aten.permute.default,
+                            args=(arg, (0, 2, 3, 1))
+                        )
+                n.replace_input_with(arg, pre_permute_nodes[arg])
 
-        # Insert post-permute after each output point
-        for n in output_nodes:
-            logger.info(f"Insert post-permute for {n}")
-            with graph.inserting_after(n):
-                permute_node = graph.call_function(
-                    torch.ops.aten.permute.default,
-                    args=(n, (0, 3, 1, 2))
-                )
-            n.replace_all_uses_with(permute_node)
-            permute_node.replace_input_with(permute_node, n)
+            for user in list(n.users.keys()):
+                if user in conv_chain or user in node_map:
+                    continue
+                logger.debug(f"Insert post-permute for {n}")
+                with graph.inserting_before(user):
+                    permute_node = graph.call_function(
+                        torch.ops.aten.permute.default,
+                        args=(n, (0, 3, 1, 2))
+                    )
+                user.replace_input_with(n, permute_node)
 
-        for n in conv_nodes:
-            logger.info(f"Replace conv2d with permute for {n}")
+            if n.target == torch.ops.quantized_ops.quantize_mx.default:
+                n.args = n.args[:1] + (-1,) + n.args[2:]
+
+            if not is_conv2d(n):
+                continue
+
+            logger.debug(f"Permuting weights for {n}")
             weight_node = n.args[1]
-            param = model.get_parameter(weight_node.target)
+            param = get_parameter_or_buffer(model, weight_node.target)
             param.data = param.data.permute(2, 3, 1, 0)
+
+            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
+                scale_node = n.kwargs.get("weight_scale")
+                scale = get_parameter_or_buffer(model, scale_node.target)
+                scale.data = scale.data.permute(2, 3, 1, 0)
+                continue
 
             with graph.inserting_before(n):
                 conv_node = graph.call_function(
                     torch.ops.quantized_ops.conv2d.default, args=n.args
                 )
+
+            logger.debug(f"Replace {n} with permute for {conv_node}")
+
             conv_node.meta = n.meta
             n.replace_all_uses_with(conv_node)
             graph.erase_node(n)
+
+            node_map[conv_node] = n
 
     graph.lint()
     model.recompile()
@@ -706,8 +766,13 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     Returns:
         GraphModule: The transformed FX graph module with transposed weights.
     """
-    for node in model.graph.nodes:
-        if node.target != torch.ops.aten.linear.default:
+    torch.nn.functional.linear = linear_transposed
+
+    for node in model.graph.nodes: 
+        if node.target not in [
+            torch.ops.aten.linear.default,
+            torch.ops.quantized_ops.linear_mx.default,
+        ]:
             continue
 
         input_node = node.args[0]
@@ -716,8 +781,14 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
             continue
 
         weight_node = node.args[1]
-        weight = model.get_parameter(weight_node.target)
+        weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
+
+        if node.target == torch.ops.quantized_ops.linear_mx.default:
+            scale_node = node.kwargs.get("weight_scale")
+            scale = get_parameter_or_buffer(model, scale_node.target)
+            scale.data = scale.data.T
+            continue
 
         with model.graph.inserting_before(node):
             linear_node = model.graph.call_function(
@@ -747,20 +818,6 @@ def replace_target(model: torch.fx.GraphModule, target_to_replace, new_target):
     graph.lint()
     graph.eliminate_dead_code()
     model.recompile()
-
-
-def _ntuple(n, name="parse"):
-    def parse(x):
-        if isinstance(x, collections.abc.Iterable):
-            return tuple(x)
-        return tuple(repeat(x, n))
-
-    parse.__name__ = name
-    return parse
-
-
-_single = _ntuple(1, "_single")
-_pair = _ntuple(2, "_pair")
 
 
 def replace_conv2d_with_im2col(model: GraphModule):

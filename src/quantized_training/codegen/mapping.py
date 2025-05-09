@@ -337,14 +337,44 @@ def _create_subgraph(nodes: List[Node]):
     return gm, tuple(new_args)
 
 
+def get_submodule_name(model, nodes: List[Node]):
+    from transformers.utils.import_utils import is_torch_greater_or_equal
+
+    if is_torch_greater_or_equal("2.5"):
+        gemm_node = next((n for n in nodes if _is_gemm_op(n)), None)
+
+        if gemm_node is not None and gemm_node.target in [
+            torch.ops.aten.conv2d.default,
+            torch.ops.quantized_ops.conv2d.default,
+            torch.ops.quantized_ops.conv2d_mx.default,
+            torch.ops.aten.linear.default,
+            torch.ops.quantized_ops.linear.default,
+            torch.ops.quantized_ops.linear_mx.default,
+        ]:
+            weight_node = gemm_node.args[1]
+            return weight_node.name.split("weight")[0] + "fused"
+        
+        if gemm_node is not None and gemm_node.target in [
+            torch.ops.aten.matmul.default,
+            torch.ops.quantized_ops.matmul_mx.default,
+        ]:
+            return gemm_node.name + "_fused"
+        
+        return nodes[0].name + "_fused"
+ 
+    get_new_node_name = get_new_attr_name_with_prefix('submodule_')
+    return get_new_node_name(model)
+
+
 def _create_and_insert_subgraph(
     nodes: List[Node],
     model: torch.nn.Module,
     named_modules: Dict[str, torch.nn.Module]
 ) -> Node:
     submodule, new_args = _create_subgraph(nodes)
-    get_new_node_name = get_new_attr_name_with_prefix('submodule_')
-    node_name = get_new_node_name(model)
+    # get_new_node_name = get_new_attr_name_with_prefix('submodule_')
+    # node_name = get_new_node_name(model)
+    node_name = get_submodule_name(model, nodes)
     setattr(model, node_name, submodule)
     named_modules[node_name] = submodule
     with model.graph.inserting_after(nodes[-1]):
@@ -862,7 +892,7 @@ def run_memory_mapping(
 
         if node.target == operator.getitem:
             input_node = node.args[0]
-            output_sizes = node.meta["output_sizes"]
+            output_sizes = input_node.meta["output_sizes"]
             start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
             size = output_sizes[node.args[1]]
             node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)

@@ -28,15 +28,8 @@ def conv2d(
     groups: int = 1,
 ) -> torch.Tensor:
     return F.conv2d(
-        input.permute(0, 3, 1, 2),
-        weight.permute(3, 2, 0, 1),
-        bias,
-        stride,
-        padding,
-        dilation,
-        groups,
-    ).permute(0, 2, 3, 1)
-
+        input, weight, bias, stride, padding, dilation, groups
+    )
 
 quantized_decomposed_lib.define(
     "linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor"
@@ -44,7 +37,7 @@ quantized_decomposed_lib.define(
 
 @impl(quantized_decomposed_lib, "linear", "CompositeExplicitAutograd")
 def linear(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
-    return F.linear(input, weight.T, bias)
+    return F.linear(input, weight, bias)
 
 quantized_decomposed_lib.define(
     "max_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, "
@@ -216,7 +209,7 @@ def conv2d_mx(
     if weight_scale is not None:
         weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    return conv2d(input, weight, bias, stride, padding, dilation, groups)
+    return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 
 quantized_decomposed_lib.define(
@@ -248,7 +241,7 @@ def linear_mx(
     if weight_scale is not None:
         weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    return linear(input, weight, bias)
+    return F.linear(input, weight, bias)
 
 
 quantized_decomposed_lib.define(
