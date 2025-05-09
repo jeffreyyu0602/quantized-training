@@ -199,10 +199,13 @@ if __name__ == "__main__":
     }
 
     if args.model in models.__dict__:
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "DEFAULT"
+
         try:
             model = models.__dict__[args.model](weights=args.model_name_or_path)
         except Exception as e:
-            model = models.__dict__[args.model](pretrained=True)
+            model = models.__dict__[args.model]()
 
             if args.model_name_or_path:
                 checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
