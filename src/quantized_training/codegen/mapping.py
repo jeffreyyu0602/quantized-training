@@ -3,6 +3,7 @@ import itertools
 import logging
 import operator
 import os
+import re
 from collections import defaultdict
 from typing import List, Dict, Callable
 
@@ -833,7 +834,7 @@ def run_memory_mapping(
     # Store all the weights in memory if persistent is enabled
     if weight_persistent:
         for node in model.graph.nodes:
-            if node.op == "get_attr" and "code" not in node.name:
+            if node.op == "get_attr" and not re.fullmatch(r"code_\d+", node.name):
                 node.meta["memory"] = allocator.allocate_memory(node)
 
     # Store inputs to the model in memory
@@ -922,7 +923,7 @@ def run_memory_mapping(
         # Allocate memory for input parameters
         if not weight_persistent:
             for n in node.all_input_nodes:
-                if n.op == "get_attr" and "code" not in n.name:
+                if n.op == "get_attr" and not re.fullmatch(r"code_\d+", n.name):
                     n.meta["memory"] = allocator.allocate_memory(n)
 
         # For stacked layers, place them next to each other so that we can
