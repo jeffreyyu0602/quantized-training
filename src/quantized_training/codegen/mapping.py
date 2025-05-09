@@ -958,7 +958,8 @@ def run_memory_mapping(
 
         nodes_to_delete = delete_unused_values(node)
         for n in nodes_to_delete:
-            allocator.free_memory(n)
+            if n.op != "get_attr" or not weight_persistent:
+                allocator.free_memory(n)
 
 
 def gen_code(model, args, output_dir=None):
