@@ -205,7 +205,7 @@ if __name__ == "__main__":
         try:
             model = models.__dict__[args.model](weights=args.model_name_or_path).eval()
         except Exception as e:
-            model = models.__dict__[args.model](weights="DEFAULT").eval()
+            model = models.__dict__[args.model](pretrained=True).eval()
 
             if args.model_name_or_path:
                 checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
