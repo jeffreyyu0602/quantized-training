@@ -203,15 +203,13 @@ if __name__ == "__main__":
             args.model_name_or_path = "DEFAULT"
 
         try:
-            model = models.__dict__[args.model](weights=args.model_name_or_path)
+            model = models.__dict__[args.model](weights=args.model_name_or_path).eval()
         except Exception as e:
-            model = models.__dict__[args.model]()
+            model = models.__dict__[args.model](weights="DEFAULT").eval()
 
             if args.model_name_or_path:
                 checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
                 model.load_state_dict(checkpoint['state_dict'], strict=False)
-
-        model.eval()
 
         if args.bf16:
             model.bfloat16()
