@@ -184,6 +184,9 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     if _is_nop(node) or is_addressing_op(node) or node.target == operator.getitem:
         op_overload.op = "nop"
 
+    if node.target == torch.ops.aten.pad.default:
+        op_overload.op = "cpu"
+
     new_args_and_kwargs = normalize_function(
         node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
     )

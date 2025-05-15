@@ -448,8 +448,8 @@ if __name__ == "__main__":
                     if args.remove_duplicate:
                         break
 
-                first_token_tensor = hidden_states[:, 0]
-                output = self.classifier(first_token_tensor)
+                hidden_states = self.bert.pooler(layer_outputs)
+                output = self.classifier(hidden_states)
                 return output
 
         example_args = (embedding_output, extended_attention_mask, head_mask)
