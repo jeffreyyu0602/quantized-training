@@ -65,7 +65,7 @@ vector_stages = [
         ["gemm"],
         ["dequantize"],
         ["add", "sub", "mul", "div"],
-        ["exp", "abs", "relu", "gelu", "silu", "vmap"],
+        ["exp", "abs", "relu", "gelu", "tanh", "silu", "vmap"],
         ["add", "mul", "div"],
         ["div", "quantize"],
     ],
@@ -404,36 +404,50 @@ if __name__ == "__main__":
         if args.bf16:
             model.bfloat16()
 
-        input_ids = torch.randint(0, 30522, (1, 128), dtype=torch.long)
-        input_shape = input_ids.size()
+        # Setup SST-2 dataset
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        raw_datasets = load_dataset("glue", args.task_name)
 
-        token_type_ids = torch.zeros(input_shape, dtype=torch.long)
-        position_ids = torch.ones(input_shape, dtype=torch.long)
-        head_mask = None
+        sentence1_key, sentence2_key = task_to_keys[args.task_name]
+
+        def preprocess_function(examples):
+            # Tokenize the texts
+            texts = (
+                (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
+            )
+            result = tokenizer(*texts, padding="max_length", max_length=128, truncation=True)
+            result["labels"] = examples["label"]
+            return result
+
+        processed_datasets = raw_datasets.map(
+            preprocess_function,
+            batched=True,
+            remove_columns=raw_datasets["train"].column_names,
+            desc="Running tokenizer on dataset",
+        )
+
+        train_dataset = processed_datasets["train"]
+        train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
+
+        batch = next(iter(train_dataloader))
+        input_ids = batch["input_ids"]
+        input_shape = input_ids.size()
 
         embedding_output = model.bert.embeddings(
             input_ids=input_ids,
-            position_ids=position_ids,
-            token_type_ids=token_type_ids,
         )
 
-        attention_mask = torch.ones(input_shape)
+        extended_attention_mask = model.bert.get_extended_attention_mask(batch["attention_mask"], input_shape)
 
-        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-        # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = model.bert.get_extended_attention_mask(attention_mask, input_shape)
+        head_mask = model.bert.get_head_mask(None, model.config.num_hidden_layers)
 
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = model.bert.get_head_mask(head_mask, model.config.num_hidden_layers)
+        example_args = (embedding_output, extended_attention_mask, head_mask)
 
         class BertWrapper(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.bert = model.bert
+                self.pooler = model.bert.pooler
                 self.classifier = model.classifier
 
             def forward(self, hidden_states, attention_mask, head_mask):
@@ -448,15 +462,24 @@ if __name__ == "__main__":
                     if args.remove_duplicate:
                         break
 
-                hidden_states = self.bert.pooler(layer_outputs)
+                hidden_states = self.bert.pooler(hidden_states)
                 output = self.classifier(hidden_states)
                 return output
 
-        example_args = (embedding_output, extended_attention_mask, head_mask)
-
+        quantizer.set_module_name("pooler", None)
         quantizer.set_module_name("classifier", None)
 
         gm = prepare_pt2e(BertWrapper(), quantizer, example_args)
+
+        for step, batch in enumerate(tqdm(train_dataloader)):
+            embedding_output = model.bert.embeddings(
+                input_ids=batch["input_ids"],
+            )
+            gm(embedding_output, extended_attention_mask, head_mask)
+
+            if step == args.calibration_steps:
+                break
+
         convert_pt2e(gm, args.bias)
 
         orig_output, new_output = transform(gm, example_args, **transform_args)
