@@ -84,6 +84,7 @@ def transform(
     patterns=None,
     transpose_weight=False,
     transpose_fc=False,
+    conv2d_padding=None,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -97,18 +98,14 @@ def transform(
     ShapeProp(model).propagate(*flatten_args)
 
     # replace_conv2d_with_im2col(model)
+    if conv2d_padding is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
 
     if transpose_weight:
         insert_permute_adapters_for_conv2d(model)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
-
-        replace_target(
-            model, aten.max_pool2d.default, quantized_ops.max_pool2d.default
-        )
-
-        replace_target(
-            model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default
-        )
+        replace_target(model, aten.max_pool2d.default, quantized_ops.max_pool2d.default)
+        replace_target(model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default)
 
     # Turn batched matmul into multiple matmuls
     split_multi_head_attention(model)

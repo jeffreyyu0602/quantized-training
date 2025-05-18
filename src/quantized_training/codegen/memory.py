@@ -121,7 +121,8 @@ class MemoryAllocator:
             if conv2d_user is not None:
                 input_node = conv2d_user.args[0]
                 input_node = input_node.meta.get('source_node', input_node)
-                if input_node == node and node.value.shape[1] < 16:
+                dim = 1 if input_node.target == torch.ops.aten.conv2d.default else -1
+                if input_node == node and node.value.shape[dim] < 16:
                     logger.warning(f"Node {node} requires replication. Increase memory size.")
                     tensor_size *= 2
 

@@ -6,6 +6,7 @@ from itertools import repeat
 from typing import Callable, List, Set, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from torch.fx import GraphModule, Node
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
@@ -25,6 +26,7 @@ __all__ = [
     "get_conv_bn_layers",
     "insert_permute_adapters_for_conv2d",
     "pad_gemm_inputs_to_hardware_unroll_size",
+    "pad_conv2d_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
@@ -49,6 +51,17 @@ def get_conv_bn_layers(model):
                 if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
                     layers.append([module_names[k-1], name])
     return layers
+
+
+def get_parameter_or_buffer(model: torch.nn.Module, name: str):
+    """Retrieve a parameter or buffer from the model by name."""
+    if name in dict(model.named_parameters()):
+        return model.get_parameter(name)
+    if name in dict(model.named_buffers()):
+        return model.get_buffer(name)
+    if hasattr(model, name):
+        return getattr(model, name)
+    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
 
 
 def fuse(model: torch.fx.GraphModule) -> torch.nn.Module:
@@ -447,29 +460,18 @@ def strip_softmax_dtype(model: torch.fx.GraphModule):
 
 def pad_gemm_inputs_to_hardware_unroll_size(
     model: torch.fx.GraphModule,
-    c_unroll: int = 32,
-    k_unroll: int = 32,
+    C_unroll: int = 32,
+    K_unroll: int = 32,
 ) -> torch.fx.GraphModule:
     """
     Pad inputs to GEMM (matrix multiplication) nodes in a torch.fx.GraphModule so that
-    the dimensions C and K are multiples of the provided unroll factors.
-
-    The GEMM operation is assumed to multiply:
-        - input1 of shape [..., X, C]
-        - input2 of shape [..., C, K]
-    resulting in an output of shape [..., X, K].
-
-    Padding is applied as follows:
-        - For input1: pad the C dimension (last dimension) by pad_C.
-        - For input2: pad the C dimension (second-to-last) by pad_C and the K dimension (last)
-          by pad_K.
-
-    After the GEMM, the output is sliced to remove the extra padded columns in the K dimension.
+    the dimensions C and K are multiples of the provided unroll factors. After the GEMM,
+    the output is sliced to remove the extra padded columns in the K dimension.
 
     Parameters:
         model (torch.fx.GraphModule): The FX graph module to transform.
-        c_unroll (int): Unroll factor for the C (shared inner) dimension.
-        k_unroll (int): Unroll factor for the K dimension.
+        C_unroll (int): Unroll factor for the C (shared inner) dimension.
+        K_unroll (int): Unroll factor for the K dimension.
 
     Returns:
         torch.fx.GraphModule: The transformed FX graph module.
@@ -494,8 +496,8 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         K = shape2[-1]
 
         # Compute required padding.
-        pad_C = (c_unroll - (C % c_unroll)) % c_unroll
-        pad_K = (k_unroll - (K % k_unroll)) % k_unroll
+        pad_C = (C_unroll - (C % C_unroll)) % C_unroll
+        pad_K = (K_unroll - (K % K_unroll)) % K_unroll
 
         # Pad input1 (shape: [..., X, C]) along C dimension if needed.
         if pad_C > 0:
@@ -534,6 +536,78 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                     user.replace_input_with(output_node, sliced_output)
             if (dtype := output_node.meta.get("dtype")) is not None:
                 sliced_output.meta["dtype"] = dtype
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def pad_conv2d_inputs_to_hardware_unroll_size(
+    model: torch.fx.GraphModule,
+    C_unroll: int = 32,
+    K_unroll: int = 32,
+) -> torch.fx.GraphModule:
+    """
+    Pad inputs and weights to conv2d nodes in a torch.fx.GraphModule so that
+    the input channels (C) and output channels (K) are multiples of the provided
+    unroll factors.
+
+    Parameters:
+        model (torch.fx.GraphModule): The FX graph module to transform.
+        C_unroll (int): Unroll factor for the input channels (C_in).
+        K_unroll (int): Unroll factor for the output channels (C_out).
+
+    Returns:
+        torch.fx.GraphModule: The transformed FX graph module.
+    """
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.conv2d.default:
+            continue
+
+        input, weight = node.args[:2]
+        input_shape = input.meta["val"].shape  # [N, C_in, H, W]
+        weight_shape = weight.meta["val"].shape  # [C_out, C_in, KH, KW]
+
+        C_in = input_shape[1]
+        C_out = weight_shape[0]
+
+        pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
+        pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
+
+        # Pad input along C dimension
+        if pad_C > 0:
+            pad_dims_input = [0, 0, 0, 0, 0, pad_C]
+            with model.graph.inserting_before(node):
+                padded_input = model.graph.call_function(
+                    torch.ops.aten.pad.default,
+                    (input, pad_dims_input),
+                )
+            node.replace_input_with(input, padded_input)
+            if (dtype := input.meta.get("dtype")) is not None:
+                padded_input.meta["dtype"] = dtype
+
+        # Pad weight along K and C
+        if pad_C > 0 or pad_K > 0:
+            param = get_parameter_or_buffer(model, weight.target)
+            pad_dims_weight = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+            param.data = F.pad(param.data, pad_dims_weight)
+
+        # Slice output along channel dimension to remove padding in C_out
+        if pad_K:
+            user_node = next(iter(node.users))
+            output_node = node
+
+            with model.graph.inserting_before(user_node):
+                slice_node = model.graph.call_function(
+                    torch.ops.aten.slice.Tensor,
+                    (output_node, 1, 0, C_out),
+                )
+            for user in list(output_node.users):
+                if id(user) != id(slice_node):
+                    user.replace_input_with(output_node, slice_node)
+            if (dtype := output_node.meta.get("dtype")) is not None:
+                slice_node.meta["dtype"] = dtype
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
@@ -661,17 +735,6 @@ def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[N
                 stack.append(user)
 
     return chain
-
-
-def get_parameter_or_buffer(model: torch.nn.Module, name: str):
-    """Retrieve a parameter or buffer from the model by name."""
-    if name in dict(model.named_parameters()):
-        return model.get_parameter(name)
-    if name in dict(model.named_buffers()):
-        return model.get_buffer(name)
-    if hasattr(model, name):
-        return getattr(model, name)
-    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
 
 
 def insert_permute_adapters_for_conv2d(model: GraphModule):
