@@ -171,6 +171,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use 2x2 maxpool for resnet18 and resnet50."
     )
+    parser.add_argument(
+        "--padding",
+        default=None,
+        help="Hardware unroll dimensions for the accelerator."
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
@@ -188,6 +193,7 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
+        "conv2d_padding": tuple(map(int, args.padding.split(','))),
     }
 
     compile_args = {

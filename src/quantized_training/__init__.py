@@ -97,9 +97,9 @@ def transform(
 
     ShapeProp(model).propagate(*flatten_args)
 
-    # replace_conv2d_with_im2col(model)
     if conv2d_padding is not None:
         pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+        ShapeProp(model).propagate(*flatten_args)
 
     if transpose_weight:
         insert_permute_adapters_for_conv2d(model)

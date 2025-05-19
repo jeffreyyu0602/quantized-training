@@ -765,6 +765,10 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         target = source_fn_stack[-1][1] if len(source_fn_stack) > 0 else new_node.target
         source_fn_stack.append((new_node.name, target))
 
+        if hasattr(node, "shape"):
+            new_node.shape = node.shape
+            new_node.value = node.value
+
         return nodes_on_path
 
     # First, move the dequantize nodes before the stack and view nodes that

@@ -566,11 +566,8 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
             continue
 
         input, weight = node.args[:2]
-        input_shape = input.meta["val"].shape  # [N, C_in, H, W]
-        weight_shape = weight.meta["val"].shape  # [C_out, C_in, KH, KW]
-
-        C_in = input_shape[1]
-        C_out = weight_shape[0]
+        C_in = input.shape[1]
+        C_out = weight.shape[0]
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
@@ -592,6 +589,10 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
             param = get_parameter_or_buffer(model, weight.target)
             pad_dims_weight = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
             param.data = F.pad(param.data, pad_dims_weight)
+
+            if len(node.args) > 2 and node.args[2] is not None:
+                bias_param = get_parameter_or_buffer(model, node.args[2].target)
+                bias_param.data = F.pad(bias_param.data, [0, pad_K])
 
         # Slice output along channel dimension to remove padding in C_out
         if pad_K:

@@ -62,7 +62,7 @@ def get_max_val(dtype):
 
     if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
         if match.group(2) is not None:
-            return 2 ** int(match.group(2)) - 1
+            return 2 ** (int(match.group(2)) - 1) - 1
         return 1
 
     return None
