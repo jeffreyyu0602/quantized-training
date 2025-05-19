@@ -173,6 +173,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--padding",
+        type=lambda x: tuple(map(int, x.split(','))),
         default=None,
         help="Hardware unroll dimensions for the accelerator."
     )
@@ -193,7 +194,7 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
-        "conv2d_padding": tuple(map(int, args.padding.split(','))),
+        "conv2d_padding": args.padding,
     }
 
     compile_args = {
