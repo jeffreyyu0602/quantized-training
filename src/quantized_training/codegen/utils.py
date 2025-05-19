@@ -565,6 +565,9 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
         if node.target != torch.ops.aten.conv2d.default:
             continue
 
+        if len(node.args) < 7 or node.args[6] != 1:
+            continue
+
         input, weight = node.args[:2]
         C_in = input.shape[1]
         C_out = weight.shape[0]
