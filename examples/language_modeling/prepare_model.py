@@ -2,16 +2,25 @@ import torch
 from quantized_training import QuantizationSpec, QuantizationConfig
 
 
-QUANTIZATION_CONFIG = {
-    "q_0": {
-        r"self_attn\.[qkvo]_proj$": "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        r"mlp.(?:gate|up|down)_proj$": [
+QUANTIZATION_CONFIGS = {
+    "Q4_0": {
+        torch.nn.Linear: [
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3"
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        ],
+        torch.ops.aten.matmul.default: [
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4_6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
+        ],
+    },
+    "Q4_1": {
+        torch.nn.Linear: [
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
         ],
         torch.ops.aten.matmul.default: [
             "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-            "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3"
+            "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
         ],
     }
 }
@@ -36,16 +45,16 @@ def set_qscheme(quantizer, qscheme):
             raise ValueError(f"Invalid qspec: {qspec}")
 
         if isinstance(module_name_or_op_type, tuple):
-            print("Setting module name and object type for", module_name_or_op_type)
+            print("Setting qconfig for module name or object type: ", module_name_or_op_type)
             quantizer.set_module_name_object_type_order(*module_name_or_op_type, qconfig)
         if isinstance(module_name_or_op_type, str):
-            print("Setting module name for", module_name_or_op_type)
+            print("Setting qconfig for module name:", module_name_or_op_type)
             quantizer.set_module_name(module_name_or_op_type, qconfig)
         elif isinstance(module_name_or_op_type, torch._ops.OpOverload):
-            print("Setting op overload for", module_name_or_op_type)
+            print("Setting qconfig for op overload:", module_name_or_op_type)
             quantizer.set_object_type(module_name_or_op_type, qconfig)
         else:
-            print("Setting module type for", module_name_or_op_type)
+            print("Setting qconfig for module type:", module_name_or_op_type)
             quantizer.set_module_type(module_name_or_op_type, qconfig)
 
     return quantizer

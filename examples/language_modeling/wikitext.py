@@ -73,11 +73,12 @@ def main(args):
     )
 
     quantizer.set_module_name_object_type_order(
-        r"model.rotary_emb", torch.ops.aten.matmul.default, 0, None
+        r"model\.rotary_emb", torch.ops.aten.matmul.default, 0, None
     )
 
-    from prepare_model import set_qscheme
-    set_qscheme(quantizer, args.qscheme)
+    from prepare_model import set_qscheme, QUANTIZATION_CONFIGS
+    if (qscheme := QUANTIZATION_CONFIGS.get(args.qscheme)) is not None:
+        set_qscheme(quantizer, qscheme)
 
     input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
     example_args = (input_ids,)
@@ -85,9 +86,9 @@ def main(args):
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
     dynamic_shapes = {"input_ids": {1: seq_len}, "labels": {1: seq_len}, "use_cache": None}
 
-    gm = get_aten_graph_module(model, example_args, example_kwargs, dynamic_shapes)
-    gm.graph.print_tabular()
-    print_node_scope_tabular(gm)
+    # gm = get_aten_graph_module(model, example_args, example_kwargs, dynamic_shapes)
+    # gm.graph.print_tabular()
+    # print_node_scope_tabular(gm)
 
     # New LLaMA implementation includes @torch.no_grad() statement, which will turn
     # gradient on if capture_pre_autograd_graph is not called with torch.no_grad().

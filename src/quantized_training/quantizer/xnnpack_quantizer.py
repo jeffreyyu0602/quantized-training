@@ -131,9 +131,9 @@ def _get_module_name_object_type_order_filter(
     def module_name_object_type_order_filter(n: Node) -> bool:
         current_scope = node_name_to_scope[n.name]
         return (
-            (module_name == current_scope[0] or re.search(current_scope[0], module_name)) and
-            object_type == n.target and
-            index == current_scope[2]
+            (module_name == current_scope[0] or re.search(module_name, current_scope[0]))
+            and object_type == n.target
+            and index == current_scope[2]
         )
 
     return module_name_object_type_order_filter
