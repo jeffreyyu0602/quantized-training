@@ -716,6 +716,28 @@ def fuse_op_with_input(
         )
 
 
+def _is_qkv_permute(node):
+    import math
+
+    # Don't support head dimension not being a power of 2
+    if (
+        not hasattr(node, 'shape') or
+        not len(node.shape) != 4 or
+        not math.log2(node.shape[-1]).is_integer()
+    ):
+        return False
+
+    if node.target == torch.ops.aten.permute.default:
+        dims = node.args[1]
+        return len(dims) == 4 and dims == [0, 2, 1, 3]
+
+    if node.target == torch.ops.aten.transpose.int:
+        dims = {x if x >= 0 else x + 4 for x in node.args[1:]}
+        return node.value.ndim == 4 and dims == {2, 3}
+
+    return False
+
+
 def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
@@ -738,42 +760,38 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     if operations is not None:
         fused_nodes_list = find_sequential_nodes(model, operations)
 
-    for reshape_node in list(graph.nodes):
-        if not _is_reshape_op(reshape_node):
-            continue
-
-        if not is_tranpose(reshape_node):
+    for node in list(graph.nodes):
+        if _is_qkv_permute(node):
             match_found = True
 
-            input_node = reshape_node.all_input_nodes[0]
+            input_node = node.all_input_nodes[0]
 
-            fused_nodes = [reshape_node]
+            fused_nodes = [node]
             while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
                 if (
                     len(input_node.users) > 1 or
                     len(input_node.all_input_nodes) != 1 or
                     not _is_nop(input_node)
                 ):
-                    logger.debug(f"Cannot fuse {reshape_node} with {input_node}")
+                    logger.debug(f"Cannot fuse {node} with {input_node}")
                     match_found = False
                     break
                 fused_nodes.insert(0, input_node)
                 input_node = input_node.all_input_nodes[0]
 
             if match_found and len(input_node.users) == 1:
-                nodes_map[reshape_node] = input_node
+                nodes_map[node] = input_node
                 if (group := search_group(input_node, fused_nodes_list)) is not None:
                     group.extend(n for n in fused_nodes if n not in group)
                 else:
                     fused_nodes.insert(0, input_node)
                     fused_nodes_list.append(fused_nodes)
-                continue
+        elif _is_reshape_op(node):
+            nodes = fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, node)
 
-        nodes = fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, reshape_node)
-
-        for n in nodes:
-            if n.target == torch.ops.aten.transpose.int:
-                move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
+            for n in nodes:
+                if n.target == torch.ops.aten.transpose.int:
+                    move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
     for node in list(graph.nodes):
         if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
