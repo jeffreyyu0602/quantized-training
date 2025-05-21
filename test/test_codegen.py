@@ -265,7 +265,13 @@ if __name__ == "__main__":
 
         old_output = gm(*example_args)
 
-        transform(gm, example_args, **transform_args)
+        transform(gm, example_args, **transform_args, fuse_operator=False)
+
+        from quantized_training import extract_input_preprocessor, fuse
+        gm, preprocess_fn = extract_input_preprocessor(gm)
+
+        example_args = (preprocess_fn(example_args[0]),)
+        fuse(gm, vector_stages, example_args)
 
         gm.graph.print_tabular()
         new_output = gm(*example_args)
