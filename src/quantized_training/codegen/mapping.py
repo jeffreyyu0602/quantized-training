@@ -722,7 +722,7 @@ def _is_qkv_permute(node):
     # Don't support head dimension not being a power of 2
     if (
         not hasattr(node, 'shape') or
-        not len(node.shape) != 4 or
+        len(node.shape) != 4 or
         not math.log2(node.shape[-1]).is_integer()
     ):
         return False
