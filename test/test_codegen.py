@@ -263,7 +263,13 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, **transform_args)
+        old_output = gm(*example_args)
+
+        transform(gm, example_args, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)
+
         compile(gm, example_args, **compile_args)
     elif args.model == "segformer":
         replace_interpolate()
@@ -301,12 +307,15 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        # TODO why the output is different after replacing gelu with vmap
-        orig_output, new_output = transform(gm, example_args, **transform_args)
-        compile(gm, example_args, **compile_args)
+        old_output = gm(*example_args).logits
 
-        orig_output = orig_output.logits
-        new_output = new_output.logits
+        # TODO why the output is different after replacing gelu with vmap
+        transform(gm, example_args, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args).logits
+
+        compile(gm, example_args, **compile_args)
     elif args.model == "mobilebert":
         if args.model_name_or_path is None:
             args.model_name_or_path = "google/mobilebert-uncased"
@@ -397,7 +406,13 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, **transform_args)
+        old_output = gm(*example_args)
+
+        transform(gm, example_args, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)
+
         compile(gm, example_args, **compile_args)
     elif args.model == "bert":
         if args.model_name_or_path is None:
@@ -489,7 +504,13 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, **transform_args)
+        old_output = gm(*example_args)
+
+        transform(gm, example_args, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)
+
         compile(gm, example_args, **compile_args)
     elif args.model == "llm_prefill" or args.model == "llm_decode":
         from transformers import AutoModelForCausalLM
@@ -601,9 +622,12 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(
-            gm, example_args, example_kwargs=example_kwargs, **transform_args
-        )
+        old_output = gm(*example_args, **example_kwargs)
+
+        transform(gm, example_args, example_kwargs=example_kwargs, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args, *list(example_kwargs.values()))
 
         compile(gm, example_args, **compile_args)
     elif args.model == "vit":
@@ -643,11 +667,21 @@ if __name__ == "__main__":
 
         pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
 
-        orig_output, new_output = transform(gm, example_args, **transform_args)
-        compile(gm, example_args, **compile_args)
+        old_output = gm(*example_args).logits
 
-        orig_output = orig_output.logits
-        new_output = new_output.logits
+        transform(gm, example_args, **transform_args, fuse_operator=False)
+
+        from quantized_training import extract_input_preprocessor, fuse
+        gm, preprocess_fn = extract_input_preprocessor(gm)
+
+        example_args = (preprocess_fn(example_args[0]),)
+
+        fuse(gm, vector_stages, example_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args).logits
+
+        compile(gm, example_args, **compile_args)
     elif args.model == "yolo5":
         import sys
         sys.path.append("libraries/yolov5-face")
@@ -678,11 +712,14 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
-        compile(gm, example_args, **compile_args)
+        old_output = gm(*example_args)[0]
 
-        orig_output = orig_output[0]
-        new_output = new_output[0]
+        transform(gm, example_args, patterns=vector_stages)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)[0]
+
+        compile(gm, example_args, **compile_args)
     elif args.model == "mobilevit":
         try:
             import timm
@@ -707,15 +744,21 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        orig_output, new_output = transform(gm, example_args, patterns=vector_stages)
+        old_output = gm(*example_args)
+
+        transform(gm, example_args, patterns=vector_stages)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)
+
         compile(gm, example_args, **compile_args)
     else:
         raise ValueError(f"Model {args.model} not supported")
 
     try:
-        assert torch.all(orig_output == new_output)
+        assert torch.all(old_output == new_output)
         print("Results match")
     except Exception as e:
         print(e)
-        print(orig_output)
+        print(old_output)
         print(new_output)

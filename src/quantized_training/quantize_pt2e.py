@@ -469,6 +469,36 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
     input_node = node.args[0]
 
+    node_to_quantize = input_node
+
+    if activation_post_process.outlier_threshold is not None and input_node.op != "get_attr":
+        with graph.inserting_before(node):
+            filter_node = graph.call_function(
+                torch.ops.quantized_ops.filter_outlier.default,
+                (input_node, activation_post_process.outlier_threshold),
+                {}
+            )
+            node_to_quantize = graph.call_function(
+                operator.getitem,
+                (filter_node, 0),
+                {}
+            )
+            csr_data_node = graph.call_function(
+                operator.getitem,
+                (filter_node, 1),
+                {}
+            )
+            indices_node = graph.call_function(
+                operator.getitem,
+                (filter_node, 2),
+                {}
+            )
+            indptr_node = graph.call_function(
+                operator.getitem,
+                (filter_node, 3),
+                {}
+            )
+
     device = assert_and_get_unique_device(activation_post_process)
     code = get_quantization_map(activation_post_process.dtype, device)
 
@@ -571,7 +601,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                     model, model.graph, "code_", activation_post_process.scale_code)
 
             quantize_mx_inputs = [
-                input_node,
+                node_to_quantize,
                 activation_post_process.ch_axis,
                 activation_post_process.quant_max,
                 activation_post_process.block_size,
@@ -658,21 +688,59 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         # Replace the node with its MX counterpart
         if user.target in MX_OP_MAPPING:
             with graph.inserting_before(user):
-                new_node = graph.call_function(
+                mx_op_node = graph.call_function(
                     MX_OP_MAPPING[user.target], user.args, kwargs
                 )
 
-            user.replace_all_uses_with(new_node)
+            user.replace_all_uses_with(mx_op_node)
             graph.erase_node(user)
 
-            new_node.meta = user.meta
+            mx_op_node.meta = user.meta
 
-            source_fn_st = new_node.meta.setdefault("source_fn_stack", [])
-            target = source_fn_st[-1][1] if len(source_fn_st) > 0 else new_node.target
-            source_fn_st.append((new_node.name, target))
+            source_fn_st = mx_op_node.meta.setdefault("source_fn_stack", [])
+            target = source_fn_st[-1][1] if len(source_fn_st) > 0 else mx_op_node.target
+            source_fn_st.append((mx_op_node.name, target))
+        elif user.target in MX_OP_MAPPING.values():
+            mx_op_node = user
+            mx_op_node.kwargs = kwargs
+        elif user.target == torch.ops.quantized_ops.spmm_csr.default:
+            user.args = user.args[:-1] + (quantized_node,)
         else:
-            assert user.target in MX_OP_MAPPING.values()
-            user.kwargs = kwargs
+            raise RuntimeError(
+                f"Unsupported user node {user.target} for quantization, "
+                f"expected one of {list(MX_OP_MAPPING.keys())}"
+            )
+
+        if activation_post_process.outlier_threshold is not None and input_node.op != "get_attr":
+            # For now only support linear layers
+            assert mx_op_node.target in [
+                torch.ops.aten.linear.default,
+                torch.ops.quantized_ops.linear_mx.default,
+            ], (
+                f"Only torch.nn.Linear is supported for outlier suppresion, got {user.target}"
+            )
+
+            weight_node = mx_op_node.args[1]
+
+            with graph.inserting_before(user):
+                spmm_node = graph.call_function(
+                    torch.ops.quantized_ops.spmm_csr.default,
+                    (csr_data_node, indices_node, indptr_node, weight_node),
+                    {
+                        "B_scale": scale_node,
+                        "B_code": dequant_code,
+                        "block_size": activation_post_process.block_size,
+                    },
+                )
+
+                add_node = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    (spmm_node, mx_op_node),
+                    {},
+                )
+
+            mx_op_node.replace_all_uses_with(add_node)
+            add_node.replace_input_with(add_node, mx_op_node)
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):

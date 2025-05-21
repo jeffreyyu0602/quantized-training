@@ -349,7 +349,7 @@ def _is_nop(node: Node) -> bool:
     to keep the compute graph intact.
     """
     # A slice from 0 to the end of the input tensor
-    if node.target == torch.ops.aten.slice.Tensor:
+    if node.target == torch.ops.aten.slice.Tensor and hasattr(node.args[0], "shape"):
         input_shape = node.args[0].shape
         default_args = [0, None, None, 1]
         dim, start, end, step = list(node.args[1:]) + default_args[len(node.args) - 1:]

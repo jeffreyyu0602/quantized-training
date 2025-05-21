@@ -60,6 +60,24 @@ def eliminate_dead_code(self):
     return changed
 
 
+def propagate_shape(node: Node):
+    args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+    kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: n.value)
+    node.value = node.target(*args, **kwargs)
+    node.shape = node.value.shape
+
+
+def get_parameter_or_buffer(model: torch.nn.Module, name: str):
+    """Retrieve a parameter or buffer from the model by name."""
+    if name in dict(model.named_parameters()):
+        return model.get_parameter(name)
+    if name in dict(model.named_buffers()):
+        return model.get_buffer(name)
+    if hasattr(model, name):
+        return getattr(model, name)
+    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
+
+
 def replace_node_with_graph_module(self: GraphModule, module: GraphModule, source: Node) -> List[Node]:
     args_iter = iter(source.all_input_nodes)
     value_remap = {}
@@ -78,7 +96,7 @@ def replace_node_with_graph_module(self: GraphModule, module: GraphModule, sourc
         else:
             with self.graph.inserting_before(source):
                 if node.op == 'get_attr':
-                    param = getattr(module, node.target)
+                    param = get_parameter_or_buffer(module, node.target)
                     get_attr_node = create_getattr_from_value(
                         self, self.graph, "_tensor_constant_", param)
                     value_remap[node] = get_attr_node
@@ -90,6 +108,9 @@ def replace_node_with_graph_module(self: GraphModule, module: GraphModule, sourc
                 value_remap[node].meta['source_fn_stack'] = [
                     (value_remap[node].name, source_fn[1])
                 ]
+
+        if node.op != 'output':
+            propagate_shape(value_remap[node])
 
     return [value_remap[n] for n in output_node.args[0]]
 
@@ -635,9 +656,13 @@ def move_transpose_after_select(
 
         group = search_group(node, candidates)
         group.remove(node)
+        group.append(new_node)
+
         for n in select_nodes:
             group.remove(n)
-        group.append(new_node)
+            propagate_shape(n)
+
+        propagate_shape(new_node)
 
         mapped_node = nodes_map.pop(node, None)
         nodes_map[new_node] = (
@@ -702,14 +727,15 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     encounter a node with multiple users, we duplicate all the elements on the path
     and perform fusion on each branch.
     """
+    graph = model.graph
+    named_modules = dict(model.named_modules(remove_duplicate=False))
+    named_buffers = dict(model.named_buffers())
+
     nodes_map = {}
     fused_nodes_list = []
 
     if operations is not None:
         fused_nodes_list = find_sequential_nodes(model, operations)
-
-    graph = model.graph
-    named_modules = dict(model.named_modules(remove_duplicate=False))
 
     for reshape_node in list(graph.nodes):
         if not _is_reshape_op(reshape_node):
@@ -717,9 +743,10 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
         if not is_tranpose(reshape_node):
             match_found = True
-            fused_nodes = [reshape_node]
+
             input_node = reshape_node.all_input_nodes[0]
 
+            fused_nodes = [reshape_node]
             while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
                 if (
                     len(input_node.users) > 1 or
@@ -729,7 +756,6 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                     logger.debug(f"Cannot fuse {reshape_node} with {input_node}")
                     match_found = False
                     break
-
                 fused_nodes.insert(0, input_node)
                 input_node = input_node.all_input_nodes[0]
 
@@ -778,8 +804,6 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
     nodes_map = {v.name: k.name for k, v in nodes_map.items()}
 
-    named_buffers = dict(model.named_buffers())
-
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
 
@@ -807,13 +831,21 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
         # Update the metadata of all the user nodes that consumes the new node
         for user in list(node.users):
-            if user.op == "call_module":
-                submodule = named_modules[user.target]
-                submodule_nodes = [n for n in submodule.graph.nodes if n.op == 'placeholder']
+            if user.op != "call_module":
+                continue
 
-                index = user.args.index(node)
-                submodule_nodes[index].meta['source_node'] = node
-                submodule_nodes[index].name = node.name
+            mod = named_modules[user.target]
+            placeholders = [n for n in mod.graph.nodes if n.op == 'placeholder']
+
+            index = user.args.index(node)
+            placeholders[index].meta['source_node'] = node
+            placeholders[index].name = node.name
+
+        args = map_arg(node.args, lambda n: n.value)
+        kwargs = map_arg(node.kwargs, lambda n: n.value)
+        output = gm(*args, **kwargs)
+        node.value = output
+        node.shape = output.shape
 
     graph.lint()
 
@@ -828,6 +860,8 @@ def run_memory_mapping(
     allocator: MemoryAllocator = None,
     weight_persistent: bool = False,
 ):
+    graph = model.graph
+
     if allocator is None:
         allocator = MemoryAllocator(DEFAULT_MEMORY_SIZE)
 
@@ -882,14 +916,16 @@ def run_memory_mapping(
         else:
             return dtype_byte_size(n.value.dtype)
 
-    for node in model.graph.nodes:
+    for node in list(model.graph.nodes):
         if node.op not in ["call_function", "call_module"]:
             continue
+
+        need_allocate = True
 
         # Propagate memory metadata for nop nodes
         if _is_nop(node):
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
-            continue
+            need_allocate = False
 
         if node.target == operator.getitem:
             input_node = node.args[0]
@@ -897,11 +933,10 @@ def run_memory_mapping(
             start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
             size = output_sizes[node.args[1]]
             node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
-            continue
+            need_allocate = False
 
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
-        # if node.target == torch.ops.aten.select.int and node.args[1] == 0:
         if (
             node.target == torch.ops.aten.select.int and
             all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
@@ -909,7 +944,7 @@ def run_memory_mapping(
             size = node.value.numel() * get_num_bytes(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
             node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
-            continue
+            need_allocate = False
 
         # We use the partition of the first input tensor since it preallocates
         # memory for all the tensors in the stack operation (read below)
@@ -936,23 +971,51 @@ def run_memory_mapping(
             raise
 
         if next_node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            first_arg = next_node.args[0][0]
+
+            # If the first node is a param node, we need to copy it to a new location
+            # to avoid overwriting the original memory location
+            if weight_persistent:
+                first_arg_src = first_arg
+                while _is_nop(first_arg_src) or _is_indexing_or_concatenation_op(first_arg_src):
+                    first_arg_src = first_arg_src.all_input_nodes[0]
+
+                if first_arg_src.op == "get_attr":
+                    with graph.inserting_before(next_node):
+                        copy_node = graph.call_function(
+                            torch.ops.aten.add.Scalar, (first_arg, 0)
+                        )
+
+                    next_node.replace_input_with(first_arg, copy_node)
+                    register_last_uses(copy_node, next_node)
+
+                    copy_node.value, copy_node.shape = first_arg.value, first_arg.shape
+
+                    if id(node) == id(first_arg):
+                        node = copy_node
+                    first_arg = copy_node
+
             tensor_sizes = [
                 allocator.align_size(n.value.numel() * get_num_bytes(n))
                 for n in next_node.args[0]
             ]
 
-            first_node = next_node.args[0][0]
-            if (memory := first_node.meta.get("memory", None)) is None:
-                memory = allocator.allocate_memory(first_node, sum(tensor_sizes))
-                first_node.meta["memory"] = memory
+            if (memory := first_arg.meta.get("memory", None)) is None:
+                memory = allocator.allocate_memory(first_arg, sum(tensor_sizes))
+                first_arg.meta["memory"] = memory
 
             index = next_node.args[0].index(node)
             if index > 0:
                 start_offset = memory.start + sum(tensor_sizes[:index])
                 size = tensor_sizes[index]
                 node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
-        else:
-            node.meta["memory"] = allocator.allocate_memory(node)
+
+            continue
+
+        if not need_allocate:
+            continue
+
+        node.meta["memory"] = allocator.allocate_memory(node)
 
         allocator.snapshot()
 

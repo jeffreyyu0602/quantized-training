@@ -357,3 +357,96 @@ def quantize_mx(
     )
     input = quantize(input, scale, dtype, code, block_size)
     return scale, input
+
+
+def to_csr(tensor: torch.Tensor):
+    assert not tensor.is_sparse, "Expected a dense tensor (not PyTorch's sparse format)"
+
+    tensor = tensor.reshape(-1, tensor.shape[-1])
+    rows, cols = tensor.shape
+    data = []
+    indices = []
+    indptr = [0]
+
+    nnz = 0
+    for row in range(rows):
+        row_data = tensor[row]
+        for col in range(cols):
+            val = row_data[col].item()
+            if val != 0:
+                data.append(val)
+                indices.append(col)
+                nnz += 1
+        indptr.append(nnz)
+
+    return torch.tensor(data), torch.tensor(indices, dtype=torch.int32), torch.tensor(indptr, dtype=torch.int32)
+
+
+quantized_decomposed_lib.define(
+    "filter_outlier(Tensor input, float threshold=6.0) -> (Tensor, Tensor, Tensor, Tensor)"
+)
+
+
+@impl(quantized_decomposed_lib, "filter_outlier", "CompositeExplicitAutograd")
+def filter_outlier(input: torch.Tensor, threshold: float = 6.0) -> Tuple[torch.Tensor]:
+    """Filter out outliers in the input tensor based on a threshold.
+
+    Args:
+        input (torch.Tensor): Input tensor.
+        threshold (float): Threshold for filtering out outliers.
+
+    Returns:
+        torch.Tensor: Filtered tensor.
+    """
+    is_outlier = torch.abs(input) > threshold
+    inlier = torch.where(is_outlier, 0, input)
+    outliers = torch.where(is_outlier, input, 0)
+    csr = to_csr(outliers)
+    return inlier, *csr
+
+
+quantized_decomposed_lib.define(
+    "spmm_csr(Tensor data, Tensor indices, Tensor indptr, Tensor B, Tensor? B_scale=None, "
+    "Tensor? B_code=None, int? block_size=None) -> Tensor"
+)
+
+
+@impl(quantized_decomposed_lib, "spmm_csr", "CompositeExplicitAutograd")
+def spmm_csr(
+    data: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    B: torch.Tensor,
+    B_scale: Optional[torch.Tensor] = None,
+    B_code: Optional[torch.Tensor] = None,
+    block_size: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    Performs SpMM: Y = A @ B where A is in CSR format.
+
+    Args:
+        data    : 1D tensor of non-zero values in A (shape [nnz])
+        indices : 1D tensor of column indices for each non-zero value (shape [nnz])
+        indptr  : 1D tensor of row pointers (shape [num_rows + 1])
+        B       : Dense matrix of shape [K, N]
+
+    Returns:
+        Y       : Dense matrix of shape [M, N]
+    """
+    M = indptr.numel() - 1
+    N = B.shape[1]
+    Y = torch.zeros((M, N), dtype=data.dtype, device=data.device)
+
+    if B_code is not None:
+        B = B_code[B.to(torch.long)]
+    if B_scale is not None:
+        B = B * expand(B_scale, B.shape, block_size)
+
+    for row in range(M):
+        start = indptr[row].item()
+        end = indptr[row + 1].item()
+        for i in range(start, end):
+            col = indices[i].item()
+            Y[row] += data[i] * B[col]
+
+    return Y

@@ -11,8 +11,8 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from .mapping import replace_node_with_graph_module
-from .mapping_utils import _is_elementwise_op
+from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
+from .mapping_utils import _is_elementwise_op, _is_nop
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -23,6 +23,7 @@ __all__ = [
     "convert_cat_and_stack_as_stack_on_dim0",
     "convert_cat_with_mismatched_shapes_to_stack",
     "convert_expand_to_memory_copy",
+    "extract_input_preprocessor",
     "get_conv_bn_layers",
     "insert_permute_adapters_for_conv2d",
     "pad_gemm_inputs_to_hardware_unroll_size",
@@ -33,6 +34,7 @@ __all__ = [
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
+    "rewrite_fx_graph",
     "rewrite_quantize_mx_for_lastdim",
     "transpose_linear_weights",
     "strip_softmax_dtype",
@@ -53,18 +55,7 @@ def get_conv_bn_layers(model):
     return layers
 
 
-def get_parameter_or_buffer(model: torch.nn.Module, name: str):
-    """Retrieve a parameter or buffer from the model by name."""
-    if name in dict(model.named_parameters()):
-        return model.get_parameter(name)
-    if name in dict(model.named_buffers()):
-        return model.get_buffer(name)
-    if hasattr(model, name):
-        return getattr(model, name)
-    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
-
-
-def fuse(model: torch.fx.GraphModule) -> torch.nn.Module:
+def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
     """
     Fuses convolution/BN and linear/BN layers for inference purposes.
     """
@@ -583,7 +574,12 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                     torch.ops.aten.pad.default,
                     (input, pad_dims_input),
                 )
+
+            pad_args = torch.fx.node.map_arg(padded_input.args, lambda n: n.value)
+            padded_input.value = padded_input.target(*pad_args)
+
             node.replace_input_with(input, padded_input)
+
             if (dtype := input.meta.get("dtype")) is not None:
                 padded_input.meta["dtype"] = dtype
 
@@ -607,9 +603,14 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                     torch.ops.aten.slice.Tensor,
                     (output_node, 1, 0, C_out),
                 )
+
+            slice_args = torch.fx.node.map_arg(slice_node.args, lambda n: n.value)
+            slice_node.value = slice_node.target(*slice_args)
+
             for user in list(output_node.users):
                 if id(user) != id(slice_node):
                     user.replace_input_with(output_node, slice_node)
+
             if (dtype := output_node.meta.get("dtype")) is not None:
                 slice_node.meta["dtype"] = dtype
 
@@ -879,6 +880,7 @@ def replace_target(model: torch.fx.GraphModule, target_to_replace, new_target):
             continue
         with graph.inserting_after(node):
             new_node = graph.call_function(new_target, node.args)
+        propagate_shape(new_node)
         new_node.meta = node.meta
         node.replace_all_uses_with(new_node)
         graph.erase_node(node)
@@ -965,7 +967,112 @@ def extract_input_preprocessor(model: GraphModule):
         GraphModule: The transformed FX graph module with the input preprocessor extracted.
     """
     placeholder = next(iter(n for n in model.graph.nodes if n.op == "placeholder"))
+    preprocess_nodes = [placeholder]
+
+    user = next(iter(placeholder.users))
+
+    while _is_nop(user) or user.target in [
+        torch.ops.aten.permute.default,
+        torch.ops.quantized_ops.quantize.default,
+    ]:
+        preprocess_nodes.extend(
+            n for n in user.all_input_nodes if n not in preprocess_nodes
+        )
+        preprocess_nodes.append(user)
+        user = next(iter(user.users))
+
+    print(f"Preprocess nodes: {preprocess_nodes}")
+
+    m = torch.nn.Module()
+
+    new_graph = torch.fx.Graph()
+    value_remap = {}
+    for node in preprocess_nodes:
+        if node.op == 'placeholder':
+            value_remap[node] = new_graph.placeholder(node.name)
+        else:
+            value_remap[node] = new_graph.node_copy(node, lambda n: value_remap[n])
+
+            if node.op == "get_attr":
+                param = get_parameter_or_buffer(model, node.target)
+                m.register_buffer(node.target, param)
+    new_graph.output(value_remap[preprocess_nodes[-1]])
+    new_graph.lint()
+    new_graph.print_tabular()
+
+    with model.graph.inserting_before(placeholder):
+        new_placeholder = model.graph.placeholder(f"{placeholder.name}_preprocess")
+    preprocess_nodes[-1].replace_all_uses_with(new_placeholder)
+
+    new_placeholder.meta["dtype"] =  preprocess_nodes[-1].meta.get("dtype")
 
     model.graph.lint()
+    model.graph.eliminate_dead_code()
+    # Placeholder node needs to be manually erased
+    model.graph.erase_node(placeholder)
+    model.recompile()
+    return model, GraphModule(m, new_graph)
+
+
+def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
+    """
+    Transforms a given PyTorch FX GraphModule by identifying and replacing
+    nodes that match a user-defined match_and_rewrite with alternative implementations.
+
+    Args:
+        model (torch.fx.GraphModule): The input FX GraphModule to be transformed.
+        match_and_rewrite (Callable): A function that takes three arguments:
+            - sources: The underlying function, module, or primitive operation
+              responsible for a given FX node (from node.meta["source_fn_stack"]).
+            - example_args (Tuple): A tuple of example arguments for the node,
+              extracted from node metadata.
+            - example_kwargs (Dict): A dictionary of example keyword arguments for the node.
+
+            The `match_and_rewrite` function should return:
+                - A `torch.nn.Module` or callable implementing an equivalent
+                  or decomposed version of the operation if a match is found.
+                - `None` otherwise.
+
+    Returns:
+        torch.fx.GraphModule: The transformed GraphModule with selected nodes
+        replaced by decomposed modules returned by `match_and_rewrite`.
+
+    Notes:
+        - Each matched node is replaced using `export_model` with the returned
+          module from `match_and_rewrite`.
+        - The original node is erased from the graph after replacement.
+        - The transformed graph is cleaned up via linting, dead code elimination,
+          and recompilation.
+
+    Example:
+        >>> def match_and_rewrite(sources, args, kwargs):
+        ...     if torch.nn.Conv2d not in sources and torch.nn.functional.conv2d not in sources:
+        ...         return None
+        ...     # Replace with a no-op or alternative module
+        ...     class Identity(nn.Module):
+        ...         def forward(self, x): return x
+        ...     return Identity
+        >>> transformed = transformer(fx_model, match_and_rewrite)
+    """
+    for node in list(model.graph.nodes):
+        source_fn_st = node.meta.get("source_fn_stack", [])
+        if not source_fn_st:
+            continue
+
+        source_fn = source_fn_st[-1][0]
+
+        example_args = torch.fx.node.map_arg(node.args, lambda n: n.meta["val"])
+        example_kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: n.meta["val"])
+
+        if (cls := match_and_rewrite(source_fn, example_args, example_kwargs)) is None:
+            continue
+
+        gm = export_model(cls(), example_args, example_kwargs)
+
+        replace_node_with_graph_module(model, gm, node)
+        model.graph.erase_node(node)
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
     model.recompile()
     return model

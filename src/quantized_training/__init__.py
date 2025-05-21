@@ -17,6 +17,7 @@ from google.protobuf import text_format
 import operator
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils._pytree import tree_flatten
 
 
 __all__ = [
@@ -77,52 +78,13 @@ OPERATOR_MAPPINGS = {
 }
 
 
-def transform(
-    model: torch.fx.GraphModule,
-    example_args,
-    example_kwargs=None,
-    patterns=None,
-    transpose_weight=False,
-    transpose_fc=False,
-    conv2d_padding=None,
-):
+def fuse(model, patterns, example_args, example_kwargs=None):
     if example_kwargs is None:
         example_kwargs = {}
 
-    # Run the model once to get a reference output
-    orig_out = model(*example_args, **example_kwargs)
-
-    from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
     ShapeProp(model).propagate(*flatten_args)
-
-    if conv2d_padding is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
-        ShapeProp(model).propagate(*flatten_args)
-
-    if transpose_weight:
-        insert_permute_adapters_for_conv2d(model)
-        transpose_linear_weights(model, transpose_fc=transpose_fc)
-        replace_target(model, aten.max_pool2d.default, quantized_ops.max_pool2d.default)
-        replace_target(model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default)
-
-    # Turn batched matmul into multiple matmuls
-    split_multi_head_attention(model)
-
-    # Convert torch.expand in Grouped Query Attention to memory copy
-    convert_expand_to_memory_copy(model)
-
-    ShapeProp(model).propagate(*flatten_args)
-
-    # Perform transformations to the model
-    convert_cat_and_stack_as_stack_on_dim0(model)
-    convert_cat_with_mismatched_shapes_to_stack(model)
-
-    ShapeProp(model).propagate(*flatten_args)
-
-    # Move quantize and dequantize ops to the end of last compute op
-    fuse_quantize_dequantize_with_previous_op(model)
 
     for pattern in patterns:
         # If there is no corresponding mapping, we directly append the op itself
@@ -131,13 +93,52 @@ def transform(
             for ops in pattern
         ]
 
-        ShapeProp(model).propagate(*flatten_args)
         fuse_operator(model, vector_stages)
 
-    model.graph.print_tabular()
 
-    new_out = model(*example_args, *list(example_kwargs.values()))
-    return orig_out, new_out
+def transform(
+    model: torch.fx.GraphModule,
+    example_args,
+    example_kwargs=None,
+    patterns=None,
+    transpose_weight=False,
+    transpose_fc=False,
+    conv2d_padding=None,
+    fuse_operator=True,
+):
+    if example_kwargs is None:
+        example_kwargs = {}
+
+    flatten_args, spec = tree_flatten((example_args, example_kwargs))
+
+    ShapeProp(model).propagate(*flatten_args)
+
+    if conv2d_padding is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+
+    if transpose_weight:
+        insert_permute_adapters_for_conv2d(model)
+        transpose_linear_weights(model, transpose_fc=transpose_fc)
+        replace_target(model, aten.max_pool2d.default, quantized_ops.max_pool2d.default)
+        replace_target(model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default)
+
+    ShapeProp(model).propagate(*flatten_args)
+
+    # Turn batched matmul into multiple matmuls
+    split_multi_head_attention(model)
+
+    # Convert torch.expand in Grouped Query Attention to memory copy
+    convert_expand_to_memory_copy(model)
+
+    # Perform transformations to the model
+    convert_cat_and_stack_as_stack_on_dim0(model)
+    convert_cat_with_mismatched_shapes_to_stack(model)
+
+    # Move quantize and dequantize ops to the end of last compute op
+    fuse_quantize_dequantize_with_previous_op(model)
+
+    if fuse_operator:
+        fuse(model, patterns, flatten_args)
 
 
 def compile(
@@ -150,19 +151,24 @@ def compile(
     weight_persistent=True,
     output_dir=None,
     output_file="compute_graph",
+    dump_snapshop=False,
 ):
-    from torch.utils._pytree import tree_flatten
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
     ShapeProp(model).propagate(*flatten_args)
 
-    allocator = MemoryAllocator(total_memory, bank_width=bank_width, bank_size=bank_size)
+    allocator = MemoryAllocator(
+        total_memory, bank_width=bank_width, bank_size=bank_size
+    )
     run_memory_mapping(model, allocator, weight_persistent)
 
-    os.makedirs(output_dir, exist_ok=True)
-    allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
+    if dump_snapshop:
+        os.makedirs(output_dir, exist_ok=True)
+        allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
-    model_params = gen_code(model, flatten_args, os.path.join(output_dir, "tensor_files"))
+    model_params = gen_code(
+        model, flatten_args, os.path.join(output_dir, "tensor_files")
+    )
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:
         f.write(text_format.MessageToString(model_params))
