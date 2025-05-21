@@ -125,6 +125,8 @@ def transform(
 
     ShapeProp(model).propagate(*flatten_args)
 
+    eliminate_reshape_with_no_effect(model)
+
     # Turn batched matmul into multiple matmuls
     split_multi_head_attention(model)
 

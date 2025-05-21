@@ -12,7 +12,7 @@ from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
-from .mapping_utils import _is_elementwise_op, _is_nop
+from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -23,6 +23,7 @@ __all__ = [
     "convert_cat_and_stack_as_stack_on_dim0",
     "convert_cat_with_mismatched_shapes_to_stack",
     "convert_expand_to_memory_copy",
+    "eliminate_reshape_with_no_effect",
     "extract_input_preprocessor",
     "get_conv_bn_layers",
     "insert_permute_adapters_for_conv2d",
@@ -822,6 +823,49 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             node_map[conv_node] = n
 
     graph.lint()
+    model.recompile()
+    return model
+
+
+def eliminate_reshape_with_no_effect(model: GraphModule):
+    deleted_nodes = set()
+    for node in list(model.graph.nodes):
+        if not _is_reshape_op(node) or node in deleted_nodes:
+            continue
+
+        curr_node = node
+        input_node = node.all_input_nodes[0]
+
+        group = []
+        while len(curr_node.users) == 1 and (_is_reshape_op(curr_node) or _is_nop(curr_node)):
+            group.append(curr_node)
+            curr_node = next(iter(curr_node.users))
+
+        input_tensor = input_node.value.flatten()
+        while group and torch.any(group[-1].value.flatten() != input_tensor):
+            group.pop()
+
+        if len(group) == 0:
+            continue
+
+        output_shape = group[-1].value.shape
+
+        with model.graph.inserting_before(node):
+            reshape_node = model.graph.call_function(
+                torch.ops.aten.reshape.default,
+                (input_node, output_shape),
+            )
+
+        propagate_shape(reshape_node)
+
+        group[-1].replace_all_uses_with(reshape_node)
+
+        for n in reversed(group):
+            model.graph.erase_node(n)
+            deleted_nodes.add(n)
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
     model.recompile()
     return model
 
