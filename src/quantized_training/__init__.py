@@ -29,6 +29,7 @@ __all__ = [
     "derive_bias_qparams_fn",
     "dispatch_model",
     "dtype_byte_size",
+    "export_model",
     "get_aten_graph_module",
     "get_device_map",
     "get_node_name_to_scope",

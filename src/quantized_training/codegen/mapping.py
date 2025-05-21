@@ -61,8 +61,9 @@ def eliminate_dead_code(self):
 
 
 def propagate_shape(node: Node):
-    args = torch.fx.node.map_arg(node.args, lambda n: n.value)
-    kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: n.value)
+    fn = lambda n: n.value if hasattr(n, 'value') else n.meta.get('val')
+    args = map_arg(node.args, fn)
+    kwargs = map_arg(node.kwargs, fn)
     node.value = node.target(*args, **kwargs)
     node.shape = node.value.shape
 

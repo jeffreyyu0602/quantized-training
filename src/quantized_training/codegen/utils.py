@@ -659,6 +659,9 @@ def pad_vit_embeddings_output(
             (vit_embed_out, [0, 0, 0, pad]),
         )
 
+    propagate_shape(pad_node)
+    pad_node.meta["val"] = pad_node.value
+
     for user in list(vit_embed_out.users):
         if id(user) != id(pad_node):
             user.replace_input_with(vit_embed_out, pad_node)
@@ -980,8 +983,6 @@ def extract_input_preprocessor(model: GraphModule):
         )
         preprocess_nodes.append(user)
         user = next(iter(user.users))
-
-    print(f"Preprocess nodes: {preprocess_nodes}")
 
     m = torch.nn.Module()
 

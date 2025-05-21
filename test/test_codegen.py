@@ -24,11 +24,14 @@ from quantized_training import (
     QuantizationSpec,
     add_qspec_args,
     convert_pt2e,
+    export_model,
     get_default_quantizer,
     prepare_pt2e,
     transform,
     compile,
-    derive_bias_qparams_fn
+    derive_bias_qparams_fn,
+    extract_input_preprocessor,
+    fuse,
 )
 from quantized_training.codegen.utils import (
     get_conv_bn_layers,
@@ -265,9 +268,15 @@ if __name__ == "__main__":
 
         old_output = gm(*example_args)
 
-        transform(gm, example_args, **transform_args)
+        transform(gm, example_args, **transform_args, fuse_operator=False)
+
+        gm, preprocess_fn = extract_input_preprocessor(gm)
+        example_args = (preprocess_fn(*example_args),)
+
+        fuse(gm, vector_stages, example_args)
 
         gm.graph.print_tabular()
+
         new_output = gm(*example_args)
 
         compile(gm, example_args, **compile_args)
@@ -654,7 +663,11 @@ if __name__ == "__main__":
 
         inputs = image_processor(dataset['train'][0]["image"], return_tensors="pt")
         example_args = (inputs.pixel_values.to(torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
+
+        gm = export_model(model, example_args)
+        pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
+
+        gm = prepare_pt2e(gm, quantizer)
 
         strip_softmax_dtype(gm)
 
@@ -665,15 +678,11 @@ if __name__ == "__main__":
 
         convert_pt2e(gm, args.bias)
 
-        pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
-
         old_output = gm(*example_args).logits
 
         transform(gm, example_args, **transform_args, fuse_operator=False)
 
-        from quantized_training import extract_input_preprocessor, fuse
         gm, preprocess_fn = extract_input_preprocessor(gm)
-
         example_args = (preprocess_fn(example_args[0]),)
 
         fuse(gm, vector_stages, example_args)

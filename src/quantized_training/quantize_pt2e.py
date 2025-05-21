@@ -256,14 +256,16 @@ def export_model(
     return model
 
 
-def prepare_pt2e(model, quantizer, args, kwargs=None, dynamic_shapes=None):
+def prepare_pt2e(model, quantizer, args=None, kwargs=None, dynamic_shapes=None):
     from torch.ao.quantization.pt2e import prepare
     from torch.ao.quantization.quantize_pt2e import prepare_pt2e
 
     # replace the default implementation of _create_obs_or_fq_from_qspec
     prepare._get_obs_or_fq_map = _get_obs_or_fq_map
 
-    model = export_model(model, args, kwargs, dynamic_shapes=dynamic_shapes)
+    if not isinstance(model, GraphModule):
+        model = export_model(model, args, kwargs, dynamic_shapes=dynamic_shapes)
+
     model = prepare_pt2e(model, quantizer)
     return model
 
