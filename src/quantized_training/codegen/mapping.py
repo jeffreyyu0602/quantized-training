@@ -110,7 +110,7 @@ def replace_node_with_graph_module(self: GraphModule, module: GraphModule, sourc
                     (value_remap[node].name, source_fn[1])
                 ]
 
-        if node.op != 'output':
+        if node.op not in ['placeholder', 'output']:
             propagate_shape(value_remap[node])
 
     return [value_remap[n] for n in output_node.args[0]]
