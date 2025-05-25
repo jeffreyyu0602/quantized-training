@@ -47,7 +47,7 @@ sys.path.append(os.path.abspath(target_path))
 
 from prepare_model import set_qscheme
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 task_to_keys = {
@@ -182,6 +182,14 @@ if __name__ == "__main__":
     )
     add_qspec_args(parser)
     args = parser.parse_args()
+
+    logger.setLevel(getattr(logging, args.log_level))
+
+    if not logger.hasHandlers():
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     quantizer = get_default_quantizer(
         input_activation=args.activation,

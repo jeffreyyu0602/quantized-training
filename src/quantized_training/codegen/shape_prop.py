@@ -96,7 +96,7 @@ class ShapeProp:
                 node.value = [x.cpu().clone() if isinstance(x, torch.Tensor) else x for x in result]
             else:
                 node.value = result
-                logger.warning(f"Node {node} produced non-tensor output {result}")
+                logger.info(f"Node {node} produced non-tensor output {result}")
 
             env[node.name] = result
 

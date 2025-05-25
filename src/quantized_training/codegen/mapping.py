@@ -360,33 +360,58 @@ def _create_subgraph(nodes: List[Node]):
     return gm, tuple(new_args)
 
 
-def get_submodule_name(model, nodes: List[Node]):
+OP_TO_WEIGHT_POS_MAPPINGS = {
+    torch.ops.aten.conv2d.default: 1,
+    torch.ops.aten.linear.default: 1,
+    torch.ops.aten.layer_norm.default: 2,
+    torch.ops.quantized_ops.conv2d.default: 1,
+    torch.ops.quantized_ops.linear.default: 1,
+    torch.ops.quantized_ops.conv2d_mx.default: 1,
+    torch.ops.quantized_ops.linear_mx.default: 1,
+}
+
+
+def get_unique_node_name(node: Node):
+    """
+    Generate a unique and meaningful name for the node based on its parameter.
+    """
+    if (pos := OP_TO_WEIGHT_POS_MAPPINGS.get(node.target)) is not None:
+        weight_node = node.args[pos]
+        return weight_node.name.split("_weight")[0]
+
+    return node.name
+
+
+def get_submodule_name(module, nodes: List[Node]):
     from transformers.utils.import_utils import is_torch_greater_or_equal
 
     if is_torch_greater_or_equal("2.5"):
-        gemm_node = next((n for n in nodes if _is_gemm_op(n)), None)
+        node = next((n for n in nodes if _is_gemm_op(n)), None)
+        prefix = get_unique_node_name(node) if node is not None else nodes[0].name
+        if len(nodes) > 1:
+            prefix += "_fused"
 
-        if gemm_node is not None and gemm_node.target in [
-            torch.ops.aten.conv2d.default,
-            torch.ops.quantized_ops.conv2d.default,
-            torch.ops.quantized_ops.conv2d_mx.default,
-            torch.ops.aten.linear.default,
-            torch.ops.quantized_ops.linear.default,
-            torch.ops.quantized_ops.linear_mx.default,
-        ]:
-            weight_node = gemm_node.args[1]
-            return weight_node.name.split("weight")[0] + "fused"
-        
-        if gemm_node is not None and gemm_node.target in [
-            torch.ops.aten.matmul.default,
-            torch.ops.quantized_ops.matmul_mx.default,
-        ]:
-            return gemm_node.name + "_fused"
-        
-        return nodes[0].name + "_fused"
+        def get_attr_name(i: int):
+            return prefix + str(i) if i > 0 else prefix
+
+        i = 0
+        attr_name = get_attr_name(i)
+        while hasattr(module, attr_name):
+            i += 1
+            attr_name = get_attr_name(i)
+        return attr_name
  
     get_new_node_name = get_new_attr_name_with_prefix('submodule_')
-    return get_new_node_name(model)
+    return get_new_node_name(module)
+
+
+def rename_gemm_nodes(model: GraphModule):
+    for node in list(model.graph.nodes):
+        if node.op == "call_function" and _is_gemm_op(node):
+            node.name = get_submodule_name(model, [node])
+
+    model.graph.lint()
+    model.recompile()
 
 
 def _create_and_insert_subgraph(
@@ -395,8 +420,6 @@ def _create_and_insert_subgraph(
     named_modules: Dict[str, torch.nn.Module]
 ) -> Node:
     submodule, new_args = _create_subgraph(nodes)
-    # get_new_node_name = get_new_attr_name_with_prefix('submodule_')
-    # node_name = get_new_node_name(model)
     node_name = get_submodule_name(model, nodes)
     setattr(model, node_name, submodule)
     named_modules[node_name] = submodule
@@ -786,7 +809,9 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                 else:
                     fused_nodes.insert(0, input_node)
                     fused_nodes_list.append(fused_nodes)
-        elif _is_reshape_op(node):
+                continue
+
+        if _is_reshape_op(node):
             nodes = fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, node)
 
             for n in nodes:
@@ -797,10 +822,11 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
         if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
             continue
 
-        if _is_nop(node) or (
-            node.target == torch.ops.aten.select.int and node.args[1] == 0
+        if (
+            _is_nop(node) or
+            node.target == torch.ops.aten.select.int and
+            all(d == 1 for d in node.args[0].shape[:node.args[1]])
         ):
-            logger.info(f"Node {node} is a nop or can be handled by memory planner.")
             continue
 
         fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)

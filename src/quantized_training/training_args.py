@@ -73,7 +73,7 @@ def add_qspec_args(parser=None):
     parser.add_argument(
         "--log_level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        default="INFO",
+        default="WARNING",
         help="Set the logging level"
     )
     parser.add_argument(
