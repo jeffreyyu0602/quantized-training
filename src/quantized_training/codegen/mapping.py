@@ -110,7 +110,7 @@ def replace_node_with_graph_module(self: GraphModule, module: GraphModule, sourc
                     (value_remap[node].name, source_fn[1])
                 ]
 
-        if node.op not in ['placeholder', 'output']:
+        if node.op not in ['placeholder', 'get_attr', 'output']:
             propagate_shape(value_remap[node])
 
     return [value_remap[n] for n in output_node.args[0]]
@@ -396,7 +396,7 @@ def get_submodule_name(module, nodes: List[Node]):
 
         i = 0
         attr_name = get_attr_name(i)
-        while hasattr(module, attr_name):
+        while any(n.name == attr_name for n in module.graph.nodes):
             i += 1
             attr_name = get_attr_name(i)
         return attr_name
@@ -405,11 +405,29 @@ def get_submodule_name(module, nodes: List[Node]):
     return get_new_node_name(module)
 
 
+def update_submodule_user(model, node):
+    """
+    Update the metadata of all the user nodes that consumes the new node
+    """
+    named_modules = dict(model.named_modules())
+    for user in list(node.users):
+        if user.op != "call_module":
+            continue
+
+        index = user.args.index(node)
+        mod = named_modules[user.target]
+        placeholders = [n for n in mod.graph.nodes if n.op == 'placeholder']
+        placeholder = placeholders[index]
+
+        placeholder.name = node.name
+        placeholder.meta['source_node'] = node
+
+
 def rename_gemm_nodes(model: GraphModule):
     for node in list(model.graph.nodes):
-        if node.op == "call_function" and _is_gemm_op(node):
+        if _is_gemm_op(node):
             node.name = get_submodule_name(model, [node])
-
+            update_submodule_user(model, node)
     model.graph.lint()
     model.recompile()
 
@@ -518,6 +536,9 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
 
 
 def is_tranpose(node: Node):
+    """
+    Transpose operations are characterized by swapping the last two dimensions
+    """
     if node.target == torch.ops.aten.transpose.int:
         ndim = node.args[0].value.ndim
         axes = {x if x >= 0 else x + ndim for x in node.args[1:]}
@@ -528,6 +549,33 @@ def is_tranpose(node: Node):
         tranpose_dims = list(range(len(permute_dims)))
         tranpose_dims[-2], tranpose_dims[-1] = tranpose_dims[-1], tranpose_dims[-2]
         return permute_dims == tranpose_dims
+
+    return False
+
+
+def is_mha_permute(node):
+    """
+    Check if the node is a permutation used in multi-head attention (MHA) operations.
+    It has characteristics that last dimension is a power of 2 and the permuted
+    dimensions are the middle two dimensions (2 and 3) of a 4D tensor.
+    """
+    import math
+
+    # Don't support head dimension not being a power of 2
+    if (
+        not hasattr(node, 'shape') or
+        len(node.shape) != 4 or
+        not math.log2(node.shape[-1]).is_integer()
+    ):
+        return False
+
+    if node.target == torch.ops.aten.permute.default:
+        dims = node.args[1]
+        return len(dims) == 4 and dims == [0, 2, 1, 3]
+
+    if node.target == torch.ops.aten.transpose.int:
+        dims = {x if x >= 0 else x + 4 for x in node.args[1:]}
+        return node.value.ndim == 4 and dims == {2, 3}
 
     return False
 
@@ -614,8 +662,10 @@ def fuse_reshape_with_input(
 
     # Base case: Stop if the node is a GEMM or an elementwise operation
     if (
-        _is_gemm_op(current_node) or
-        (not is_tranpose(reshape_node) and _is_elementwise_op(current_node))
+        _is_gemm_op(current_node) and
+        (is_tranpose(reshape_node) or is_mha_permute(reshape_node))
+    ) or (
+        _is_elementwise_op(current_node) and not is_tranpose(reshape_node)
     ):
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
         if (group := search_group(current_node, candidates)) is not None:
@@ -739,28 +789,6 @@ def fuse_op_with_input(
         )
 
 
-def _is_qkv_permute(node):
-    import math
-
-    # Don't support head dimension not being a power of 2
-    if (
-        not hasattr(node, 'shape') or
-        len(node.shape) != 4 or
-        not math.log2(node.shape[-1]).is_integer()
-    ):
-        return False
-
-    if node.target == torch.ops.aten.permute.default:
-        dims = node.args[1]
-        return len(dims) == 4 and dims == [0, 2, 1, 3]
-
-    if node.target == torch.ops.aten.transpose.int:
-        dims = {x if x >= 0 else x + 4 for x in node.args[1:]}
-        return node.value.ndim == 4 and dims == {2, 3}
-
-    return False
-
-
 def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
@@ -784,7 +812,7 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
         fused_nodes_list = find_sequential_nodes(model, operations)
 
     for node in list(graph.nodes):
-        if _is_qkv_permute(node):
+        if is_mha_permute(node):
             match_found = True
 
             input_node = node.all_input_nodes[0]
@@ -874,17 +902,7 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
             if source_node.target == torch.ops.quantized_ops.dequantize.default:
                 n.meta['dq_scale'] = named_buffers[source_node.args[1].target]
 
-        # Update the metadata of all the user nodes that consumes the new node
-        for user in list(node.users):
-            if user.op != "call_module":
-                continue
-
-            mod = named_modules[user.target]
-            placeholders = [n for n in mod.graph.nodes if n.op == 'placeholder']
-
-            index = user.args.index(node)
-            placeholders[index].meta['source_node'] = node
-            placeholders[index].name = node.name
+        update_submodule_user(model, node)
 
         args = map_arg(node.args, lambda n: n.value)
         kwargs = map_arg(node.kwargs, lambda n: n.value)

@@ -8,11 +8,13 @@ from typing import Callable, List, Set, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch.fx import GraphModule, Node
+from torch.fx.node import map_arg
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
 from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op
+from .memory import get_user_with_target
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -213,7 +215,7 @@ def convert_cat_with_mismatched_shapes_to_stack(model: GraphModule):
         logger.info(f"Node {node} has different input shapes")
         dim = node.args[1]
 
-        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+        args = map_arg(node.args, lambda n: n.value)
         shape = list(args[0][0].shape[:dim])
 
         class Concat(torch.nn.Module):
@@ -576,7 +578,7 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                     (input, pad_dims_input),
                 )
 
-            pad_args = torch.fx.node.map_arg(padded_input.args, lambda n: n.value)
+            pad_args = map_arg(padded_input.args, lambda n: n.value)
             padded_input.value = padded_input.target(*pad_args)
 
             node.replace_input_with(input, padded_input)
@@ -605,7 +607,7 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                     (output_node, 1, 0, C_out),
                 )
 
-            slice_args = torch.fx.node.map_arg(slice_node.args, lambda n: n.value)
+            slice_args = map_arg(slice_node.args, lambda n: n.value)
             slice_node.value = slice_node.target(*slice_args)
 
             for user in list(output_node.users):
@@ -772,12 +774,17 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             for arg in n.all_input_nodes:
                 if arg in conv_chain or arg.op == "get_attr" or arg in node_map:
                     continue
+
+                # Handle the special case where weight is not a get_attr node
+                conv2d_user = get_user_with_target(arg, torch.ops.aten.conv2d.default)
+                if conv2d_user is not None and id(arg) == id(conv2d_user.args[1]):
+                    continue
+
                 logger.debug(f"Insert pre-permute for {arg}")
                 if arg not in pre_permute_nodes:
                     with graph.inserting_after(arg):
                         pre_permute_nodes[arg] = graph.call_function(
-                            torch.ops.aten.permute.default,
-                            args=(arg, (0, 2, 3, 1))
+                            torch.ops.aten.permute.default, (arg, (0, 2, 3, 1)),
                         )
                 n.replace_input_with(arg, pre_permute_nodes[arg])
 
@@ -787,8 +794,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
                 logger.debug(f"Insert post-permute for {n}")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default,
-                        args=(n, (0, 3, 1, 2))
+                        torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
                     )
                 user.replace_input_with(n, permute_node)
 
@@ -800,8 +806,15 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
             logger.debug(f"Permuting weights for {n}")
             weight_node = n.args[1]
-            param = get_parameter_or_buffer(model, weight_node.target)
-            param.data = param.data.permute(2, 3, 1, 0)
+            if weight_node.op == "get_attr":
+                param = get_parameter_or_buffer(model, weight_node.target)
+                param.data = param.data.permute(2, 3, 1, 0)
+            else:
+                with graph.inserting_before(n):
+                    weight_permute_node = graph.call_function(
+                        torch.ops.aten.permute.default, (weight_node, (2, 3, 1, 0)),
+                    )
+                n.replace_input_with(weight_node, weight_permute_node)
 
             if n.target == torch.ops.quantized_ops.conv2d_mx.default:
                 scale_node = n.kwargs.get("weight_scale")
@@ -1090,31 +1103,37 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
           and recompilation.
 
     Example:
-        >>> def match_and_rewrite(sources, args, kwargs):
-        ...     if torch.nn.Conv2d not in sources and torch.nn.functional.conv2d not in sources:
+        >>> def match_and_rewrite(source_fn, args, kwargs):
+        ...     if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
         ...         return None
         ...     # Replace with a no-op or alternative module
         ...     class Identity(nn.Module):
         ...         def forward(self, x): return x
         ...     return Identity
-        >>> transformed = transformer(fx_model, match_and_rewrite)
+        >>> transformed = rewrite_fx_graph(fx_model, match_and_rewrite)
     """
     for node in list(model.graph.nodes):
-        source_fn_st = node.meta.get("source_fn_stack", [])
-        if not source_fn_st:
+        if node.op != "call_function":
             continue
 
-        source_fn = source_fn_st[-1][0]
-
-        example_args = torch.fx.node.map_arg(node.args, lambda n: n.meta["val"])
-        example_kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: n.meta["val"])
-
-        if (cls := match_and_rewrite(source_fn, example_args, example_kwargs)) is None:
+        if (source_fn_st := node.meta.get("source_fn_stack")) is None:
             continue
 
-        gm = export_model(cls(), example_args, example_kwargs)
+        source_fn = source_fn_st[-1][1]
+
+        example_args = map_arg(node.args, lambda n: n.meta["val"])
+        example_kwargs = map_arg(node.kwargs, lambda n: n.meta["val"])
+
+        cls = match_and_rewrite(source_fn, example_args, example_kwargs)
+
+        if cls is None:
+            continue
+
+        placeholders = map_arg(tuple(node.all_input_nodes), lambda n: n.meta["val"])
+        gm = export_model(cls(), placeholders, example_kwargs)
 
         replace_node_with_graph_module(model, gm, node)
+
         model.graph.erase_node(node)
 
     model.graph.lint()
