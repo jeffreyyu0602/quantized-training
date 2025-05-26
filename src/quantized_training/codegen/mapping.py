@@ -9,7 +9,6 @@ from typing import List, Dict, Callable
 
 import graphviz
 import torch
-from torch.ao.quantization.fx.utils import get_new_attr_name_with_prefix
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
@@ -382,6 +381,24 @@ def get_unique_node_name(node: Node):
     return node.name
 
 
+def get_new_node_name_with_prefix(prefix: str):
+    """
+    Generate a new attribute name with a given prefix that is not already used in the module's graph.
+    """
+    prefix = prefix.replace(".", "_")
+
+    def get_new_node_name(module: torch.nn.Module):
+        def get_node_name(i: int):
+            return prefix + str(i) if i > 0 else prefix
+        i = 0
+        node_name = get_node_name(i)
+        while any(n.name == node_name for n in module.graph.nodes):
+            i += 1
+            node_name = get_node_name(i)
+        return node_name
+    return get_new_node_name
+
+
 def get_submodule_name(module, nodes: List[Node]):
     from transformers.utils.import_utils import is_torch_greater_or_equal
 
@@ -390,18 +407,10 @@ def get_submodule_name(module, nodes: List[Node]):
         prefix = get_unique_node_name(node) if node is not None else nodes[0].name
         if len(nodes) > 1:
             prefix += "_fused"
+    else:
+        prefix = "submodule_"
 
-        def get_attr_name(i: int):
-            return prefix + str(i) if i > 0 else prefix
-
-        i = 0
-        attr_name = get_attr_name(i)
-        while any(n.name == attr_name for n in module.graph.nodes):
-            i += 1
-            attr_name = get_attr_name(i)
-        return attr_name
- 
-    get_new_node_name = get_new_attr_name_with_prefix('submodule_')
+    get_new_node_name = get_new_node_name_with_prefix(prefix)
     return get_new_node_name(module)
 
 
@@ -424,6 +433,9 @@ def update_submodule_user(model, node):
 
 
 def rename_gemm_nodes(model: GraphModule):
+    from transformers.utils.import_utils import is_torch_greater_or_equal
+    if not is_torch_greater_or_equal("2.5"):
+        return
     for node in list(model.graph.nodes):
         if _is_gemm_op(node):
             node.name = get_submodule_name(model, [node])
@@ -972,7 +984,7 @@ def run_memory_mapping(
             if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
                 nodes_to_delete.extend(delete_unused_values(n))
         return nodes_to_delete
-    
+
     def get_num_bytes(n: Node):
         if n.meta.get('dtype', None) is not None:
             return dtype_byte_size(n.meta['dtype'])
