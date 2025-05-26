@@ -13,8 +13,7 @@ from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
-from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op
-from .memory import get_user_with_target
+from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op, _is_indexing_or_concatenation_op
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -754,6 +753,23 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
     torch.nn.functional.conv2d = conv2d_transposed
 
+    def get_path_to_target(node: torch.fx.Node, targets):
+        if not isinstance(targets, (list, tuple)):
+            targets = [targets]
+
+        for user in node.users:
+            if user.target in targets:
+                return [node, user]
+
+            if (
+                _is_nop(user) or _is_indexing_or_concatenation_op(user)
+                or user.target == torch.ops.quantized_ops.quantize.default
+            ):
+                path = get_path_to_target(user, targets)
+                if path is not None:
+                    return [node] + path
+        return None
+
     for node in graph.nodes:
         if not is_conv2d(node) and node.target not in [
             torch.ops.aten.adaptive_avg_pool2d.default,
@@ -776,22 +792,31 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
                     continue
 
                 # Handle the special case where weight is not a get_attr node
-                conv2d_user = get_user_with_target(arg, torch.ops.aten.conv2d.default)
-                if conv2d_user is not None and id(arg) == id(conv2d_user.args[1]):
-                    continue
+                path = get_path_to_target(arg, [
+                    torch.ops.aten.conv2d.default,
+                    torch.ops.quantized_ops.conv2d_mx.default,
+                    torch.ops.quantized_ops.conv2d.default,
+                ])
 
-                logger.debug(f"Insert pre-permute for {arg}")
+                # Permute input and weight in different ways
+                if path is not None and id(path[-2]) == id(path[-1].args[1]):
+                    dims = (2, 3, 1, 0)
+                else:
+                    dims = (0, 2, 3, 1)
+
+                logger.debug(f"Insert permute before {arg} with dims {dims}")
+
                 if arg not in pre_permute_nodes:
                     with graph.inserting_after(arg):
                         pre_permute_nodes[arg] = graph.call_function(
-                            torch.ops.aten.permute.default, (arg, (0, 2, 3, 1)),
+                            torch.ops.aten.permute.default, (arg, dims),
                         )
                 n.replace_input_with(arg, pre_permute_nodes[arg])
 
             for user in list(n.users.keys()):
                 if user in conv_chain or user in node_map:
                     continue
-                logger.debug(f"Insert post-permute for {n}")
+                logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
                         torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
@@ -809,12 +834,6 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             if weight_node.op == "get_attr":
                 param = get_parameter_or_buffer(model, weight_node.target)
                 param.data = param.data.permute(2, 3, 1, 0)
-            else:
-                with graph.inserting_before(n):
-                    weight_permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (weight_node, (2, 3, 1, 0)),
-                    )
-                n.replace_input_with(weight_node, weight_permute_node)
 
             if n.target == torch.ops.quantized_ops.conv2d_mx.default:
                 scale_node = n.kwargs.get("weight_scale")
@@ -827,7 +846,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
                     torch.ops.quantized_ops.conv2d.default, args=n.args
                 )
 
-            logger.debug(f"Replace {n} with permute for {conv_node}")
+            logger.debug(f"Replace conv2d node {n} with {conv_node}")
 
             conv_node.meta = n.meta
             n.replace_all_uses_with(conv_node)
@@ -858,8 +877,10 @@ def eliminate_reshape_with_no_effect(model: GraphModule):
         while group and torch.any(group[-1].value.flatten() != input_tensor):
             group.pop()
 
-        if len(group) == 0:
+        if len(group) <= 1:
             continue
+
+        logger.debug(f"Eliminating reshape group: {[n.name for n in group]}")
 
         output_shape = group[-1].value.shape
 
