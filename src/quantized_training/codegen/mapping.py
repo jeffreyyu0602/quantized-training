@@ -389,7 +389,7 @@ def get_new_node_name_with_prefix(prefix: str):
 
     def get_new_node_name(module: torch.nn.Module):
         def get_node_name(i: int):
-            return prefix + str(i) if i > 0 else prefix
+            return f"{prefix}_{i}" if i > 0 else prefix
         i = 0
         node_name = get_node_name(i)
         while any(n.name == node_name for n in module.graph.nodes):
@@ -408,7 +408,7 @@ def get_submodule_name(module, nodes: List[Node]):
         if len(nodes) > 1:
             prefix += "_fused"
     else:
-        prefix = "submodule_"
+        prefix = "submodule"
 
     get_new_node_name = get_new_node_name_with_prefix(prefix)
     return get_new_node_name(module)
@@ -430,6 +430,8 @@ def update_submodule_user(model, node):
 
         placeholder.name = node.name
         placeholder.meta['source_node'] = node
+    model.graph.lint()
+    model.recompile()
 
 
 def rename_gemm_nodes(model: GraphModule):

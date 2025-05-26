@@ -1072,14 +1072,14 @@ def extract_input_preprocessor(model: GraphModule):
     return model, GraphModule(m, new_graph)
 
 
-def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
+def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     """
     Transforms a given PyTorch FX GraphModule by identifying and replacing
     nodes that match a user-defined match_and_rewrite with alternative implementations.
 
     Args:
         model (torch.fx.GraphModule): The input FX GraphModule to be transformed.
-        match_and_rewrite (Callable): A function that takes three arguments:
+        fn (Callable): A function that takes three arguments:
             - sources: The underlying function, module, or primitive operation
               responsible for a given FX node (from node.meta["source_fn_stack"]).
             - example_args (Tuple): A tuple of example arguments for the node,
@@ -1121,16 +1121,27 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
 
         source_fn = source_fn_st[-1][1]
 
-        example_args = map_arg(node.args, lambda n: n.meta["val"])
-        example_kwargs = map_arg(node.kwargs, lambda n: n.meta["val"])
+        def get_value(n: Node):
+            if "val" in n.meta:
+                return n.meta["val"]
+            return getattr(n, "value", None)
 
-        cls = match_and_rewrite(source_fn, example_args, example_kwargs)
+        example_args = map_arg(node.args, get_value)
+        example_kwargs = map_arg(node.kwargs, get_value)
 
-        if cls is None:
+        if (cls := fn(source_fn, example_args, example_kwargs)) is None:
             continue
 
-        placeholders = map_arg(tuple(node.all_input_nodes), lambda n: n.meta["val"])
-        gm = export_model(cls(), placeholders, example_kwargs)
+        new_args = map_arg(tuple(node.all_input_nodes), get_value)
+        gm = export_model(cls(), new_args, example_kwargs)
+
+        # PyTorch PT2E expect nodes to have no kwargs in the exported graph.
+        # Clone has a memory_format kwarg, zeros_like has a pin_memory kwarg, and
+        # gelu has a has an approximate kwarg that persist in exported graph.
+        # This is just a work around for these.
+        for n in list(gm.graph.nodes):
+            if n.target == torch.ops.aten.zeros.default:
+                n.kwargs = {}
 
         replace_node_with_graph_module(model, gm, node)
 
