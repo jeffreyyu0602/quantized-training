@@ -921,8 +921,13 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
         args = map_arg(node.args, lambda n: n.value)
         kwargs = map_arg(node.kwargs, lambda n: n.value)
         output = gm(*args, **kwargs)
-        node.value = output
-        node.shape = output.shape
+        if isinstance(output, torch.Tensor):
+            node.shape = output.shape
+            node.value = output.cpu().clone()
+        elif isinstance(output, (tuple, list)):
+            node.value = [x.cpu().clone() for x in output]
+        else:
+            node.value = output
 
     graph.lint()
 
