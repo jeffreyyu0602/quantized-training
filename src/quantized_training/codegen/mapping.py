@@ -589,7 +589,7 @@ def is_mha_permute(node):
 
     if node.target == torch.ops.aten.transpose.int:
         dims = {x if x >= 0 else x + 4 for x in node.args[1:]}
-        return node.value.ndim == 4 and dims == {2, 3}
+        return node.value.ndim == 4 and dims == {1, 2}
 
     return False
 
