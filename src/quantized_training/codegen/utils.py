@@ -558,62 +558,89 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
         if node.target != torch.ops.aten.conv2d.default:
             continue
 
-        if len(node.args) < 7 or node.args[6] != 1:
+        if len(node.args) == 7 and node.args[6] != 1:
             continue
 
         input, weight = node.args[:2]
         C_in = input.shape[1]
         C_out = weight.shape[0]
 
+        # First layer is handled separately
+        if C_in == 3:
+            continue
+
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
         # Pad input along C dimension
         if pad_C > 0:
+            logger.debug(f"Pad input {input} to {node} with {pad_C} along C dimension")
             pad_dims_input = [0, 0, 0, 0, 0, pad_C]
             with model.graph.inserting_before(node):
                 padded_input = model.graph.call_function(
-                    torch.ops.aten.pad.default,
-                    (input, pad_dims_input),
+                    torch.ops.aten.pad.default, (input, pad_dims_input),
                 )
 
-            pad_args = map_arg(padded_input.args, lambda n: n.value)
-            padded_input.value = padded_input.target(*pad_args)
-
             node.replace_input_with(input, padded_input)
+
+            propagate_shape(padded_input)
 
             if (dtype := input.meta.get("dtype")) is not None:
                 padded_input.meta["dtype"] = dtype
 
         # Pad weight along K and C
         if pad_C > 0 or pad_K > 0:
+            logger.debug(f"Pad weight {weight} with {pad_C} and {pad_K} along C and K dimensions")
             param = get_parameter_or_buffer(model, weight.target)
             pad_dims_weight = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
             param.data = F.pad(param.data, pad_dims_weight)
+            weight.value, weight.shape = param.data, param.data.shape
 
             if len(node.args) > 2 and node.args[2] is not None:
-                bias_param = get_parameter_or_buffer(model, node.args[2].target)
+                bias = node.args[2]
+                bias_param = get_parameter_or_buffer(model, bias.target)
                 bias_param.data = F.pad(bias_param.data, [0, pad_K])
+                bias.value, bias.shape = bias_param.data, bias_param.data.shape
+
+        propagate_shape(node)
+
+        if pad_K == 0:
+            continue
 
         # Slice output along channel dimension to remove padding in C_out
-        if pad_K:
-            user_node = next(iter(node.users))
-            output_node = node
+        visited = set()
+        for user in list(node.users):
+            if user in visited:
+                continue
 
-            with model.graph.inserting_before(user_node):
+            next_user = user
+            while _is_elementwise_op(next_user) and len(next_user.users) == 1:
+                visited.add(next_user)
+                for n in next_user.all_input_nodes:
+                    if n in visited or n.value.ndim != 4 or n.shape[1] % K_unroll == 0:
+                        continue
+                    dims = [0, 0, 0, 0, 0, pad_K]
+                    with model.graph.inserting_before(next_user):
+                        arg_pad = model.graph.call_function(
+                            torch.ops.aten.pad.default, (n, dims),
+                        )
+                    logger.debug(f"Inserted {arg_pad} to pad {n} with {pad_K} along K dimension")
+                    propagate_shape(arg_pad)
+                    if (dtype := n.meta.get("dtype")) is not None:
+                        arg_pad.meta["dtype"] = dtype
+                    next_user.replace_input_with(n, arg_pad)
+                next_user = next(iter(next_user.users))
+
+            input_node = next_user.all_input_nodes[0]
+            with model.graph.inserting_before(next_user):
                 slice_node = model.graph.call_function(
                     torch.ops.aten.slice.Tensor,
-                    (output_node, 1, 0, C_out),
+                    (input_node, 1, 0, C_out),
                 )
+            next_user.replace_input_with(input_node, slice_node)
 
-            slice_args = map_arg(slice_node.args, lambda n: n.value)
-            slice_node.value = slice_node.target(*slice_args)
-
-            for user in list(output_node.users):
-                if id(user) != id(slice_node):
-                    user.replace_input_with(output_node, slice_node)
-
-            if (dtype := output_node.meta.get("dtype")) is not None:
+            propagate_shape(slice_node)
+            if (dtype := input_node.meta.get("dtype")) is not None:
                 slice_node.meta["dtype"] = dtype
 
     model.graph.lint()
