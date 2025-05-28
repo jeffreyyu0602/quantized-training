@@ -40,6 +40,7 @@ from quantized_training.codegen.utils import (
     replace_rmsnorm_with_layer_norm,
     strip_softmax_dtype,
 )
+from convert_vit_timm_to_pytorch import convert_vit_checkpoint
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 target_path = os.path.join(script_dir, '../examples/language_modeling')
@@ -650,14 +651,24 @@ if __name__ == "__main__":
     elif args.model == "vit":
         from transformers import ViTForImageClassification
 
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "google/vit-base-patch16-224"
+        model_name_or_path = None
+
+        # for timm models, it needs to be converted to pytorch first
+        if args.model_name_or_path is None or "timm" in args.model_name_or_path:
+            model_name_or_path = "google/vit-base-patch16-224"
+        else:
+            model_name_or_path = args.model_name_or_path
+
 
         model = ViTForImageClassification.from_pretrained(
-            args.model_name_or_path,
+            model_name_or_path,
             attn_implementation="eager",
             torch_dtype=torch.bfloat16 if args.bf16 else None,
         )
+
+        if args.model_name_or_path is not None and "timm" in args.model_name_or_path:
+            timm_model = convert_vit_checkpoint(args.model_name_or_path)
+            model.load_state_dict(timm_model.state_dict())
 
         modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
