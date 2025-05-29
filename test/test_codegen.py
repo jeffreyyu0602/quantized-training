@@ -769,6 +769,34 @@ if __name__ == "__main__":
         new_output = gm(*example_args)
 
         compile(gm, example_args, **compile_args)
+    elif args.model == "mamba":
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "state-spaces/mamba-2.8b-hf"
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path).eval()
+
+        if args.bf16:
+            model.bfloat16()
+
+        input_ids = torch.randint(low=0, high=tokenizer.vocab_size, size=(1, 2))
+        example_args = (input_ids,)
+        example_kwargs = {"use_cache": False, "return_dict": False}
+
+        gm = prepare_pt2e(model, quantizer, example_args, example_kwargs)
+
+        convert_pt2e(gm, args.bias)
+
+        old_output = gm(input_ids, False, False)[0]
+
+        transform(gm, example_args, example_kwargs, patterns=vector_stages)
+
+        gm.graph.print_tabular()
+        new_output = gm(input_ids, False, False)[0]
+
+        compile(gm, example_args, example_kwargs, **compile_args)
     else:
         raise ValueError(f"Model {args.model} not supported")
 

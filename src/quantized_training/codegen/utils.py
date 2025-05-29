@@ -111,37 +111,33 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
         GraphModule: The transformed GraphModule with `torch.cat` and `torch.stack` operations adjusted.
     """
     graph = model.graph
-
-    partitions = get_source_partitions(graph, [torch.stack, torch.cat])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    while len(partitions) > 0:
-        cat_node = partitions.pop(0).output_nodes[0]
+    for node in list(graph.nodes):
+        cat_node = node
         if cat_node.target not in [
             torch.ops.aten.cat.default, torch.ops.aten.stack.default
         ]:
             continue
 
         if not all(hasattr(n, "shape") for n in cat_node.args[0]):
-            logger.warning(f"Node {cat_node} do not have a shape attribute")
+            logger.warning(f"Node {cat_node} does not have shape attributes for all inputs.")
             continue
 
-        input_shape = list(cat_node.args[0][0].shape)
+        shapes = [n.shape for n in cat_node.args[0]]
+        input_shape = list(shapes[0])
 
-        if not all(list(n.shape) == input_shape for n in cat_node.args[0][1:]):
-            shapes = [n.shape for n in cat_node.args[0]]
+        if not all(list(s) == input_shape for s in shapes):
             logger.warning(
                 "Concatenated tensors have different shapes in node %s. Shapes: %s",
-                cat_node,
-                shapes
+                cat_node, shapes
             )
-            continue
-
-        if len(cat_node.args) == 1 or cat_node.args[1] == 0:
             continue
 
         concat_dim = cat_node.args[1]
         if concat_dim < 0:
             concat_dim += len(input_shape)
+
+        if len(cat_node.args) == 1 or concat_dim == 0:
+            continue
 
         # Always stack along the first dimension
         if cat_node.target == torch.ops.aten.stack.default:
@@ -155,7 +151,7 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
 
         # Permute the concatenated tensor to match the original order
         dims = list(range(len(input_shape) + 1))[1:]
-        dims.insert(concat_dim, 0)
+        dims = dims[:concat_dim + 1] + [0] + dims[concat_dim + 1:]
 
         with graph.inserting_after(stack_node):
             permute_node = graph.call_function(

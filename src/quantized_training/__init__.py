@@ -123,8 +123,7 @@ def transform(
         transpose_linear_weights(model, transpose_fc=transpose_fc)
         replace_target(model, aten.max_pool2d.default, quantized_ops.max_pool2d.default)
         replace_target(model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default)
-
-    ShapeProp(model).propagate(*flatten_args)
+        ShapeProp(model).propagate(*flatten_args)
 
     eliminate_reshape_with_no_effect(model)
 

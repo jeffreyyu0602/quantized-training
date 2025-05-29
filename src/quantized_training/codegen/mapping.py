@@ -241,24 +241,20 @@ def split_multi_head_attention(model: GraphModule):
         value_scale = av_matmul.kwargs.get('weight_scale', None)
 
         # Find the nodes between the qk and av matmuls
-        def dfs(current_node, visited):
+        def dfs(current_node, visited, max_depth=20):
+            if len(visited) > max_depth:
+                return None
             if current_node == av_matmul:
                 return [visited]
             paths = []
             for user in current_node.users:
                 if user not in visited:
-                    paths.extend(dfs(user, visited + [user]))
+                    if (result := dfs(user, visited + [user], max_depth)) is None:
+                        return None
+                    paths.extend(result)
             return paths
 
         paths = dfs(qk_matmul, [qk_matmul])
-
-        nodes_between = set()
-        for path in paths:
-            nodes_between.update(path[1:-1])
-
-        # Sort the nodes between the qk and av matmuls
-        order = {node: idx for idx, node in enumerate(graph.nodes)}
-        nodes_between = sorted(nodes_between, key=lambda n: order[n])
 
         # Decompose BMM into multiple matmuls
         if qk_matmul.target == torch.ops.aten.matmul.default:
@@ -267,6 +263,21 @@ def split_multi_head_attention(model: GraphModule):
         else:
             qk_output = _decompose_bmm_mx(model, qk_matmul)
             av_output = _decompose_bmm_mx(model, av_matmul)
+
+        if paths is None:
+            logger.warning(
+                f"Failed to find paths between {qk_matmul} and {av_matmul}. "
+                "Skipping fusion."
+            )
+            continue
+
+        nodes_between = set()
+        for path in paths:
+            nodes_between.update(path[1:-1])
+
+        # Sort the nodes between the qk and av matmuls
+        order = {node: idx for idx, node in enumerate(graph.nodes)}
+        nodes_between = sorted(nodes_between, key=lambda n: order[n])
 
         # Annotate the dtype of the new nodes in the graph
         def propagate_input_dtype(node):
@@ -1070,8 +1081,16 @@ def run_memory_mapping(
 
         skip_allocation = False
 
+        # Allocate memory for input parameters
+        if not weight_persistent:
+            for n in node.all_input_nodes:
+                if n.op == "get_attr" and not re.fullmatch(r"code_\d+", n.name):
+                    n.meta["memory"] = allocator.allocate_memory(n)
+
         # Propagate memory metadata for nop nodes
         if _is_nop(node):
+            if "memory" not in node.args[0].meta:
+                raise RuntimeError(f"Cannot propagate memory for {node}")
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             skip_allocation = True
 
@@ -1101,12 +1120,6 @@ def run_memory_mapping(
             if len(node.args) != 1 and node.args[1] != 0:
                 raise RuntimeError(f"Unsupported stack operation: {node}")
             continue
-
-        # Allocate memory for input parameters
-        if not weight_persistent:
-            for n in node.all_input_nodes:
-                if n.op == "get_attr" and not re.fullmatch(r"code_\d+", n.name):
-                    n.meta["memory"] = allocator.allocate_memory(n)
 
         allocate_for_stack_op(node)
 
