@@ -40,7 +40,13 @@ from quantized_training.codegen.utils import (
     replace_rmsnorm_with_layer_norm,
     strip_softmax_dtype,
 )
-from convert_vit_timm_to_pytorch import convert_vit_checkpoint
+
+from utils.models import (
+    vit
+)
+from utils.dataset import (
+    imagenet
+)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 target_path = os.path.join(script_dir, '../examples/language_modeling')
@@ -123,9 +129,18 @@ if __name__ == "__main__":
         help="Name of the task to load the dataset"
     )
     parser.add_argument(
-        "--output_dir",
+        "--model_output_dir",
         required=True,
         help="Output directory for generated tensor files"
+    )
+    parser.add_argument(
+        "--dump_dataset",
+        action="store_true",
+        help="Whether to dump the dataset to disk for later use."
+    )
+    parser.add_argument(
+        "--dataset_output_dir",
+        help="Output directory for dataset files"
     )
     parser.add_argument(
         "--context_length",
@@ -181,6 +196,11 @@ if __name__ == "__main__":
         default=None,
         help="Hardware unroll dimensions for the accelerator."
     )
+    parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Whether to run the pytorch evaluation during compilation"
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
@@ -213,7 +233,7 @@ if __name__ == "__main__":
         "bank_width": args.bank_width,
         "bank_size": args.bank_size,
         "weight_persistent": args.weight_persistent,
-        "output_dir": args.output_dir,
+        "output_dir": args.model_output_dir,
         "output_file": args.model,
     }
 
@@ -659,7 +679,6 @@ if __name__ == "__main__":
         else:
             model_name_or_path = args.model_name_or_path
 
-
         model = ViTForImageClassification.from_pretrained(
             model_name_or_path,
             attn_implementation="eager",
@@ -667,8 +686,15 @@ if __name__ == "__main__":
         )
 
         if args.model_name_or_path is not None and "timm" in args.model_name_or_path:
-            timm_model = convert_vit_checkpoint(args.model_name_or_path)
-            model.load_state_dict(timm_model.state_dict())
+            timm_model = vit.convert_vit_checkpoint(args.model_name_or_path)
+            model.load_state_dict(timm_model.state_dict(), strict=False)
+
+        if args.dump_dataset or args.evaluate:
+            imagenet_dataset = imagenet.retrieve_daataset(100, "vit")
+            if args.evaluate:
+                vit.evaluate_vit(model, imagenet_dataset)
+        else:
+            imagenet_dataset = imagenet.retrieve_daataset(100, "vit")
 
         modules_to_fuse = get_conv_bn_layers(model)
         if len(modules_to_fuse) > 0:
@@ -676,12 +702,7 @@ if __name__ == "__main__":
 
         quantizer.set_module_name("classifier", None)
 
-        dataset = load_dataset("zh-plus/tiny-imagenet")
-
-        image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
-
-        inputs = image_processor(dataset['train'][0]["image"], return_tensors="pt")
-        example_args = (inputs.pixel_values.to(torch_dtype),)
+        example_args = (imagenet_dataset[0]["image"].to(torch_dtype),)
 
         gm = export_model(model, example_args)
         pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
@@ -691,9 +712,9 @@ if __name__ == "__main__":
         strip_softmax_dtype(gm)
 
         for i in tqdm(range(10)):
-            inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
+            inputs = imagenet_dataset[i]["image"]
             with torch.no_grad():
-                gm(inputs.pixel_values.to(torch_dtype))
+                gm(inputs.to(torch_dtype))
 
         convert_pt2e(gm, args.bias)
 
@@ -708,6 +729,13 @@ if __name__ == "__main__":
 
         gm.graph.print_tabular()
         new_output = gm(*example_args).logits
+
+        if args.dump_dataset:
+            preprocessed_imagenet = imagenet.dump_imagenet(
+                args.dataset_output_dir, imagenet_dataset, "vit", preprocess_fn, torch_dtype
+            )
+            if args.evaluate:
+                vit.evaluate_vit(gm, preprocessed_imagenet)
 
         compile(gm, example_args, **compile_args)
     elif args.model == "yolo5":

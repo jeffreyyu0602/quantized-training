@@ -19,6 +19,7 @@ import timm
 import torch
 from PIL import Image
 from timm.data import ImageNetInfo, infer_imagenet_subset
+from tqdm import tqdm
 
 from transformers import DeiTImageProcessor, ViTConfig, ViTForImageClassification, ViTImageProcessor, ViTModel
 from transformers.utils import logging
@@ -228,3 +229,31 @@ def convert_vit_checkpoint(vit_name):
         assert torch.allclose(timm_logits, outputs.logits, atol=1e-3)
     
     return model
+
+def evaluate_vit(model, dataset):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    correct_predictions = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for image_label_pair in tqdm(dataset):
+            # for running the original model without the preprocessing function 
+            # applied to the dataset
+            image = image_label_pair["image"].to(device)
+            label = image_label_pair["label"]
+    
+            outputs = model(image)
+            logits = outputs.logits
+            prediction = torch.argmax(logits, dim=-1)
+            if prediction.item() == label:
+                correct_predictions += 1
+            total_samples += 1
+
+    accuracy = correct_predictions / total_samples if total_samples > 0 else 0.0
+    print(f"Vit Accuracy: {accuracy:.4f}")
+
+    
+            
+
