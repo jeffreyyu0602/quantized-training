@@ -25,6 +25,7 @@ __all__ = [
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
     "rewrite_quantize_mx_for_lastdim",
+    "rewrite_fx_graph",
     "run_memory_mapping",
     "split_multi_head_attention",
     "transpose_linear_weights",

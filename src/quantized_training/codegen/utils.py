@@ -8,11 +8,12 @@ from typing import Callable, List, Set, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch.fx import GraphModule, Node
+from torch.fx.node import map_arg
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
-from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op
+from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op, _is_indexing_or_concatenation_op
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -110,37 +111,33 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
         GraphModule: The transformed GraphModule with `torch.cat` and `torch.stack` operations adjusted.
     """
     graph = model.graph
-
-    partitions = get_source_partitions(graph, [torch.stack, torch.cat])
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    while len(partitions) > 0:
-        cat_node = partitions.pop(0).output_nodes[0]
+    for node in list(graph.nodes):
+        cat_node = node
         if cat_node.target not in [
             torch.ops.aten.cat.default, torch.ops.aten.stack.default
         ]:
             continue
 
         if not all(hasattr(n, "shape") for n in cat_node.args[0]):
-            logger.warning(f"Node {cat_node} do not have a shape attribute")
+            logger.warning(f"Node {cat_node} does not have shape attributes for all inputs.")
             continue
 
-        input_shape = list(cat_node.args[0][0].shape)
+        shapes = [n.shape for n in cat_node.args[0]]
+        input_shape = list(shapes[0])
 
-        if not all(list(n.shape) == input_shape for n in cat_node.args[0][1:]):
-            shapes = [n.shape for n in cat_node.args[0]]
+        if not all(list(s) == input_shape for s in shapes):
             logger.warning(
                 "Concatenated tensors have different shapes in node %s. Shapes: %s",
-                cat_node,
-                shapes
+                cat_node, shapes
             )
-            continue
-
-        if len(cat_node.args) == 1 or cat_node.args[1] == 0:
             continue
 
         concat_dim = cat_node.args[1]
         if concat_dim < 0:
             concat_dim += len(input_shape)
+
+        if len(cat_node.args) == 1 or concat_dim == 0:
+            continue
 
         # Always stack along the first dimension
         if cat_node.target == torch.ops.aten.stack.default:
@@ -154,7 +151,7 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
 
         # Permute the concatenated tensor to match the original order
         dims = list(range(len(input_shape) + 1))[1:]
-        dims.insert(concat_dim, 0)
+        dims = dims[:concat_dim + 1] + [0] + dims[concat_dim + 1:]
 
         with graph.inserting_after(stack_node):
             permute_node = graph.call_function(
@@ -213,7 +210,7 @@ def convert_cat_with_mismatched_shapes_to_stack(model: GraphModule):
         logger.info(f"Node {node} has different input shapes")
         dim = node.args[1]
 
-        args = torch.fx.node.map_arg(node.args, lambda n: n.value)
+        args = map_arg(node.args, lambda n: n.value)
         shape = list(args[0][0].shape[:dim])
 
         class Concat(torch.nn.Module):
@@ -557,62 +554,89 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
         if node.target != torch.ops.aten.conv2d.default:
             continue
 
-        if len(node.args) < 7 or node.args[6] != 1:
+        if len(node.args) == 7 and node.args[6] != 1:
             continue
 
         input, weight = node.args[:2]
         C_in = input.shape[1]
         C_out = weight.shape[0]
 
+        # First layer is handled separately
+        if C_in == 3:
+            continue
+
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
         # Pad input along C dimension
         if pad_C > 0:
+            logger.debug(f"Pad input {input} to {node} with {pad_C} along C dimension")
             pad_dims_input = [0, 0, 0, 0, 0, pad_C]
             with model.graph.inserting_before(node):
                 padded_input = model.graph.call_function(
-                    torch.ops.aten.pad.default,
-                    (input, pad_dims_input),
+                    torch.ops.aten.pad.default, (input, pad_dims_input),
                 )
 
-            pad_args = torch.fx.node.map_arg(padded_input.args, lambda n: n.value)
-            padded_input.value = padded_input.target(*pad_args)
-
             node.replace_input_with(input, padded_input)
+
+            propagate_shape(padded_input)
 
             if (dtype := input.meta.get("dtype")) is not None:
                 padded_input.meta["dtype"] = dtype
 
         # Pad weight along K and C
         if pad_C > 0 or pad_K > 0:
+            logger.debug(f"Pad weight {weight} with {pad_C} and {pad_K} along C and K dimensions")
             param = get_parameter_or_buffer(model, weight.target)
             pad_dims_weight = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
             param.data = F.pad(param.data, pad_dims_weight)
+            weight.value, weight.shape = param.data, param.data.shape
 
             if len(node.args) > 2 and node.args[2] is not None:
-                bias_param = get_parameter_or_buffer(model, node.args[2].target)
+                bias = node.args[2]
+                bias_param = get_parameter_or_buffer(model, bias.target)
                 bias_param.data = F.pad(bias_param.data, [0, pad_K])
+                bias.value, bias.shape = bias_param.data, bias_param.data.shape
+
+        propagate_shape(node)
+
+        if pad_K == 0:
+            continue
 
         # Slice output along channel dimension to remove padding in C_out
-        if pad_K:
-            user_node = next(iter(node.users))
-            output_node = node
+        visited = set()
+        for user in list(node.users):
+            if user in visited:
+                continue
 
-            with model.graph.inserting_before(user_node):
+            next_user = user
+            while _is_elementwise_op(next_user) and len(next_user.users) == 1:
+                visited.add(next_user)
+                for n in next_user.all_input_nodes:
+                    if n in visited or n.value.ndim != 4 or n.shape[1] % K_unroll == 0:
+                        continue
+                    dims = [0, 0, 0, 0, 0, pad_K]
+                    with model.graph.inserting_before(next_user):
+                        arg_pad = model.graph.call_function(
+                            torch.ops.aten.pad.default, (n, dims),
+                        )
+                    logger.debug(f"Inserted {arg_pad} to pad {n} with {pad_K} along K dimension")
+                    propagate_shape(arg_pad)
+                    if (dtype := n.meta.get("dtype")) is not None:
+                        arg_pad.meta["dtype"] = dtype
+                    next_user.replace_input_with(n, arg_pad)
+                next_user = next(iter(next_user.users))
+
+            input_node = next_user.all_input_nodes[0]
+            with model.graph.inserting_before(next_user):
                 slice_node = model.graph.call_function(
                     torch.ops.aten.slice.Tensor,
-                    (output_node, 1, 0, C_out),
+                    (input_node, 1, 0, C_out),
                 )
+            next_user.replace_input_with(input_node, slice_node)
 
-            slice_args = torch.fx.node.map_arg(slice_node.args, lambda n: n.value)
-            slice_node.value = slice_node.target(*slice_args)
-
-            for user in list(output_node.users):
-                if id(user) != id(slice_node):
-                    user.replace_input_with(output_node, slice_node)
-
-            if (dtype := output_node.meta.get("dtype")) is not None:
+            propagate_shape(slice_node)
+            if (dtype := input_node.meta.get("dtype")) is not None:
                 slice_node.meta["dtype"] = dtype
 
     model.graph.lint()
@@ -752,6 +776,23 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
     torch.nn.functional.conv2d = conv2d_transposed
 
+    def get_path_to_target(node: torch.fx.Node, targets):
+        if not isinstance(targets, (list, tuple)):
+            targets = [targets]
+
+        for user in node.users:
+            if user.target in targets:
+                return [node, user]
+
+            if (
+                _is_nop(user) or _is_indexing_or_concatenation_op(user)
+                or user.target == torch.ops.quantized_ops.quantize.default
+            ):
+                path = get_path_to_target(user, targets)
+                if path is not None:
+                    return [node] + path
+        return None
+
     for node in graph.nodes:
         if not is_conv2d(node) and node.target not in [
             torch.ops.aten.adaptive_avg_pool2d.default,
@@ -772,23 +813,36 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
             for arg in n.all_input_nodes:
                 if arg in conv_chain or arg.op == "get_attr" or arg in node_map:
                     continue
-                logger.debug(f"Insert pre-permute for {arg}")
+
+                # Handle the special case where weight is not a get_attr node
+                path = get_path_to_target(arg, [
+                    torch.ops.aten.conv2d.default,
+                    torch.ops.quantized_ops.conv2d_mx.default,
+                    torch.ops.quantized_ops.conv2d.default,
+                ])
+
+                # Permute input and weight in different ways
+                if path is not None and id(path[-2]) == id(path[-1].args[1]):
+                    dims = (2, 3, 1, 0)
+                else:
+                    dims = (0, 2, 3, 1)
+
+                logger.debug(f"Insert permute before {arg} with dims {dims}")
+
                 if arg not in pre_permute_nodes:
                     with graph.inserting_after(arg):
                         pre_permute_nodes[arg] = graph.call_function(
-                            torch.ops.aten.permute.default,
-                            args=(arg, (0, 2, 3, 1))
+                            torch.ops.aten.permute.default, (arg, dims),
                         )
                 n.replace_input_with(arg, pre_permute_nodes[arg])
 
             for user in list(n.users.keys()):
                 if user in conv_chain or user in node_map:
                     continue
-                logger.debug(f"Insert post-permute for {n}")
+                logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default,
-                        args=(n, (0, 3, 1, 2))
+                        torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
                     )
                 user.replace_input_with(n, permute_node)
 
@@ -800,8 +854,9 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
 
             logger.debug(f"Permuting weights for {n}")
             weight_node = n.args[1]
-            param = get_parameter_or_buffer(model, weight_node.target)
-            param.data = param.data.permute(2, 3, 1, 0)
+            if weight_node.op == "get_attr":
+                param = get_parameter_or_buffer(model, weight_node.target)
+                param.data = param.data.permute(2, 3, 1, 0)
 
             if n.target == torch.ops.quantized_ops.conv2d_mx.default:
                 scale_node = n.kwargs.get("weight_scale")
@@ -814,7 +869,7 @@ def insert_permute_adapters_for_conv2d(model: GraphModule):
                     torch.ops.quantized_ops.conv2d.default, args=n.args
                 )
 
-            logger.debug(f"Replace {n} with permute for {conv_node}")
+            logger.debug(f"Replace conv2d node {n} with {conv_node}")
 
             conv_node.meta = n.meta
             n.replace_all_uses_with(conv_node)
@@ -845,8 +900,10 @@ def eliminate_reshape_with_no_effect(model: GraphModule):
         while group and torch.any(group[-1].value.flatten() != input_tensor):
             group.pop()
 
-        if len(group) == 0:
+        if len(group) <= 1:
             continue
+
+        logger.debug(f"Eliminating reshape group: {[n.name for n in group]}")
 
         output_shape = group[-1].value.shape
 
@@ -1059,14 +1116,14 @@ def extract_input_preprocessor(model: GraphModule):
     return model, GraphModule(m, new_graph)
 
 
-def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
+def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     """
     Transforms a given PyTorch FX GraphModule by identifying and replacing
     nodes that match a user-defined match_and_rewrite with alternative implementations.
 
     Args:
         model (torch.fx.GraphModule): The input FX GraphModule to be transformed.
-        match_and_rewrite (Callable): A function that takes three arguments:
+        fn (Callable): A function that takes three arguments:
             - sources: The underlying function, module, or primitive operation
               responsible for a given FX node (from node.meta["source_fn_stack"]).
             - example_args (Tuple): A tuple of example arguments for the node,
@@ -1090,31 +1147,48 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, match_and_rewrite: Callable):
           and recompilation.
 
     Example:
-        >>> def match_and_rewrite(sources, args, kwargs):
-        ...     if torch.nn.Conv2d not in sources and torch.nn.functional.conv2d not in sources:
+        >>> def match_and_rewrite(source_fn, args, kwargs):
+        ...     if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
         ...         return None
         ...     # Replace with a no-op or alternative module
         ...     class Identity(nn.Module):
         ...         def forward(self, x): return x
         ...     return Identity
-        >>> transformed = transformer(fx_model, match_and_rewrite)
+        >>> transformed = rewrite_fx_graph(fx_model, match_and_rewrite)
     """
     for node in list(model.graph.nodes):
-        source_fn_st = node.meta.get("source_fn_stack", [])
-        if not source_fn_st:
+        if node.op != "call_function":
             continue
 
-        source_fn = source_fn_st[-1][0]
-
-        example_args = torch.fx.node.map_arg(node.args, lambda n: n.meta["val"])
-        example_kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: n.meta["val"])
-
-        if (cls := match_and_rewrite(source_fn, example_args, example_kwargs)) is None:
+        if (source_fn_st := node.meta.get("source_fn_stack")) is None:
             continue
 
-        gm = export_model(cls(), example_args, example_kwargs)
+        source_fn = source_fn_st[-1][1]
+
+        def get_value(n: Node):
+            if "val" in n.meta:
+                return n.meta["val"]
+            return getattr(n, "value", None)
+
+        example_args = map_arg(node.args, get_value)
+        example_kwargs = map_arg(node.kwargs, get_value)
+
+        if (cls := fn(source_fn, example_args, example_kwargs)) is None:
+            continue
+
+        new_args = map_arg(tuple(node.all_input_nodes), get_value)
+        gm = export_model(cls(), new_args, example_kwargs)
+
+        # PyTorch PT2E expect nodes to have no kwargs in the exported graph.
+        # Clone has a memory_format kwarg, zeros_like has a pin_memory kwarg, and
+        # gelu has a has an approximate kwarg that persist in exported graph.
+        # This is just a work around for these.
+        for n in list(gm.graph.nodes):
+            if n.target == torch.ops.aten.zeros.default:
+                n.kwargs = {}
 
         replace_node_with_graph_module(model, gm, node)
+
         model.graph.erase_node(node)
 
     model.graph.lint()
