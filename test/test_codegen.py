@@ -702,6 +702,19 @@ if __name__ == "__main__":
 
         quantizer.set_module_name("classifier", None)
 
+        if args.activation is not None and "microscaling" in args.activation:
+            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+
+            bias_qspec = DerivedQuantizationSpec(
+                derived_from=None,
+                derive_qparams_fn=derive_bias_qparams_fn,
+                dtype=None,
+            )
+
+            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+            quantizer.set_module_name("^vit.embeddings.patch_embeddings.projection$", qconfig)
+
         example_args = (imagenet_dataset[0]["image"].to(torch_dtype),)
 
         gm = export_model(model, example_args)
