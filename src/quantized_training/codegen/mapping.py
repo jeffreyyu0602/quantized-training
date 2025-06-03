@@ -1048,15 +1048,12 @@ def run_memory_mapping(
             # TODO: if there is a select/slice operation, and the output has multiple
             # users, we need to make a copy to avoid overwriting the memory
             for n in reversed(nodes[:-1]):
-                # print(f"Assign memory to node: {n} using stack node {stack_node}")
                 n.meta["memory"] = segment
 
             # If the first node is a param node, we need to copy it to the new location
             if _is_nop(node):
                 input_node = node.all_input_nodes[0]
-                # print(input_node.meta["memory"], segment)
                 if input_node.meta["memory"].start != segment.start:
-                    # print(f"Copying input node {input_node} to node {node}")
                     with graph.inserting_before(node):
                         copy_node = graph.call_function(
                             torch.ops.aten.add.Scalar, (input_node, 0)
@@ -1065,6 +1062,7 @@ def run_memory_mapping(
                     node.replace_input_with(input_node, copy_node)
                     register_last_uses(copy_node, node)
 
+                    copy_node.meta["memory"] = segment
                     copy_node.value, copy_node.shape = input_node.value, input_node.shape
         elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             # print(f"Allocate stack node: {node}")

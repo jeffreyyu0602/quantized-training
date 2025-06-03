@@ -135,7 +135,7 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
         if len(cat_node.args) == 1:
             continue
 
-        concat_dim = cat_node.args[1]
+        concat_dim = cat_node.args[1] if len(cat_node.args) > 1 else 0
         if concat_dim < 0:
             concat_dim += len(input_shape)
             
