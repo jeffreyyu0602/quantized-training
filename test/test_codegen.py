@@ -276,13 +276,7 @@ if __name__ == "__main__":
 
         old_output = gm(*example_args)
 
-        transform(gm, example_args, **transform_args, fuse_operator=False)
-
-        gm, preprocess_fn = extract_input_preprocessor(gm)
-        example_args = (preprocess_fn(*example_args),)
-
-        fuse(gm, vector_stages, example_args)
-
+        transform(gm, example_args, **transform_args)
         gm.graph.print_tabular()
 
         new_output = gm(*example_args)
@@ -328,8 +322,8 @@ if __name__ == "__main__":
 
         # TODO why the output is different after replacing gelu with vmap
         transform(gm, example_args, **transform_args)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args).logits
 
         compile(gm, example_args, **compile_args)
@@ -426,8 +420,8 @@ if __name__ == "__main__":
         old_output = gm(*example_args)
 
         transform(gm, example_args, **transform_args)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args)
 
         compile(gm, example_args, **compile_args)
@@ -524,8 +518,8 @@ if __name__ == "__main__":
         old_output = gm(*example_args)
 
         transform(gm, example_args, **transform_args)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args)
 
         compile(gm, example_args, **compile_args)
@@ -642,8 +636,8 @@ if __name__ == "__main__":
         old_output = gm(*example_args, **example_kwargs)
 
         transform(gm, example_args, example_kwargs=example_kwargs, **transform_args)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args, *list(example_kwargs.values()))
 
         compile(gm, example_args, **compile_args)
@@ -694,8 +688,8 @@ if __name__ == "__main__":
         example_args = (preprocess_fn(example_args[0]),)
 
         fuse(gm, vector_stages, example_args)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args).logits
 
         compile(gm, example_args, **compile_args)
@@ -732,8 +726,8 @@ if __name__ == "__main__":
         old_output = gm(*example_args)[0]
 
         transform(gm, example_args, patterns=vector_stages)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args)[0]
 
         compile(gm, example_args, **compile_args)
@@ -764,8 +758,8 @@ if __name__ == "__main__":
         old_output = gm(*example_args)
 
         transform(gm, example_args, patterns=vector_stages)
-
         gm.graph.print_tabular()
+
         new_output = gm(*example_args)
 
         compile(gm, example_args, **compile_args)
@@ -773,7 +767,7 @@ if __name__ == "__main__":
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         if args.model_name_or_path is None:
-            args.model_name_or_path = "state-spaces/mamba-2.8b-hf"
+            args.model_name_or_path = "state-spaces/mamba-130m-hf"
 
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
         model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path).eval()
@@ -792,8 +786,8 @@ if __name__ == "__main__":
         old_output = gm(input_ids, False, False)[0]
 
         transform(gm, example_args, example_kwargs, patterns=vector_stages)
-
         gm.graph.print_tabular()
+
         new_output = gm(input_ids, False, False)[0]
 
         compile(gm, example_args, example_kwargs, **compile_args)
