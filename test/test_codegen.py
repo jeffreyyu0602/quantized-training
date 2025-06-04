@@ -669,88 +669,30 @@ if __name__ == "__main__":
 
         compile(gm, example_args, **compile_args)
     elif args.model == "vit":
-        from transformers import ViTForImageClassification
-
-        model_name_or_path = None
-
-        # for timm models, it needs to be converted to pytorch first
-        if args.model_name_or_path is None or "timm" in args.model_name_or_path:
-            model_name_or_path = "google/vit-base-patch16-224"
-        else:
-            model_name_or_path = args.model_name_or_path
-
-        model = ViTForImageClassification.from_pretrained(
-            model_name_or_path,
-            attn_implementation="eager",
-            torch_dtype=torch.bfloat16 if args.bf16 else None,
-        )
-
-        if args.model_name_or_path is not None and "timm" in args.model_name_or_path:
-            timm_model = vit.convert_vit_checkpoint(args.model_name_or_path)
-            model.load_state_dict(timm_model.state_dict(), strict=False)
-
+        model = vit.load_model(args.model_name_or_path, torch_dtype) 
         if args.dump_dataset or args.evaluate:
-            imagenet_dataset = imagenet.retrieve_daataset(100, "vit")
+            imagenet_dataset = imagenet.retrieve_daataset(1000, "vit")
             if args.evaluate:
-                vit.evaluate_vit(model, imagenet_dataset)
+                vit.evaluate(model, imagenet_dataset)
         else:
-            imagenet_dataset = imagenet.retrieve_daataset(100, "vit")
+            imagenet_dataset = imagenet.retrieve_daataset(10, "vit")
 
-        modules_to_fuse = get_conv_bn_layers(model)
-        if len(modules_to_fuse) > 0:
-            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
-
-        quantizer.set_module_name("classifier", None)
-
-        if args.activation is not None and "microscaling" in args.activation:
-            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-
-            bias_qspec = DerivedQuantizationSpec(
-                derived_from=None,
-                derive_qparams_fn=derive_bias_qparams_fn,
-                dtype=None,
-            )
-
-            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
-            quantizer.set_module_name("^vit.embeddings.patch_embeddings.projection$", qconfig)
-
-        example_args = (imagenet_dataset[0]["image"].to(torch_dtype),)
-
-        gm = export_model(model, example_args)
-        pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
-
-        gm = prepare_pt2e(gm, quantizer)
-
-        strip_softmax_dtype(gm)
-
-        for i in tqdm(range(10)):
-            inputs = imagenet_dataset[i]["image"]
-            with torch.no_grad():
-                gm(inputs.to(torch_dtype))
-
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args).logits
-
-        transform(gm, example_args, **transform_args, fuse_operator=False)
-
-        gm, preprocess_fn = extract_input_preprocessor(gm)
-        example_args = (preprocess_fn(example_args[0]),)
-
-        fuse(gm, vector_stages, example_args)
-
-        gm.graph.print_tabular()
-        new_output = gm(*example_args).logits
+        gm, old_output, new_output, preprocess_fn = vit.quantize_and_dump_model(
+            model=model,
+            quantizer=quantizer,
+            calibration_data=imagenet_dataset,
+            vector_stages=vector_stages,
+            args=args
+        )
 
         if args.dump_dataset:
             preprocessed_imagenet = imagenet.dump_imagenet(
                 args.dataset_output_dir, imagenet_dataset, "vit", preprocess_fn, torch_dtype
             )
-            if args.evaluate:
-                vit.evaluate_vit(gm, preprocessed_imagenet)
 
-        compile(gm, example_args, **compile_args)
+        if args.evaluate:
+            vit.evaluate(gm, preprocessed_imagenet)
+
     elif args.model == "yolo5":
         import sys
         sys.path.append("libraries/yolov5-face")

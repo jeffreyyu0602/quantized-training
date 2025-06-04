@@ -24,6 +24,31 @@ from tqdm import tqdm
 from transformers import DeiTImageProcessor, ViTConfig, ViTForImageClassification, ViTImageProcessor, ViTModel
 from transformers.utils import logging
 
+from quantized_training import (
+    DerivedQuantizationSpec,
+    FusedAmaxObsFakeQuantize,
+    QuantizationConfig,
+    QuantizationSpec,
+    add_qspec_args,
+    convert_pt2e,
+    export_model,
+    get_default_quantizer,
+    prepare_pt2e,
+    transform,
+    compile,
+    derive_bias_qparams_fn,
+    extract_input_preprocessor,
+    fuse,
+)
+from quantized_training.codegen.utils import (
+    get_conv_bn_layers,
+    pad_vit_embeddings_output,
+    replace_interpolate,
+    replace_rmsnorm_with_layer_norm,
+    strip_softmax_dtype,
+)
+
+from .utils import get_compile_args, get_transform_args
 
 logging.set_verbosity_info()
 logger = logging.get_logger(__name__)
@@ -227,10 +252,87 @@ def convert_vit_checkpoint(vit_name):
         timm_logits = timm_model(pixel_values)
         assert timm_logits.shape == outputs.logits.shape
         assert torch.allclose(timm_logits, outputs.logits, atol=1e-3)
-    
     return model
 
-def evaluate_vit(model, dataset):
+
+def load_model(model_name, torch_dtype):
+    from transformers import ViTForImageClassification
+
+    model_name_or_path = None
+
+    # for timm models, it needs to be converted to pytorch first
+    if model_name is None or "timm" in model_name:
+        model_name_or_path = "google/vit-base-patch16-224"
+    else:
+        model_name_or_path = model_name
+
+    model = ViTForImageClassification.from_pretrained(
+        model_name_or_path,
+        attn_implementation="eager",
+        torch_dtype=torch_dtype,
+    )
+
+    if model_name is not None and "timm" in model_name:
+        timm_model = convert_vit_checkpoint(model_name)
+        model.load_state_dict(timm_model.state_dict(), strict=False)
+    return model
+
+def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, args):
+    torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
+    transform_args = get_transform_args(args, vector_stages)
+    compile_args = get_compile_args(args)
+
+    modules_to_fuse = get_conv_bn_layers(model)
+    if len(modules_to_fuse) > 0:
+        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
+
+    quantizer.set_module_name("classifier", None)
+
+    if args.activation is not None and "microscaling" in args.activation:
+        qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+        qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+
+        bias_qspec = DerivedQuantizationSpec(
+            derived_from=None,
+            derive_qparams_fn=derive_bias_qparams_fn,
+            dtype=None,
+        )
+
+        qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+        quantizer.set_module_name("^vit.embeddings.patch_embeddings.projection$", qconfig)
+
+    example_args = (calibration_data[0]["image"].to(torch_dtype),)
+
+    gm = export_model(model, example_args)
+    pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
+
+    gm = prepare_pt2e(gm, quantizer)
+
+    strip_softmax_dtype(gm)
+
+    for i in tqdm(range(10)):
+        inputs = calibration_data[i]["image"]
+        with torch.no_grad():
+            gm(inputs.to(torch_dtype))
+
+    convert_pt2e(gm, args.bias)
+
+    old_output = gm(*example_args).logits
+
+    transform(gm, example_args, **transform_args, fuse_operator=False)
+
+    gm, preprocess_fn = extract_input_preprocessor(gm)
+    example_args = (preprocess_fn(example_args[0]),)
+
+    fuse(gm, vector_stages, example_args)
+
+    gm.graph.print_tabular()
+    new_output = gm(*example_args).logits
+
+    compile(gm, example_args, **compile_args)
+    return gm, old_output, new_output, preprocess_fn
+
+def evaluate(model, dataset):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
