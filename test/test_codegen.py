@@ -244,7 +244,10 @@ if __name__ == "__main__":
                     module.stride = 2
                     module.padding = 0
 
-        quantizer.set_module_name("fc", None)
+        if "mobilenet" in args.model:
+            quantizer.set_module_name("classifier", None)
+        else:
+            quantizer.set_module_name("fc", None)
 
         # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
         if args.activation is not None and "microscaling" in args.activation:
