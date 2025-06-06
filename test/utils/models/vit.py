@@ -32,7 +32,6 @@ from quantized_training import (
     add_qspec_args,
     convert_pt2e,
     export_model,
-    get_default_quantizer,
     prepare_pt2e,
     transform,
     compile,
@@ -43,8 +42,6 @@ from quantized_training import (
 from quantized_training.codegen.utils import (
     get_conv_bn_layers,
     pad_vit_embeddings_output,
-    replace_interpolate,
-    replace_rmsnorm_with_layer_norm,
     strip_softmax_dtype,
 )
 
@@ -255,16 +252,17 @@ def convert_vit_checkpoint(vit_name):
     return model
 
 
-def load_model(model_name, torch_dtype):
+def load_model(args):
     from transformers import ViTForImageClassification
 
+    torch_dtype = torch.bfloat16 if args.bf16 else torch.float32
     model_name_or_path = None
 
     # for timm models, it needs to be converted to pytorch first
-    if model_name is None or "timm" in model_name:
+    if args.model_name_or_path is None or "timm" in args.model_name_or_path:
         model_name_or_path = "google/vit-base-patch16-224"
     else:
-        model_name_or_path = model_name
+        model_name_or_path = args.model_name_or_path
 
     model = ViTForImageClassification.from_pretrained(
         model_name_or_path,
@@ -272,8 +270,8 @@ def load_model(model_name, torch_dtype):
         torch_dtype=torch_dtype,
     )
 
-    if model_name is not None and "timm" in model_name:
-        timm_model = convert_vit_checkpoint(model_name)
+    if args.model_name_or_path is not None and "timm" in args.model_name_or_path:
+        timm_model = convert_vit_checkpoint(args.model_name_or_path)
         model.load_state_dict(timm_model.state_dict(), strict=False)
     return model
 

@@ -42,6 +42,7 @@ from quantized_training.codegen.utils import (
 )
 
 from utils.models import (
+    torchvision_models,
     vit
 )
 from utils.dataset import (
@@ -238,77 +239,30 @@ if __name__ == "__main__":
     }
 
     if args.model in models.__dict__:
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "DEFAULT"
+        model = torchvision_models.load_model(args)
+        
+        if args.dump_dataset or args.evaluate:
+            imagenet_dataset = imagenet.retrieve_daataset(1000, "resnet")
+            if args.evaluate:
+                torchvision_models.evaluate(model, imagenet_dataset)
+        else:
+            imagenet_dataset = imagenet.retrieve_daataset(10, "resnet")
 
-        try:
-            model = models.__dict__[args.model](weights=args.model_name_or_path).eval()
-        except Exception as e:
-            model = models.__dict__[args.model](pretrained=True).eval()
+        gm, old_output, new_output, preprocess_fn = torchvision_models.quantize_and_dump_model(
+            model=model,
+            quantizer=quantizer,
+            calibration_data=imagenet_dataset,
+            vector_stages=vector_stages,
+            args=args
+        )
 
-            if args.model_name_or_path:
-                checkpoint = torch.load(args.model_name_or_path, map_location="cpu")
-                model.load_state_dict(checkpoint['state_dict'], strict=False)
-
-        if args.bf16:
-            model.bfloat16()
-
-        modules_to_fuse = get_conv_bn_layers(model)
-        if len(modules_to_fuse) > 0:
-            model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
-
-        # Accelerator only supports 2x2 maxpool
-        if args.use_maxpool_2x2:
-            for module in model.modules():
-                if isinstance(module, torch.nn.MaxPool2d):
-                    module.kernel_size = 2
-                    module.stride = 2
-                    module.padding = 0
-
-        quantizer.set_module_name("fc", None)
-
-        # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
-        if args.activation is not None and "microscaling" in args.activation:
-            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
-
-            bias_qspec = DerivedQuantizationSpec(
-                derived_from=None,
-                derive_qparams_fn=derive_bias_qparams_fn,
-                dtype=None,
+        if args.dump_dataset:
+            preprocessed_imagenet = imagenet.dump_imagenet(
+                args.dataset_output_dir, imagenet_dataset, "resnet", preprocess_fn, torch_dtype
             )
-
-            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
-            quantizer.set_module_name("^conv1$", qconfig)
-
-        example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
-
-        dataset = load_dataset("zh-plus/tiny-imagenet")
-
-        image_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18")
-
-        for i in tqdm(range(10)):
-            inputs = image_processor(dataset['train'][i]["image"], return_tensors="pt")
-            with torch.no_grad():
-                gm(inputs.pixel_values.to(torch_dtype))
-
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args)
-
-        transform(gm, example_args, **transform_args, fuse_operator=False)
-
-        gm, preprocess_fn = extract_input_preprocessor(gm)
-        example_args = (preprocess_fn(*example_args),)
-
-        fuse(gm, vector_stages, example_args)
-
-        gm.graph.print_tabular()
-
-        new_output = gm(*example_args)
-
-        compile(gm, example_args, **compile_args)
+        
+        if args.evaluate:
+            torchvision_models.evaluate(gm, preprocessed_imagenet)
     elif args.model == "segformer":
         replace_interpolate()
 
@@ -669,7 +623,8 @@ if __name__ == "__main__":
 
         compile(gm, example_args, **compile_args)
     elif args.model == "vit":
-        model = vit.load_model(args.model_name_or_path, torch_dtype) 
+        model = vit.load_model(args) 
+
         if args.dump_dataset or args.evaluate:
             imagenet_dataset = imagenet.retrieve_daataset(1000, "vit")
             if args.evaluate:
