@@ -1,6 +1,4 @@
-import argparse
 import os
-import torch
 
 from torchvision import datasets, transforms
 from tqdm import tqdm
@@ -41,7 +39,7 @@ def get_transforms(model_type):
         raise ValueError(f"Unsupported model type: {model_type}")
 
 
-def retrieve_daataset(num_samples, model_type):
+def retrieve_dataset(num_samples, model_type):
     transform = get_transforms(model_type)
 
     # Load the ImageNet dataset from Hugging Face
@@ -76,35 +74,3 @@ def dump_imagenet(output_dir, dataset, model_type, preprocess_fn, torch_dtype):
         preprocessed_dataset.append({"image": image.to(torch_dtype), "label": label})
         write_tensor_to_file(image, os.path.join(dir_name, filename))
     return preprocessed_dataset
-
-
-def main():
-    torch.set_num_threads(32)
-
-    parser = argparse.ArgumentParser(
-        description="ResNet data generator (from model and images to binary data)."
-    )
-
-    parser.add_argument(
-        "--output_dir",
-        default="data/imagenet",
-        help="Path to output folder for dataset.",
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=None,
-        help="How many samples to generate.",
-    )
-    parser.add_argument(
-        "--model_type",
-        type=str,
-        choices=["resnet", "vit"],
-        help="Model type to use for preprocessing.",
-    )
-    args = parser.parse_args()
-    dump_imagenet(args.output_dir, args.num_samples, args.model_type)
-
-
-if __name__ == "__main__":
-    main()

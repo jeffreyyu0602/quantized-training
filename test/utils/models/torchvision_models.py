@@ -82,7 +82,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
     example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
     gm = prepare_pt2e(model, quantizer, example_args)
 
-    for i in tqdm(range(10)):
+    for i in tqdm(range(10), desc=f"Calibrating {model.__class__.__name__}"):
         inputs = calibration_data[i]["image"]
         with torch.no_grad():
             gm(inputs.to(torch_dtype))
@@ -113,7 +113,7 @@ def evaluate(model, dataset):
     total_samples = 0
 
     with torch.no_grad():
-        for image_label_pair in tqdm(dataset):
+        for image_label_pair in tqdm(dataset, desc=f"Evaluating {model.__class__.__name__}"):
             # for running the original model without the preprocessing function 
             # applied to the dataset
             image = image_label_pair["image"].to(device)

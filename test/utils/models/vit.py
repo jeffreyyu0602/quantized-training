@@ -308,7 +308,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
     strip_softmax_dtype(gm)
 
-    for i in tqdm(range(10)):
+    for i in tqdm(range(10), desc="Calibrating ViT"):
         inputs = calibration_data[i]["image"]
         with torch.no_grad():
             gm(inputs.to(torch_dtype))
@@ -338,7 +338,7 @@ def evaluate(model, dataset):
     total_samples = 0
 
     with torch.no_grad():
-        for image_label_pair in tqdm(dataset):
+        for image_label_pair in tqdm(dataset, desc="Evaluating ViT"):
             # for running the original model without the preprocessing function 
             # applied to the dataset
             image = image_label_pair["image"].to(device)

@@ -42,10 +42,13 @@ from quantized_training.codegen.utils import (
 )
 
 from utils.models import (
+    bert,
+    mobilebert,
     torchvision_models,
     vit
 )
 from utils.dataset import (
+    glue,
     imagenet
 )
 
@@ -242,11 +245,11 @@ if __name__ == "__main__":
         model = torchvision_models.load_model(args)
         
         if args.dump_dataset or args.evaluate:
-            imagenet_dataset = imagenet.retrieve_daataset(1000, "resnet")
+            imagenet_dataset = imagenet.retrieve_dataset(1000, "resnet")
             if args.evaluate:
                 torchvision_models.evaluate(model, imagenet_dataset)
         else:
-            imagenet_dataset = imagenet.retrieve_daataset(10, "resnet")
+            imagenet_dataset = imagenet.retrieve_dataset(10, "resnet")
 
         gm, old_output, new_output, preprocess_fn = torchvision_models.quantize_and_dump_model(
             model=model,
@@ -263,247 +266,54 @@ if __name__ == "__main__":
         
         if args.evaluate:
             torchvision_models.evaluate(gm, preprocessed_imagenet)
-    elif args.model == "segformer":
-        replace_interpolate()
-
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "nvidia/segformer-b0-finetuned-ade-512-512"
-
-        model = AutoModelForSemanticSegmentation.from_pretrained(args.model_name_or_path).eval()
-
-        modules_to_fuse = ["decode_head.linear_fuse", "decode_head.batch_norm"]
-        model = torch.ao.quantization.fuse_modules(model, modules_to_fuse, inplace=True)
-
-        if args.bf16:
-            model.bfloat16()
-
-        dataset = load_dataset("zh-plus/tiny-imagenet")
-
-        import torchvision.transforms as transforms
-        preprocess = transforms.Compose([
-            transforms.RandomResizedCrop(512),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-
-        inputs = preprocess(dataset['train'][0]["image"])
-        example_args = (inputs.unsqueeze(0).to(torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
-
-        for i in tqdm(range(10)):
-            inputs = preprocess(dataset['train'][i]["image"])
-            with torch.no_grad():
-                gm(inputs.unsqueeze(0).to(torch_dtype))
-
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args).logits
-
-        # TODO why the output is different after replacing gelu with vmap
-        transform(gm, example_args, **transform_args)
-
-        gm.graph.print_tabular()
-        new_output = gm(*example_args).logits
-
-        compile(gm, example_args, **compile_args)
     elif args.model == "mobilebert":
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "google/mobilebert-uncased"
+        model, tokenizer = mobilebert.load_model(args)
+        
+        eval_dataset, train_dataset = glue.retrieve_dataset(model, tokenizer, args)
+        
+        if args.evaluate:
+            mobilebert.evaluate(model, eval_dataset)
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            args.model_name_or_path,
-            attn_implementation="eager",
-        ).eval()
-
-        if args.bf16:
-            model.bfloat16()
-
-        # Setup SST-2 dataset
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-        raw_datasets = load_dataset("glue", args.task_name)
-
-        sentence1_key, sentence2_key = task_to_keys[args.task_name]
-
-        def preprocess_function(examples):
-            # Tokenize the texts
-            texts = (
-                (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
+        if args.dump_dataset:
+            preprocessed_dataset = glue.dump_dataset(
+                args.dataset_output_dir, eval_dataset, model
             )
-            result = tokenizer(*texts, padding="max_length", max_length=128, truncation=True)
-            result["labels"] = examples["label"]
-            return result
 
-        processed_datasets = raw_datasets.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=raw_datasets["train"].column_names,
-            desc="Running tokenizer on dataset",
+        gm, old_output, new_output = mobilebert.quantize_and_dump_model(
+            model=model,
+            quantizer=quantizer,
+            calibration_data=train_dataset,
+            vector_stages=vector_stages,
+            args=args
         )
 
-        train_dataset = processed_datasets["train"]
-        train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
+        if args.evaluate:
+            mobilebert.evaluate_gm(gm, preprocessed_dataset)
 
-        batch = next(iter(train_dataloader))
-        input_ids = batch["input_ids"]
-        input_shape = input_ids.size()
-
-        embedding_output = model.mobilebert.embeddings(
-            input_ids=input_ids,
-            token_type_ids=batch["token_type_ids"]
-        )
-
-        extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
-
-        head_mask = model.mobilebert.get_head_mask(None, model.config.num_hidden_layers)
-
-        example_args = (embedding_output, extended_attention_mask, head_mask)
-
-        class MobileBertWrapper(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.mobilebert = model.mobilebert
-                self.classifier = model.classifier
-
-            def forward(self, hidden_states, attention_mask, head_mask):
-                for i, layer_module in enumerate(self.mobilebert.encoder.layer):
-                    layer_outputs = layer_module(
-                        hidden_states,
-                        attention_mask=attention_mask,
-                        head_mask=head_mask[i],
-                    )
-                    hidden_states = layer_outputs[0]
-
-                    if args.remove_duplicate:
-                        break
-
-                first_token_tensor = hidden_states[:, 0]
-                output = self.classifier(first_token_tensor)
-                return output
-
-        quantizer.set_module_name("classifier", None)
-
-        gm = prepare_pt2e(MobileBertWrapper(), quantizer, example_args)
-
-        for step, batch in enumerate(tqdm(train_dataloader)):
-            embedding_output = model.mobilebert.embeddings(
-                input_ids=batch["input_ids"],
-                token_type_ids=batch["token_type_ids"]
-            )
-            gm(embedding_output, extended_attention_mask, head_mask)
-
-            if step == args.calibration_steps:
-                break
-
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args)
-
-        transform(gm, example_args, **transform_args)
-
-        gm.graph.print_tabular()
-        new_output = gm(*example_args)
-
-        compile(gm, example_args, **compile_args)
     elif args.model == "bert":
-        if args.model_name_or_path is None:
-            args.model_name_or_path = "bert-base-uncased"
+        model, tokenizer = bert.load_model(args)
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            args.model_name_or_path,
-            attn_implementation="eager",
-        ).eval()
+        eval_dataset, train_dataset = glue.retrieve_dataset(model, tokenizer, args)
 
-        if args.bf16:
-            model.bfloat16()
+        if args.evaluate:
+            bert.evaluate(model, eval_dataset)
 
-        # Setup SST-2 dataset
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-        raw_datasets = load_dataset("glue", args.task_name)
-
-        sentence1_key, sentence2_key = task_to_keys[args.task_name]
-
-        def preprocess_function(examples):
-            # Tokenize the texts
-            texts = (
-                (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
+        if args.dump_dataset:
+            preprocessed_dataset = glue.dump_dataset(
+                args.dataset_output_dir, eval_dataset, model
             )
-            result = tokenizer(*texts, padding="max_length", max_length=128, truncation=True)
-            result["labels"] = examples["label"]
-            return result
 
-        processed_datasets = raw_datasets.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=raw_datasets["train"].column_names,
-            desc="Running tokenizer on dataset",
+        gm, old_output, new_output = bert.quantize_and_dump_model(
+            model=model,
+            quantizer=quantizer,
+            calibration_data=train_dataset,
+            vector_stages=vector_stages,
+            args=args
         )
 
-        train_dataset = processed_datasets["train"]
-        train_dataloader = DataLoader(train_dataset, collate_fn=default_data_collator, batch_size=1)
+        if args.evaluate:
+            bert.evaluate_gm(gm, preprocessed_dataset)
 
-        batch = next(iter(train_dataloader))
-        input_ids = batch["input_ids"]
-        input_shape = input_ids.size()
-
-        embedding_output = model.bert.embeddings(
-            input_ids=input_ids,
-        )
-
-        extended_attention_mask = model.bert.get_extended_attention_mask(batch["attention_mask"], input_shape)
-
-        head_mask = model.bert.get_head_mask(None, model.config.num_hidden_layers)
-
-        example_args = (embedding_output, extended_attention_mask, head_mask)
-
-        class BertWrapper(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.bert = model.bert
-                self.pooler = model.bert.pooler
-                self.classifier = model.classifier
-
-            def forward(self, hidden_states, attention_mask, head_mask):
-                for i, layer_module in enumerate(self.bert.encoder.layer):
-                    layer_outputs = layer_module(
-                        hidden_states,
-                        attention_mask=attention_mask,
-                        head_mask=head_mask[i],
-                    )
-                    hidden_states = layer_outputs[0]
-
-                    if args.remove_duplicate:
-                        break
-
-                hidden_states = self.bert.pooler(hidden_states)
-                output = self.classifier(hidden_states)
-                return output
-
-        quantizer.set_module_name("pooler", None)
-        quantizer.set_module_name("classifier", None)
-
-        gm = prepare_pt2e(BertWrapper(), quantizer, example_args)
-
-        for step, batch in enumerate(tqdm(train_dataloader)):
-            embedding_output = model.bert.embeddings(
-                input_ids=batch["input_ids"],
-            )
-            gm(embedding_output, extended_attention_mask, head_mask)
-
-            if step == args.calibration_steps:
-                break
-
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args)
-
-        transform(gm, example_args, **transform_args)
-
-        gm.graph.print_tabular()
-        new_output = gm(*example_args)
-
-        compile(gm, example_args, **compile_args)
     elif args.model == "llm_prefill" or args.model == "llm_decode":
         from transformers import AutoModelForCausalLM
 
@@ -626,11 +436,11 @@ if __name__ == "__main__":
         model = vit.load_model(args) 
 
         if args.dump_dataset or args.evaluate:
-            imagenet_dataset = imagenet.retrieve_daataset(1000, "vit")
+            imagenet_dataset = imagenet.retrieve_dataset(1000, "vit")
             if args.evaluate:
                 vit.evaluate(model, imagenet_dataset)
         else:
-            imagenet_dataset = imagenet.retrieve_daataset(10, "vit")
+            imagenet_dataset = imagenet.retrieve_dataset(10, "vit")
 
         gm, old_output, new_output, preprocess_fn = vit.quantize_and_dump_model(
             model=model,
