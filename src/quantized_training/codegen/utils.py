@@ -131,12 +131,15 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
                 cat_node, shapes
             )
             continue
+        
+        if len(cat_node.args) == 1:
+            continue
 
         concat_dim = cat_node.args[1] if len(cat_node.args) > 1 else 0
         if concat_dim < 0:
             concat_dim += len(input_shape)
-
-        if len(cat_node.args) == 1 or concat_dim == 0:
+            
+        if concat_dim == 0:
             continue
 
         # Always stack along the first dimension
