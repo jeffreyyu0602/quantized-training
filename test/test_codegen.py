@@ -803,7 +803,7 @@ if __name__ == "__main__":
 
     elif args.model == "depthwise_kernel_size_test":
         class DepthwiseKernelTest(torch.nn.Module):
-            def __init__(self, in_channels=16, out_channels=16, kernel_size=3, stride=1, bias=True):
+            def __init__(self, in_channels=16, out_channels=16, kernel_size=3, stride=5, bias=True):
                 super().__init__()
                 self.depthwise = torch.nn.Conv2d(
                     in_channels=in_channels,
@@ -811,7 +811,7 @@ if __name__ == "__main__":
                     kernel_size=kernel_size,
                     stride=stride,
                     # padding=kernel_size // 2,
-                    padding=0,
+                    padding=(50,10),
                     groups=in_channels,
                     bias=bias
                 )
@@ -823,10 +823,13 @@ if __name__ == "__main__":
         # model = DepthwiseKernelTest().eval()
 
         # Use float input for forward()
-        input_tensor_bf16 = torch.randn(1, 16, 32, 32, dtype=torch.bfloat16)
+        input_tensor_bf16 = torch.randn(1, 16, 102, 202, dtype=torch.bfloat16)
         example_args = (input_tensor_bf16,)
 
         model = DepthwiseKernelTest().eval()
+        with torch.no_grad():
+            binary_weights = torch.randint(0, 2, model.depthwise.weight.shape, dtype=torch.float32)
+            model.depthwise.weight.copy_(binary_weights)
         model.bfloat16()
         # don't quantize the model
         #quantizer.set_module_name("depthwise", None)
