@@ -131,15 +131,12 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
                 cat_node, shapes
             )
             continue
-        
-        if len(cat_node.args) == 1:
-            continue
 
         concat_dim = cat_node.args[1] if len(cat_node.args) > 1 else 0
         if concat_dim < 0:
             concat_dim += len(input_shape)
-            
-        if concat_dim == 0:
+
+        if len(cat_node.args) == 1 or concat_dim == 0:
             continue
 
         # Always stack along the first dimension
@@ -154,7 +151,9 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
 
         # Permute the concatenated tensor to match the original order
         dims = list(range(len(input_shape) + 1))[1:]
-        dims = dims[:concat_dim + 1] + [0] + dims[concat_dim + 1:]
+        dims = dims[:concat_dim] + [0] + dims[concat_dim:]
+
+        logger.info(f"Converting {cat_node} to stack on dim 0 with permute {dims}")
 
         with graph.inserting_after(stack_node):
             permute_node = graph.call_function(
@@ -275,7 +274,7 @@ def convert_expand_to_memory_copy(model: torch.fx.GraphModule):
                     if input.shape[dim] == 1 and size > 1:
                         stacked_tensors = []
                         for _ in range(size):
-                            stacked_tensors.append(input.squeeze(dim) * 1)
+                            stacked_tensors.append(input.squeeze(dim) + 0)
                         input = torch.stack(stacked_tensors, dim=dim)
                     elif input.shape[dim] != size:
                         raise ValueError(

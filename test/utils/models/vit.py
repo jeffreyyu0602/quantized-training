@@ -15,10 +15,8 @@
 """Convert ViT and non-distilled DeiT checkpoints from the timm library."""
 
 import requests
-import timm
 import torch
 from PIL import Image
-from timm.data import ImageNetInfo, infer_imagenet_subset
 from tqdm import tqdm
 
 from transformers import DeiTImageProcessor, ViTConfig, ViTForImageClassification, ViTImageProcessor, ViTModel
@@ -152,6 +150,13 @@ def convert_vit_checkpoint(vit_name):
     """
     Copy/paste/tweak model's weights to our ViT structure.
     """
+    try:
+        import timm
+        from timm.data import ImageNetInfo, infer_imagenet_subset
+    except ImportError:
+        raise ImportError(
+            "Please install the timm library to convert ViT checkpoints from timm: `pip install timm`."
+        )
 
     # define default ViT configuration
     config = ViTConfig()
