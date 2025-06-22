@@ -1293,6 +1293,7 @@ def run_tiling(
                     torch.ops.aten.slice.Tensor, (input_node, -1, c, c_end),
                 )
                 propagate_shape(tiled_input)
+                tiled_input.meta["dtype"] = input_node.meta.get("dtype")
 
                 if input_scale_node is not None:
                     tiled_input_scale = graph.call_function(
@@ -1300,6 +1301,7 @@ def run_tiling(
                         (input_scale_node, -1, scale_c, scale_c_end),
                     )
                     propagate_shape(tiled_input_scale)
+                    tiled_input_scale.meta["dtype"] = input_scale_node.meta.get("dtype")
                 else:
                     tiled_input_scale = None
 
@@ -1313,6 +1315,7 @@ def run_tiling(
                     )
                     tiled_weight.value = sliced_weight
                     tiled_weight.shape = sliced_weight.shape
+                    tiled_weight.meta["dtype"] = weight_node.meta.get("dtype")
 
                     if weight_scale_node is not None:
                         weight_scale = get_parameter_or_buffer(model, weight_scale_node.target)
@@ -1323,6 +1326,7 @@ def run_tiling(
                         )
                         tiled_weight_scale.value = sliced_weight_scale
                         tiled_weight_scale.shape = sliced_weight_scale.shape
+                        tiled_weight_scale.meta["dtype"] = weight_scale_node.meta.get("dtype")
                     else:
                         tiled_weight_scale = None
 
@@ -1331,6 +1335,7 @@ def run_tiling(
                         torch.ops.aten.slice.Tensor, (weight_node, reduction_dim, c, c_end),
                     )
                     propagate_shape(tiled_weight)
+                    tiled_weight.meta["dtype"] = weight_node.meta.get("dtype")
 
                     if weight_scale_node is not None:
                         tiled_weight_scale = graph.call_function(
@@ -1338,6 +1343,7 @@ def run_tiling(
                             (weight_scale_node, reduction_dim, scale_c, scale_c_end),
                         )
                         propagate_shape(tiled_weight_scale)
+                        tiled_weight_scale.meta["dtype"] = weight_scale_node.meta.get("dtype")
                     else:
                         tiled_weight_scale = None
 
@@ -1356,6 +1362,7 @@ def run_tiling(
                         node.target, (tiled_input, tiled_weight) + node.args[2:],
                     )
                 propagate_shape(tiled_gemm)
+                tiled_gemm.meta["dtype"] = node.meta.get("dtype")
 
             tiled_input.meta["tiled_shape"] = (X_tile, C_tile)
             tiled_weight.meta["tiled_shape"] = (K_tile, C_tile)
