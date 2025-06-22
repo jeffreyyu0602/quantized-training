@@ -13,7 +13,13 @@ from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
-from .mapping_utils import _is_elementwise_op, _is_nop, _is_reshape_op, _is_indexing_or_concatenation_op
+from .mapping_utils import (
+    _is_gemm_op,
+    _is_elementwise_op,
+    _is_nop,
+    _is_reshape_op,
+    _is_indexing_or_concatenation_op,
+)
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
@@ -27,7 +33,7 @@ __all__ = [
     "eliminate_reshape_with_no_effect",
     "extract_input_preprocessor",
     "get_conv_bn_layers",
-    "insert_permute_adapters_for_conv2d",
+    "transpose_conv2d_weights",
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_conv2d_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
@@ -37,7 +43,7 @@ __all__ = [
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
     "rewrite_fx_graph",
-    "rewrite_quantize_mx_for_lastdim",
+    "run_tiling",
     "transpose_linear_weights",
     "strip_softmax_dtype",
 ]
@@ -398,46 +404,6 @@ def replace_target_with_vmap(
     return model
 
 
-def rewrite_quantize_mx_for_lastdim(model: torch.fx.GraphModule):
-    graph = model.graph
-    for node in list(model.graph.nodes):
-        if node.target != torch.ops.quantized_ops.quantize_mx.default:
-            continue
-
-        axis = node.args[1]
-        if axis == -1 or axis == node.value[1].ndim - 1:
-            continue
-
-        with graph.inserting_before(node):
-            transpose_node = graph.call_function(
-                torch.ops.aten.transpose.int,
-                (node.args[0], axis, -1),
-            )
-
-        node.replace_input_with(node.args[0], transpose_node)
-
-        node.args = node.args[:1] + (-1,) + node.args[2:]
-
-        for user in node.users:
-            with graph.inserting_after(user):
-                transpose_back = graph.call_function(
-                    torch.ops.aten.transpose.int,
-                    (user, -1, axis),
-                )
-
-            for n in list(user.users):
-                if id(n) != id(transpose_back):
-                    n.replace_input_with(user, transpose_back)
-
-            transpose_back.meta["dtype"] = node.meta["dtype"]
-            transpose_back.meta["source_fn_stack"] = [(transpose_back.name, "transpose")]
-
-    graph.lint()
-    graph.eliminate_dead_code()
-    model.recompile()
-    return model
-
-
 def strip_softmax_dtype(model: torch.fx.GraphModule):
     graph = model.graph
     for node in list(model.graph.nodes):
@@ -772,7 +738,7 @@ def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[N
     return chain
 
 
-def insert_permute_adapters_for_conv2d(model: GraphModule):
+def transpose_conv2d_weights(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
 
@@ -979,7 +945,7 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     return model
 
 
-def replace_target(model: torch.fx.GraphModule, target_to_replace, new_target):
+def replace_target(model, target_to_replace, new_target):
     graph = model.graph
     for node in graph.nodes:
         if node.target != target_to_replace:
@@ -1195,5 +1161,221 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def run_tiling(
+    model,
+    cache_size=1 * 1024 * 1024,
+    num_bank=4,
+    ic_unroll=64,
+    oc_unroll=64,
+):
+    """
+    Perform tiling on GEMM operations in a model to fit intermediate data into cache.
+
+    Tiling is applied across the output (K), input (X), and channel (C) dimensions with
+    the following strategy:
+    - Maximize tile size along X (batch * spatial)
+    - Minimize splits along C to avoid overhead from summing partial results
+    - Ensure K and C tile sizes are multiples of specified minimums
+    - Cache is divided across multiple banks
+
+    Args:
+        model: A model object with a FX Graph containing GEMM nodes.
+        cache_size (int): Total cache size in bytes.
+        num_bank (int): Number of cache banks to divide memory across.
+        ic_unroll (int): Systolic array input channel dimension unroll size. 
+        oc_unroll (int): Systolic array output channel dimension unroll size.
+    """
+    from ..pt2e_utils import dtype_byte_size
+    graph = model.graph
+
+    def get_num_bytes(n: Node):
+        dtype = n.meta.get("dtype", getattr(n.value, "dtype", None))
+        return dtype_byte_size(dtype)
+
+    def get_largest_valid_tile(max_tile, unroll, full_dim):
+        """
+        Get the largest tile size ≤ max_tile that:
+            - is a multiple of `unroll`
+            - divides `full_dim` exactly
+        """
+        for tile in reversed(range(unroll, max_tile + 1, unroll)):
+            if full_dim % tile == 0:
+                return tile
+        return None
+
+    for node in list(graph.nodes):
+        if not _is_gemm_op(node):
+            continue
+
+        input_node = node.args[0]
+        weight_node = node.args[1]
+        input_scale_node = node.kwargs.get("input_scale")
+        weight_scale_node = node.kwargs.get("weight_scale")
+
+        input_value, weight_value = input_node.value, weight_node.value
+
+        input_bytes = get_num_bytes(input_node)
+        weight_bytes = get_num_bytes(weight_node)
+
+        if node.target == torch.ops.aten.matmul.default:
+            C = int(weight_value.shape[0])
+            K = int(weight_value.shape[1])
+            reduction_dim = -2
+        else:
+            C = int(weight_value.shape[1])
+            K = int(weight_value.shape[0])
+            reduction_dim = -1
+
+        X = int(input_value.numel() / C)
+
+        total_size = (input_value.numel() * input_bytes +
+                      weight_value.numel() * weight_bytes)
+        if total_size <= cache_size or X == 1:
+            continue
+
+        cache_per_bank = cache_size / num_bank
+
+        # --- Step 1: Fit inputs (X_tile x C_tile) into bank ---
+
+        # X tile larger than 512 will be handled in the outer loops. Constraining X
+        # to reduce C channel splitting.
+        X_tile = min(X, 512)
+        while (max_c_tile := int(cache_per_bank / (X_tile * input_bytes))) < ic_unroll:
+            if X_tile == 1:
+                raise ValueError(
+                    f"Cannot tile {node} with X={X}, C={C}, K={K} to fit cache size {cache_size}."
+                )
+            X_tile = get_largest_valid_tile(X_tile - 1, 1, X)
+
+        C_tile = get_largest_valid_tile(max_c_tile, ic_unroll, C)
+
+        # --- Step 2: Fit weights (C_tile x K_tile) into bank ---
+        while (max_k_tile := int(cache_per_bank / (C_tile * weight_bytes))) < oc_unroll:
+            if C_tile == ic_unroll:
+                raise ValueError(
+                    f"Cannot tile {node} with X={X}, C={C}, K={K} to fit cache size {cache_size}."
+                )
+            C_tile = get_largest_valid_tile(C_tile - 1, ic_unroll, C)
+
+        K_tile = get_largest_valid_tile(max_k_tile, oc_unroll, K)
+
+        num_x_tiles = X // X_tile
+        num_k_tiles = K // K_tile
+        num_c_tiles = C // C_tile
+
+        # TODO there is a chance we can increase X_tile here
+
+        logger.info(f"{node}: X={X}, C={C}, K={K} -> X_tile={X_tile}, C_tile={C_tile}, K_tile={K_tile}")
+
+        if num_c_tiles == 1:
+            node.meta["tiling"] = {
+                "loops": [num_x_tiles, X_tile, num_k_tiles, K_tile],
+                "indices": [0, 2, 4],
+                "order": "XK",
+            }
+            continue
+
+        tiled_outputs = []
+        for c in range(0, C, C_tile):
+            c_end = min(c + C_tile, C)
+            block_size = node.kwargs.get("block_size", 1)
+            c_scale = int(c / block_size)
+            c_end_scale = int(c_end / block_size)
+
+            with graph.inserting_before(node):
+                tiled_input = graph.call_function(
+                    torch.ops.aten.slice.Tensor, (input_node, -1, c, c_end),
+                )
+                propagate_shape(tiled_input)
+
+                if input_scale_node is not None:
+                    tiled_input_scale = graph.call_function(
+                        torch.ops.aten.slice.Tensor,
+                        (input_scale_node, -1, c_scale, c_end_scale),
+                    )
+                    propagate_shape(tiled_input_scale)
+                else:
+                    tiled_input_scale = None
+
+                if weight_node.op == "get_attr":
+                    param_name = weight_node.target
+                    weight = get_parameter_or_buffer(model, param_name)
+                    sliced_weight = weight.data[:, c:c_end]
+
+                    tiled_weight = create_getattr_from_value(
+                        model, graph, param_name + "_", sliced_weight
+                    )
+                    tiled_weight.value = sliced_weight
+                    tiled_weight.shape = sliced_weight.shape
+
+                    if weight_scale_node is not None:
+                        weight_scale = get_parameter_or_buffer(model, weight_scale_node.target)
+                        sliced_weight_scale = weight_scale.data[:, c_scale:c_end_scale]
+
+                        tiled_weight_scale = create_getattr_from_value(
+                            model, graph, weight_scale_node.target + "_", sliced_weight_scale
+                        )
+                        tiled_weight_scale.value = sliced_weight_scale
+                        tiled_weight_scale.shape = sliced_weight_scale.shape
+                    else:
+                        tiled_weight_scale = None
+
+                else:
+                    tiled_weight = graph.call_function(
+                        torch.ops.aten.slice.Tensor, (weight_node, reduction_dim, c, c_end),
+                    )
+                    propagate_shape(tiled_weight)
+
+                    if weight_scale_node is not None:
+                        tiled_weight_scale = graph.call_function(
+                            torch.ops.aten.slice.Tensor,
+                            (weight_scale_node, reduction_dim, c_scale, c_end_scale),
+                        )
+                        propagate_shape(tiled_weight_scale)
+                    else:
+                        tiled_weight_scale = None
+
+                if input_scale_node is not None or weight_scale_node is not None:
+                    tiled_gemm = graph.call_function(
+                        node.target,
+                        (tiled_input, tiled_weight) + node.args[2:],
+                        {
+                            **node.kwargs,
+                            "input_scale": tiled_input_scale,
+                            "weight_scale": tiled_weight_scale,
+                        },
+                    )
+                else:
+                    tiled_gemm = graph.call_function(
+                        node.target, (tiled_input, tiled_weight) + node.args[2:],
+                    )
+                propagate_shape(tiled_gemm)
+
+            tiled_outputs.append(tiled_gemm)
+
+        with graph.inserting_before(node):
+            stack_node = graph.call_function(
+                torch.ops.aten.stack.default, (tiled_outputs, 0)
+            )
+            sum_node = graph.call_function(
+                torch.ops.aten.sum.dim_IntList, (stack_node, 0),
+            )
+
+        node.replace_all_uses_with(sum_node)
+        graph.erase_node(node)
+
+        for n in tiled_outputs:
+            n.meta["tiling"] = {
+                "loops": [num_x_tiles, X_tile, num_k_tiles, K_tile],
+                "indices": [0, 2, 4],
+                "order": "XK",
+            }
+
+    graph.lint()
+    graph.eliminate_dead_code()
     model.recompile()
     return model

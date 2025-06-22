@@ -205,6 +205,10 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
         if key not in ["code", "scale_code"] and value is not None:
             op_overload.kwargs[key].CopyFrom(convert_arg(value))
 
+    if "tiling" in node.meta:
+        for k, v in node.meta["tiling"].items():
+            op_overload.kwargs[k].CopyFrom(convert_arg(v))
+
     return op_overload
 
 

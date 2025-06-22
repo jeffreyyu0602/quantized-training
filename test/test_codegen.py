@@ -169,10 +169,21 @@ if __name__ == "__main__":
         help="Block size for quantization."
     )
     parser.add_argument(
-        "--bank_size",
+        "--cache_size",
         type=int,
-        default=None,
-        help="Total memory size in bytes in each bank of memory."
+        default=1024 * 1024,
+        help="Total L2 SRAM size in SoC."
+    )
+    parser.add_argument(
+        "--num_banks",
+        type=int,
+        default=4,
+        help="Number of banks in the accelerator."
+    )
+    parser.add_argument(
+        "--perform_tiling",
+        action="store_true",
+        help="Whether to perform tiling for GEMM and Conv2D operations."
     )
     parser.add_argument(
         "--weight_persistent",
@@ -231,11 +242,17 @@ if __name__ == "__main__":
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
         "conv2d_padding": args.padding,
+        "cache_size": args.cache_size,
+        "num_banks": args.num_banks,
+        "block_size": args.block_size,
+        "perform_tiling": args.perform_tiling,
     }
+
+    bank_size = None if args.cache_size is None else args.cache_size // args.num_banks
 
     compile_args = {
         "bank_width": args.bank_width,
-        "bank_size": args.bank_size,
+        "bank_size": bank_size,
         "weight_persistent": args.weight_persistent,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
