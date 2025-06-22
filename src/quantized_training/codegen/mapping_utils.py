@@ -58,8 +58,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if reshape_node is not None and not is_reshape_fused_with_last_op:
         field.reshape.CopyFrom(map_node(reshape_node))
         field.reshape.kwargs["output_shape"].int_list.values.extend(node.shape)
-        if not is_output:
-            node = reshape_node.args[0]
+        node = reshape_node.args[0] if not is_output else reshape_node
     elif (getitem_node := node.meta.get("slicing")) is not None:
         field.reshape.CopyFrom(map_node(getitem_node))
         field.reshape.kwargs["output_shape"].int_list.values.extend(node.shape)
@@ -73,7 +72,11 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         node = source_node
 
     field.node = node.name
-    field.shape.extend(list(node.shape) or [1])
+
+    if (shape := node.meta.get("tiled_shape")) is not None:
+        field.shape.extend(list(shape))
+    else:
+        field.shape.extend(list(node.shape) or [1])
 
     if (dtype := node.meta.get("dtype", None)) is not None:
         field.dtype = dtype
@@ -202,12 +205,20 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
 
     # Convert keyword arguments
     for key, value in kwargs.items():
-        if key not in ["code", "scale_code"] and value is not None:
-            op_overload.kwargs[key].CopyFrom(convert_arg(value))
+        if key in ["code", "scale_code"] or value is None:
+            continue
+
+        tiled_shape = None
+        if isinstance(value, torch.fx.Node) and not "tiling" in node.meta:
+            tiled_shape = value.meta.pop("tiled_shape", None)
+
+        op_overload.kwargs[key].CopyFrom(convert_arg(value))
+
+        if isinstance(value, torch.fx.Node) and tiled_shape is not None:
+            value.meta["tiled_shape"] = tiled_shape
 
     if "tiling" in node.meta:
-        for k, v in node.meta["tiling"].items():
-            op_overload.kwargs[k].CopyFrom(convert_arg(v))
+        op_overload.kwargs["loops"].int_list.values.extend(node.meta["tiling"])
 
     return op_overload
 

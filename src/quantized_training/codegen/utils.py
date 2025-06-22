@@ -1215,6 +1215,7 @@ def run_tiling(
         weight_node = node.args[1]
         input_scale_node = node.kwargs.get("input_scale")
         weight_scale_node = node.kwargs.get("weight_scale")
+        block_size = node.kwargs.get("block_size", 1)
 
         input_value, weight_value = input_node.value, weight_node.value
 
@@ -1272,19 +1273,20 @@ def run_tiling(
         logger.info(f"{node}: X={X}, C={C}, K={K} -> X_tile={X_tile}, C_tile={C_tile}, K_tile={K_tile}")
 
         if num_c_tiles == 1:
-            node.meta["tiling"] = {
-                "loops": [num_x_tiles, X_tile, num_k_tiles, K_tile],
-                "indices": [0, 2, 4],
-                "order": "XK",
-            }
+            input_node.meta["tiled_shape"] = (X_tile, C)
+            weight_node.meta["tiled_shape"] = (K_tile, C)
+            if input_scale_node is not None:
+                input_scale_node.meta["tiled_shape"] = (X_tile, C // block_size)
+            if weight_scale_node is not None:
+                weight_scale_node.meta["tiled_shape"] = (K_tile, C // block_size)
+            node.meta["tiling"] = (num_x_tiles, num_k_tiles)
             continue
 
         tiled_outputs = []
         for c in range(0, C, C_tile):
             c_end = min(c + C_tile, C)
-            block_size = node.kwargs.get("block_size", 1)
-            c_scale = int(c / block_size)
-            c_end_scale = int(c_end / block_size)
+            scale_c = int(c / block_size)
+            scale_c_end = int(c_end / block_size)
 
             with graph.inserting_before(node):
                 tiled_input = graph.call_function(
@@ -1295,7 +1297,7 @@ def run_tiling(
                 if input_scale_node is not None:
                     tiled_input_scale = graph.call_function(
                         torch.ops.aten.slice.Tensor,
-                        (input_scale_node, -1, c_scale, c_end_scale),
+                        (input_scale_node, -1, scale_c, scale_c_end),
                     )
                     propagate_shape(tiled_input_scale)
                 else:
@@ -1314,7 +1316,7 @@ def run_tiling(
 
                     if weight_scale_node is not None:
                         weight_scale = get_parameter_or_buffer(model, weight_scale_node.target)
-                        sliced_weight_scale = weight_scale.data[:, c_scale:c_end_scale]
+                        sliced_weight_scale = weight_scale.data[:, scale_c:scale_c_end]
 
                         tiled_weight_scale = create_getattr_from_value(
                             model, graph, weight_scale_node.target + "_", sliced_weight_scale
@@ -1333,7 +1335,7 @@ def run_tiling(
                     if weight_scale_node is not None:
                         tiled_weight_scale = graph.call_function(
                             torch.ops.aten.slice.Tensor,
-                            (weight_scale_node, reduction_dim, c_scale, c_end_scale),
+                            (weight_scale_node, reduction_dim, scale_c, scale_c_end),
                         )
                         propagate_shape(tiled_weight_scale)
                     else:
@@ -1355,6 +1357,14 @@ def run_tiling(
                     )
                 propagate_shape(tiled_gemm)
 
+            tiled_input.meta["tiled_shape"] = (X_tile, C_tile)
+            tiled_weight.meta["tiled_shape"] = (K_tile, C_tile)
+            if tiled_input_scale is not None:
+                tiled_input_scale.meta["tiled_shape"] = (X_tile, C_tile // block_size)
+            if tiled_weight_scale is not None:
+                tiled_weight_scale.meta["tiled_shape"] = (K_tile, C_tile // block_size)
+            tiled_gemm.meta["tiling"] = (num_x_tiles, num_k_tiles)
+
             tiled_outputs.append(tiled_gemm)
 
         with graph.inserting_before(node):
@@ -1367,13 +1377,6 @@ def run_tiling(
 
         node.replace_all_uses_with(sum_node)
         graph.erase_node(node)
-
-        for n in tiled_outputs:
-            n.meta["tiling"] = {
-                "loops": [num_x_tiles, X_tile, num_k_tiles, K_tile],
-                "indices": [0, 2, 4],
-                "order": "XK",
-            }
 
     graph.lint()
     graph.eliminate_dead_code()
