@@ -264,7 +264,162 @@ if __name__ == "__main__":
             quantizer.set_module_name("^conv1$", qconfig)
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-        gm = prepare_pt2e(model, quantizer, example_args)
+
+        gm = export_model(model, example_args)
+        from collections import OrderedDict
+
+        def run_and_record_nodes(gm, *example_args):
+            from collections import OrderedDict
+            env = {}
+            node_outputs = OrderedDict()
+
+            args_iter = iter(example_args)
+
+            for node in gm.graph.nodes:
+                if node.op == "placeholder":
+                    env[node.name] = next(args_iter)
+
+                elif node.op == "get_attr":
+                    # Resolve parameter or buffer from gm
+                    attr_itr = node.target.split('.')
+                    attr_val = gm
+                    for attr in attr_itr:
+                        attr_val = getattr(attr_val, attr)
+                    env[node.name] = attr_val
+
+                elif node.op == "call_function":
+                    args = [env[arg.name] if hasattr(arg, "name") else arg for arg in node.args]
+                    kwargs = {k: env[v.name] if hasattr(v, "name") else v for k, v in node.kwargs.items()}
+                    out = node.target(*args, **kwargs)
+                    env[node.name] = out
+                    node_outputs[node.name] = out
+
+                elif node.op == "call_method":
+                    self_obj = env[node.args[0].name]
+                    method_args = [env[a.name] if hasattr(a, "name") else a for a in node.args[1:]]
+                    out = getattr(self_obj, node.target)(*method_args)
+                    env[node.name] = out
+                    node_outputs[node.name] = out
+
+                elif node.op == "call_module":
+                    submod = dict(gm.named_modules())[node.target]
+                    mod_args = [env[a.name] if hasattr(a, "name") else a for a in node.args]
+                    mod_kwargs = {k: env[v.name] if hasattr(v, "name") else v for k, v in node.kwargs.items()}
+                    out = submod(*mod_args, **mod_kwargs)
+                    env[node.name] = out
+                    node_outputs[node.name] = out
+
+                elif node.op == "output":
+                    def unwrap(v):
+                        if hasattr(v, "name"):
+                            return env[v.name]
+                        elif isinstance(v, (list, tuple)):
+                            return type(v)(unwrap(x) for x in v)
+                        else:
+                            return v
+
+                    output_val = unwrap(node.args[0])
+                    node_outputs["output"] = output_val
+
+            return node_outputs
+        old_output_1 = gm(*example_args)
+        node_out1 = run_and_record_nodes(gm, *example_args)
+
+        def match_and_rewrite(source_fn, args, kwargs):
+            print(f"match_and_rewrite called with source_fn: {source_fn}")
+            if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
+                print("Not matching Conv2d, returning None")
+                return None
+            
+            weight = args[1]
+            if weight.shape[1] != 3 or weight.shape[2] != 3 or weight.shape[3] != 3:
+                print("Not matching non 3x3x3 weight, returning None")
+                return None
+
+            print(weight.shape)
+
+            import torch.nn as nn
+            import torch.nn.functional as F
+
+            class Padded_3C(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.stride = 2
+
+                # NOTE: replacement module has to be a stateless module, meanining that
+                # it cannot have any parameters or buffers. All parameters and buffers
+                # should be passed as arguments to the forward method.
+                def forward(self, x, weight, bias=None):
+                    print("Padded_3C.forward called")
+                    B, C, H, W = x.shape
+                    # x_padded = F.pad(x, (0, 4, 0, 4))
+                    weight_padded = F.pad(weight, (2, 2, 2, 2))
+                    result = F.conv2d(x, weight_padded, bias=bias, stride=self.stride, groups=1, padding=3)
+                    return result
+                
+            return Padded_3C
+
+        # NOTE: rewrite_fx_graph needs to be called before prepare_pt2e. This
+        # is temporary, and we will fix it in the future.
+        from quantized_training import rewrite_fx_graph
+        rewrite_fx_graph(gm, match_and_rewrite)
+
+        old_output_2 = gm(*example_args)
+        node_out2 = run_and_record_nodes(gm, *example_args)
+        def generate_diff_report(node_out1, node_out2, atol=1e-4):
+            report = []
+            debug_layer = False
+            for k in node_out1:
+                if k == 'conv2d':
+                    k2 = 'conv2d_52'
+                else:
+                    k2 = k
+                if k2 not in node_out2:
+                    report.append(f"Node '{k2}' missing in second model.")
+                    continue
+
+                v1, v2 = node_out1[k], node_out2[k2]
+
+                if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
+                    if not torch.allclose(v1, v2, atol=atol):
+                        diff = (v1 - v2).abs().max().item()
+                        if (k2 == 'hardtanh_' or k2 == 'conv2d_1' or k2 == 'hardtanh__1' or k2 == 'conv2d_2' or k2 == 'conv2d_3' or k2 == 'hardtanh__2')\
+                            and debug_layer:
+                            for x1 in range(v1.shape[0]):
+                                for x2 in range(v1.shape[1]):
+                                    for x3 in range(v1.shape[2]):
+                                        for x4 in range(v1.shape[3]):
+                                            if v1[x1, x2, x3, x4] != v2[x1, x2, x3, x4]:
+                                                report.append(f"Mismatch at node '{k}': max abs diff = {diff:.6f}, "
+                                                            f"shape = {v1.shape}, index = ({x1}, {x2}, {x3}, {x4})")
+                                            # else:
+                                            #     report.append(f"Match at node '{k}': value = {v1[x1, x2, x3, x4]}, index = ({x1}, {x2}, {x3}, {x4})")
+
+                        report.append(f"Mismatch at node '{k}': max abs diff = {diff:.6f}, shape = {v1.shape}")
+                elif isinstance(v1, (list, tuple)) and isinstance(v2, (list, tuple)):
+                    if len(v1) != len(v2):
+                        report.append(f"Mismatch at node '{k}': list/tuple length differs ({len(v1)} vs {len(v2)})")
+                        continue
+                    for i, (item1, item2) in enumerate(zip(v1, v2)):
+                        if not torch.allclose(item1, item2, atol=atol):
+                            diff = (item1 - item2).abs().max().item()
+                            report.append(f"Mismatch at node '{k}[{i}]': max abs diff = {diff:.6f}, shape = {item1.shape}")
+                else:
+                    report.append(f"Node '{k}': unsupported types ({type(v1)} vs {type(v2)})")
+
+            if not report:
+                report.append("All nodes match!")
+
+            return "\n".join(report)
+
+        diff_report = generate_diff_report(node_out1, node_out2)
+        print(diff_report)
+
+        # assert torch.all(old_output_1 == old_output_2), "Outputs before transformation do not match!"
+
+        gm = prepare_pt2e(gm, quantizer, example_args)
+
+        # gm = prepare_pt2e(model, quantizer, example_args)
 
         dataset = load_dataset("zh-plus/tiny-imagenet")
 
@@ -801,233 +956,233 @@ if __name__ == "__main__":
 
         compile(gm, example_args, example_kwargs, **compile_args)
 
-    elif args.model == "depthwise_kernel_size_test":
-        class DepthwiseKernelTest(torch.nn.Module):
-            def __init__(self, in_channels=16, out_channels=16, kernel_size=3, stride=5, bias=True):
-                super().__init__()
-                self.depthwise = torch.nn.Conv2d(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    # padding=kernel_size // 2,
-                    padding=(50,10),
-                    groups=in_channels,
-                    bias=bias
-                )
-
-            def forward(self, x):
-                return self.depthwise(x)
-
-        # Use float32 in model
-        # model = DepthwiseKernelTest().eval()
-
-        # Use float input for forward()
-        input_tensor_bf16 = torch.randn(1, 16, 102, 202, dtype=torch.bfloat16)
-        example_args = (input_tensor_bf16,)
-
-        model = DepthwiseKernelTest().eval()
-        with torch.no_grad():
-            binary_weights = torch.randint(0, 2, model.depthwise.weight.shape, dtype=torch.float32)
-            model.depthwise.weight.copy_(binary_weights)
-        model.bfloat16()
-        # don't quantize the model
-        #quantizer.set_module_name("depthwise", None)
-
-        # don't dequantize the model
-        # quantizer = get_default_quantizer(
-        #     input_activation="int8",
-        #     output_activation="bfloat16",   # <- disables dequant insertion
-        #     weight="int8",
-        #     bias="int24",
-        #     force_scale_power_of_two=False,
-        # )
-        gm = prepare_pt2e(model, quantizer, example_args)
-        convert_pt2e(gm, args.bias)
-
-        old_output = gm(*example_args)
-
-        transform(gm, example_args, patterns=vector_stages)
-
-        gm.graph.print_tabular()
-        new_output = gm(*example_args)
-
-        compile(gm, example_args, **compile_args)
-
-    # # TO DO: need to add bias
-    # # maybe also need to debug the scale/add type so that we can fuse add in submodule
     # elif args.model == "depthwise_kernel_size_test":
     #     class DepthwiseKernelTest(torch.nn.Module):
-    #         def __init__(self, in_channels=2, out_channels=2, kernel_size=5, stride=2, bias=True):
+    #         def __init__(self, in_channels=16, out_channels=16, kernel_size=3, stride=5, bias=True):
     #             super().__init__()
     #             self.depthwise = torch.nn.Conv2d(
     #                 in_channels=in_channels,
     #                 out_channels=out_channels,
     #                 kernel_size=kernel_size,
     #                 stride=stride,
-    #                 padding=kernel_size // 2,
+    #                 # padding=kernel_size // 2,
+    #                 padding=(50,10),
     #                 groups=in_channels,
     #                 bias=bias
     #             )
-    #             self.relu = torch.nn.ReLU()
 
     #         def forward(self, x):
-    #             x = self.depthwise(x)
-    #             x = self.relu(x)
-    #             return x
-            
+    #             return self.depthwise(x)
 
-    #     in_channels = 2
-    #     input_tensor = torch.tensor([[[[  0,  1,  2,  3,  4,  5,  6],
-    #                                     [  7,  8,  9, 10, 11, 12, 13],
-    #                                     [ 14, 15, 16, 17, 18, 19, 20],
-    #                                     [ 21, 22, 23, 24, 25, 26, 27],
-    #                                     [ 28, 29, 30, 31, 32, 33, 34],
-    #                                     [ 35, 36, 37, 38, 39, 40, 41],
-    #                                     [ 42, 43, 44, 45, 46, 47, 48]],
+    #     # Use float32 in model
+    #     # model = DepthwiseKernelTest().eval()
 
-    #                                    [[100,101,102,103,104,105,106],
-    #                                     [107,108,109,110,111,112,113],
-    #                                     [114,115,116,117,118,119,120],
-    #                                     [121,122,123,124,125,126,127],
-    #                                     [128,129,130,131,132,133,134],
-    #                                     [135,136,137,138,139,140,141],
-    #                                     [142,143,144,145,146,147,148]]
-                                        
-    #                                     ]], dtype=torch.float32)
-        
-    #     example_args = (input_tensor,)
-    #     #print("Input tensor shape:", input_tensor.shape)
-    #     # Manually set weights to make results interpretable
-    #     model = DepthwiseKernelTest(in_channels=in_channels, out_channels=in_channels, 
-    #                                  kernel_size=5, stride=2, bias=False)
+    #     # Use float input for forward()
+    #     input_tensor_bf16 = torch.randn(1, 16, 102, 202, dtype=torch.bfloat16)
+    #     example_args = (input_tensor_bf16,)
+
+    #     model = DepthwiseKernelTest().eval()
     #     with torch.no_grad():
-    #         # model.depthwise.weight[0, 0].fill_(1.0)  # Channel 0 → all 1s
-    #         model.depthwise.weight[0, 0] = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0],
-    #                                                     [6.0, 7.0, 8.0, 9.0, 10.0],
-    #                                                     [11.0, 12.0, 13.0, 14.0, 15.0],
-    #                                                     [16.0, 17.0, 18.0, 19.0, 20.0],
-    #                                                     [21.0, 22.0, 23.0, 24.0, 25.0]])
-    #         model.depthwise.weight[1, 0].fill_(2.0)  # Channel 1 → all 2s
-           
-    #     def match_and_rewrite(source_fn, args, kwargs):
-    #         print(f"match_and_rewrite called with source_fn: {source_fn}")
-    #         if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
-    #             print("Not matching Conv2d, returning None")
-    #             return None
-            
-    #         weight = args[1]
-    #         if weight.shape[2] != 5 or weight.shape[3] != 5:
-    #             print("Not matching weight, returning None")
-    #             return None
+    #         binary_weights = torch.randint(0, 2, model.depthwise.weight.shape, dtype=torch.float32)
+    #         model.depthwise.weight.copy_(binary_weights)
+    #     model.bfloat16()
+    #     # don't quantize the model
+    #     #quantizer.set_module_name("depthwise", None)
 
-    #         import torch.nn as nn
-    #         import torch.nn.functional as F
-
-    #         class ApproxDepthwiseConv5x5(nn.Module):
-    #             def __init__(self):
-    #                 super().__init__()
-    #                 self.in_channels = in_channels
-    #                 self.stride = 2
-
-    #             # NOTE: replacement module has to be a stateless module, meanining that
-    #             # it cannot have any parameters or buffers. All parameters and buffers
-    #             # should be passed as arguments to the forward method.
-    #             def forward(self, x, weight, bias=None):
-    #                 print("ApproxDepthwiseConv5x5.forward called")
-    #                 B, C, H, W = x.shape
-    #                 x_padded = F.pad(x, (2, 2, 2, 2))
-    #                 kernels_3x3 = self._decompose_kernels(weight)
-    #                 shifts = [(0, 0), (0, 2), (2, 0), (2, 2)]
-                    
-    #                 # Process each quadrant
-    #                 quadrant_outputs = []
-    #                 for i, (dy, dx) in enumerate(shifts):
-    #                     cropped_input = self._crop_input_for_kernel(x_padded, H, W, dy, dx)
-    #                     kernel_3x3 = kernels_3x3[i]  # Shape: [C, 1, 3, 3]
-    #                     output = F.conv2d(cropped_input, kernel_3x3, groups=C, stride=self.stride)
-    #                     quadrant_outputs.append(output)
-                    
-    #                 # Sum all quadrant outputs
-    #                 result = sum(quadrant_outputs)
-                    
-    #                 # Add bias if present
-    #                 if bias is not None:
-    #                     result = result + bias.view(1, -1, 1, 1)
-
-    #                 return result
-
-    #             def _crop_input_for_kernel(self, x_padded, H, W, dy, dx):
-    #                 """
-    #                 Slice padded input and crop unused spatial regions based on dy, dx shift,
-    #                 based on 5x5 to 3x3 kernel quadrant decomposition.
-    #                 """
-    #                 print("crop input function called")
-    #                 print(f"Cropping input for shift (dy={dy}, dx={dx})")
-    #                 # Slice base region
-    #                 x_crop = x_padded
-
-    #                 if dy == 0 and dx == 0:
-    #                     # Top-left kernel (Kernel 1): remove last 2 rows and rightmost 2 columns
-    #                     cropped = x_crop[:, :, :-2, :-2]
-    #                 elif dy == 0 and dx == 2:
-    #                     # Top-right kernel (Kernel 2): remove left 3 columns, remove last 2 rows, pad 1 column at right
-    #                     cropped = x_crop[:, :, :-2, 3:]
-    #                     cropped = F.pad(cropped, (0, 1, 0, 0))  # (left, right, top, bottom)
-    #                 elif dy == 2 and dx == 0:
-    #                     # Bottom-left kernel (Kernel 3): remove top 3 rows and right 2 columns
-    #                     cropped = x_crop[:, :, 3:, :-2]
-    #                     # Pad 1 row at the bottom
-    #                     cropped = F.pad(cropped, (0, 0, 0, 1))  # (left, right, top, bottom)
-    #                 elif dy == 2 and dx == 2:
-    #                     # Bottom-right kernel (Kernel 4): remove top 3 rows and left 3 columns, pad right and bottom
-    #                     cropped = x_crop[:, :, 3:, 3:] 
-    #                     cropped = F.pad(cropped, (0, 1, 0, 1))  # (left, right, top, bottom)
-    #                 else:
-    #                     raise ValueError(f"Unsupported (dy, dx) shift: ({dy}, {dx})")
-    #                 print("check")
-    #                 print(f"Cropped input for shift (dy={dy}, dx={dx}):\n", cropped)
-    #                 return cropped
-
-    #             # NOTE: Inplace operation currently is not support in PT2E quantization.
-    #             # Avoid doing `k2[..., 0:3, 0:2] = k5[..., 0:3, 3:5]`. Below is an implementation
-    #             # that does not use inplace operation (and I think is simpler ^_^).
-    #             def _decompose_kernels(self, kernel):
-    #                 padded_kernel = F.pad(kernel, (0, 1, 0, 1))  # Pad to make it 6x6
-    #                 k1 = padded_kernel[..., 0:3, 0:3]  # Top-left quadrant
-    #                 k2 = padded_kernel[..., 0:3, 3:5]  # Top-right quadrant
-    #                 k3 = padded_kernel[..., 3:5, 0:3]  # Bottom-left quadrant
-    #                 k4 = padded_kernel[..., 3:5, 3:5]  # Bottom-right quadrant
-    #                 return [k1, k2, k3, k4]
-                
-    #         return ApproxDepthwiseConv5x5
-
-    #     gm = export_model(model, example_args)
+    #     # don't dequantize the model
+    #     # quantizer = get_default_quantizer(
+    #     #     input_activation="int8",
+    #     #     output_activation="bfloat16",   # <- disables dequant insertion
+    #     #     weight="int8",
+    #     #     bias="int24",
+    #     #     force_scale_power_of_two=False,
+    #     # )
+    #     gm = prepare_pt2e(model, quantizer, example_args)
+    #     convert_pt2e(gm, args.bias)
 
     #     old_output = gm(*example_args)
 
-    #     # NOTE: rewrite_fx_graph needs to be called before prepare_pt2e. This
-    #     # is temporary, and we will fix it in the future.
-    #     from quantized_training import rewrite_fx_graph
-    #     rewrite_fx_graph(gm, match_and_rewrite)
-
-    #     gm = prepare_pt2e(gm, quantizer)
-
-    #     # NOTE: INT8 has to do calibration otherwise all the outputs will be zero.
-    #     for i in range(3):
-    #         with torch.no_grad():
-    #             gm(*example_args)
-
-    #     convert_pt2e(gm, args.bias)
-
-    #     transform(gm, example_args, **transform_args)
+    #     transform(gm, example_args, patterns=vector_stages)
 
     #     gm.graph.print_tabular()
     #     new_output = gm(*example_args)
 
-    #     # NOTE: The outputs are expected to be different because of the quantization
-    #     # and the approximation of the depthwise kernel.
     #     compile(gm, example_args, **compile_args)
+
+    # TO DO: need to add bias
+    # maybe also need to debug the scale/add type so that we can fuse add in submodule
+    elif args.model == "depthwise_kernel_size_test":
+        class DepthwiseKernelTest(torch.nn.Module):
+            def __init__(self, in_channels=2, out_channels=2, kernel_size=5, stride=2, bias=True):
+                super().__init__()
+                self.depthwise = torch.nn.Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=kernel_size // 2,
+                    groups=in_channels,
+                    bias=bias
+                )
+                self.relu = torch.nn.ReLU()
+
+            def forward(self, x):
+                x = self.depthwise(x)
+                x = self.relu(x)
+                return x
+            
+
+        in_channels = 2
+        input_tensor = torch.tensor([[[[  0,  1,  2,  3,  4,  5,  6],
+                                        [  7,  8,  9, 10, 11, 12, 13],
+                                        [ 14, 15, 16, 17, 18, 19, 20],
+                                        [ 21, 22, 23, 24, 25, 26, 27],
+                                        [ 28, 29, 30, 31, 32, 33, 34],
+                                        [ 35, 36, 37, 38, 39, 40, 41],
+                                        [ 42, 43, 44, 45, 46, 47, 48]],
+
+                                       [[100,101,102,103,104,105,106],
+                                        [107,108,109,110,111,112,113],
+                                        [114,115,116,117,118,119,120],
+                                        [121,122,123,124,125,126,127],
+                                        [128,129,130,131,132,133,134],
+                                        [135,136,137,138,139,140,141],
+                                        [142,143,144,145,146,147,148]]
+                                        
+                                        ]], dtype=torch.float32)
+        
+        example_args = (input_tensor,)
+        #print("Input tensor shape:", input_tensor.shape)
+        # Manually set weights to make results interpretable
+        model = DepthwiseKernelTest(in_channels=in_channels, out_channels=in_channels, 
+                                     kernel_size=5, stride=2, bias=False)
+        with torch.no_grad():
+            # model.depthwise.weight[0, 0].fill_(1.0)  # Channel 0 → all 1s
+            model.depthwise.weight[0, 0] = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0],
+                                                        [6.0, 7.0, 8.0, 9.0, 10.0],
+                                                        [11.0, 12.0, 13.0, 14.0, 15.0],
+                                                        [16.0, 17.0, 18.0, 19.0, 20.0],
+                                                        [21.0, 22.0, 23.0, 24.0, 25.0]])
+            model.depthwise.weight[1, 0].fill_(2.0)  # Channel 1 → all 2s
+           
+        def match_and_rewrite(source_fn, args, kwargs):
+            print(f"match_and_rewrite called with source_fn: {source_fn}")
+            if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
+                print("Not matching Conv2d, returning None")
+                return None
+            
+            weight = args[1]
+            if weight.shape[2] != 5 or weight.shape[3] != 5:
+                print("Not matching weight, returning None")
+                return None
+
+            import torch.nn as nn
+            import torch.nn.functional as F
+
+            class ApproxDepthwiseConv5x5(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.in_channels = in_channels
+                    self.stride = 2
+
+                # NOTE: replacement module has to be a stateless module, meanining that
+                # it cannot have any parameters or buffers. All parameters and buffers
+                # should be passed as arguments to the forward method.
+                def forward(self, x, weight, bias=None):
+                    print("ApproxDepthwiseConv5x5.forward called")
+                    B, C, H, W = x.shape
+                    x_padded = F.pad(x, (2, 2, 2, 2))
+                    kernels_3x3 = self._decompose_kernels(weight)
+                    shifts = [(0, 0), (0, 2), (2, 0), (2, 2)]
+                    
+                    # Process each quadrant
+                    quadrant_outputs = []
+                    for i, (dy, dx) in enumerate(shifts):
+                        cropped_input = self._crop_input_for_kernel(x_padded, H, W, dy, dx)
+                        kernel_3x3 = kernels_3x3[i]  # Shape: [C, 1, 3, 3]
+                        output = F.conv2d(cropped_input, kernel_3x3, groups=C, stride=self.stride)
+                        quadrant_outputs.append(output)
+                    
+                    # Sum all quadrant outputs
+                    result = sum(quadrant_outputs)
+                    
+                    # Add bias if present
+                    if bias is not None:
+                        result = result + bias.view(1, -1, 1, 1)
+
+                    return result
+
+                def _crop_input_for_kernel(self, x_padded, H, W, dy, dx):
+                    """
+                    Slice padded input and crop unused spatial regions based on dy, dx shift,
+                    based on 5x5 to 3x3 kernel quadrant decomposition.
+                    """
+                    print("crop input function called")
+                    print(f"Cropping input for shift (dy={dy}, dx={dx})")
+                    # Slice base region
+                    x_crop = x_padded
+
+                    if dy == 0 and dx == 0:
+                        # Top-left kernel (Kernel 1): remove last 2 rows and rightmost 2 columns
+                        cropped = x_crop[:, :, :-2, :-2]
+                    elif dy == 0 and dx == 2:
+                        # Top-right kernel (Kernel 2): remove left 3 columns, remove last 2 rows, pad 1 column at right
+                        cropped = x_crop[:, :, :-2, 3:]
+                        cropped = F.pad(cropped, (0, 1, 0, 0))  # (left, right, top, bottom)
+                    elif dy == 2 and dx == 0:
+                        # Bottom-left kernel (Kernel 3): remove top 3 rows and right 2 columns
+                        cropped = x_crop[:, :, 3:, :-2]
+                        # Pad 1 row at the bottom
+                        cropped = F.pad(cropped, (0, 0, 0, 1))  # (left, right, top, bottom)
+                    elif dy == 2 and dx == 2:
+                        # Bottom-right kernel (Kernel 4): remove top 3 rows and left 3 columns, pad right and bottom
+                        cropped = x_crop[:, :, 3:, 3:] 
+                        cropped = F.pad(cropped, (0, 1, 0, 1))  # (left, right, top, bottom)
+                    else:
+                        raise ValueError(f"Unsupported (dy, dx) shift: ({dy}, {dx})")
+                    print("check")
+                    print(f"Cropped input for shift (dy={dy}, dx={dx}):\n", cropped)
+                    return cropped
+
+                # NOTE: Inplace operation currently is not support in PT2E quantization.
+                # Avoid doing `k2[..., 0:3, 0:2] = k5[..., 0:3, 3:5]`. Below is an implementation
+                # that does not use inplace operation (and I think is simpler ^_^).
+                def _decompose_kernels(self, kernel):
+                    padded_kernel = F.pad(kernel, (0, 1, 0, 1))  # Pad to make it 6x6
+                    k1 = padded_kernel[..., 0:3, 0:3]  # Top-left quadrant
+                    k2 = padded_kernel[..., 0:3, 3:5]  # Top-right quadrant
+                    k3 = padded_kernel[..., 3:5, 0:3]  # Bottom-left quadrant
+                    k4 = padded_kernel[..., 3:5, 3:5]  # Bottom-right quadrant
+                    return [k1, k2, k3, k4]
+                
+            return ApproxDepthwiseConv5x5
+
+        gm = export_model(model, example_args)
+
+        old_output = gm(*example_args)
+
+        # NOTE: rewrite_fx_graph needs to be called before prepare_pt2e. This
+        # is temporary, and we will fix it in the future.
+        from quantized_training import rewrite_fx_graph
+        rewrite_fx_graph(gm, match_and_rewrite)
+
+        gm = prepare_pt2e(gm, quantizer)
+
+        # NOTE: INT8 has to do calibration otherwise all the outputs will be zero.
+        for i in range(3):
+            with torch.no_grad():
+                gm(*example_args)
+
+        convert_pt2e(gm, args.bias)
+
+        transform(gm, example_args, **transform_args)
+
+        gm.graph.print_tabular()
+        new_output = gm(*example_args)
+
+        # NOTE: The outputs are expected to be different because of the quantization
+        # and the approximation of the depthwise kernel.
+        compile(gm, example_args, **compile_args)
     else:
         raise ValueError(f"Model {args.model} not supported")
 
