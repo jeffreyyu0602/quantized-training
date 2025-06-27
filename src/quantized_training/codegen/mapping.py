@@ -64,7 +64,8 @@ def propagate_shape(node: Node):
     args = map_arg(node.args, fn)
     kwargs = map_arg(node.kwargs, fn)
     node.value = node.target(*args, **kwargs)
-    node.shape = node.value.shape
+    if isinstance(node.value, torch.Tensor):
+        node.shape = node.value.shape
 
 
 def get_parameter_or_buffer(model: torch.nn.Module, name: str):
@@ -320,14 +321,8 @@ def split_multi_head_attention(model: GraphModule):
         qk_matmuls = qk_output.args[0].args[0]
         av_matmuls = av_output.args[0].args[0]
 
-        nodes_between[0].replace_input_with(qk_output, qk_matmuls[0])
-        av_matmuls[0].replace_input_with(av_matmuls[0].args[0], nodes_between[-1])
-
-        if (scale_node := av_matmuls[0].kwargs.get('input_scale', None)) is not None:
-            av_matmuls[0].replace_input_with(scale_node, nodes_between[-2])
-
-        for qk_matmul, av_matmul in zip(qk_matmuls[1:], av_matmuls[1:]):
-            value_remap = {qk_matmuls[0]: qk_matmul}
+        for qk_matmul, av_matmul in zip(qk_matmuls, av_matmuls):
+            value_remap = {qk_output: qk_matmul}
             for node in nodes_between:
                 with graph.inserting_before(av_matmul):
                     value_remap[node] = graph.node_copy(node, lambda n: value_remap.get(n, n))
@@ -337,6 +332,8 @@ def split_multi_head_attention(model: GraphModule):
                     value_remap[node].meta['source_fn_stack'] = [
                         (value_remap[node].name, source_fn[1])
                     ]
+
+                propagate_shape(value_remap[node])
 
             av_matmul.replace_input_with(av_matmul.args[0], value_remap[nodes_between[-1]])
 
@@ -406,6 +403,7 @@ def get_new_node_name_with_prefix(prefix: str):
         while any(n.name == node_name for n in module.graph.nodes):
             i += 1
             node_name = get_node_name(i)
+            logger.debug(f"Node name {node_name} already exists, trying a new one...")
         return node_name
     return get_new_node_name
 
@@ -1048,15 +1046,12 @@ def run_memory_mapping(
             # TODO: if there is a select/slice operation, and the output has multiple
             # users, we need to make a copy to avoid overwriting the memory
             for n in reversed(nodes[:-1]):
-                # print(f"Assign memory to node: {n} using stack node {stack_node}")
                 n.meta["memory"] = segment
 
             # If the first node is a param node, we need to copy it to the new location
             if _is_nop(node):
                 input_node = node.all_input_nodes[0]
-                # print(input_node.meta["memory"], segment)
                 if input_node.meta["memory"].start != segment.start:
-                    # print(f"Copying input node {input_node} to node {node}")
                     with graph.inserting_before(node):
                         copy_node = graph.call_function(
                             torch.ops.aten.add.Scalar, (input_node, 0)
@@ -1065,6 +1060,7 @@ def run_memory_mapping(
                     node.replace_input_with(input_node, copy_node)
                     register_last_uses(copy_node, node)
 
+                    copy_node.meta["memory"] = segment
                     copy_node.value, copy_node.shape = input_node.value, input_node.shape
         elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             # print(f"Allocate stack node: {node}")

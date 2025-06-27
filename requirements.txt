@@ -14,3 +14,4 @@ jiwer
 tabulate
 protobuf
 graphviz
+timm

@@ -97,6 +97,8 @@ def fuse(model, patterns, example_args, example_kwargs=None):
 
         fuse_operator(model, vector_stages)
 
+    return model
+
 
 def transform(
     model: torch.fx.GraphModule,
@@ -107,6 +109,10 @@ def transform(
     transpose_fc=False,
     conv2d_padding=None,
     fuse_operator=True,
+    perform_tiling=False,
+    cache_size=None,
+    num_banks=None,
+    block_size=None,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -115,27 +121,38 @@ def transform(
 
     ShapeProp(model).propagate(*flatten_args)
 
-    if conv2d_padding is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
-
-    if transpose_weight:
-        insert_permute_adapters_for_conv2d(model)
-        transpose_linear_weights(model, transpose_fc=transpose_fc)
-        replace_target(model, aten.max_pool2d.default, quantized_ops.max_pool2d.default)
-        replace_target(model, aten.adaptive_avg_pool2d.default, quantized_ops.adaptive_avg_pool2d.default)
-        ShapeProp(model).propagate(*flatten_args)
-
-    eliminate_reshape_with_no_effect(model)
-
     # Turn batched matmul into multiple matmuls
     split_multi_head_attention(model)
 
-    # Convert torch.expand in Grouped Query Attention to memory copy
+    # Convert torch.expand to memory copy
     convert_expand_to_memory_copy(model)
 
     # Perform transformations to the model
     convert_cat_and_stack_as_stack_on_dim0(model)
     convert_cat_with_mismatched_shapes_to_stack(model)
+
+    if perform_tiling:
+        run_tiling(model, cache_size, num_banks, block_size)
+
+    if conv2d_padding is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+
+    if transpose_weight:
+        transpose_conv2d_weights(model)
+        transpose_linear_weights(model, transpose_fc=transpose_fc)
+
+        replace_target(
+            model, aten.max_pool2d.default, quantized_ops.max_pool2d.default
+        )
+        replace_target(
+            model,
+            aten.adaptive_avg_pool2d.default,
+            quantized_ops.adaptive_avg_pool2d.default
+        )
+
+        ShapeProp(model).propagate(*flatten_args)
+
+        eliminate_reshape_with_no_effect(model)
 
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
