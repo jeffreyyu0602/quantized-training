@@ -1,6 +1,7 @@
 import collections
 import itertools
 import logging
+import math
 import operator
 from itertools import repeat
 from typing import Callable, List, Set, Tuple, Union
@@ -691,7 +692,7 @@ def conv2d_transposed(
     dilation: Union[int, Tuple[int]] = 1,
     groups: int = 1,
 ) -> torch.Tensor:
-    return torch.ops.aten.conv2d.default(
+    output = torch.ops.aten.conv2d.default(
         input.permute(0, 3, 1, 2),
         weight.permute(3, 2, 0, 1),
         bias,
@@ -699,11 +700,8 @@ def conv2d_transposed(
         _pair(padding),
         _pair(dilation),
         groups,
-    ).permute(0, 2, 3, 1)
-
-
-def linear_transposed(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
-    return torch.ops.aten.linear.default(input, weight.T, bias)
+    )
+    return output.permute(0, 2, 3, 1)
 
 
 def is_conv2d(node: Node) -> bool:
@@ -773,13 +771,12 @@ def transpose_conv2d_weights(model: GraphModule):
 
         conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
 
-        # Insert pre-permute before each input point
-        pre_permute_nodes = {}
-        post_permute_nodes = {}
-        node_map = {}
-        for n in conv_chain:
-            for arg in n.all_input_nodes:
-                if arg in conv_chain or arg.op == "get_attr" or arg in node_map:
+        permute_nodes = {}
+        swapped_nodes = []
+
+        for conv_node in conv_chain:
+            for arg in conv_node.all_input_nodes:
+                if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
                     continue
 
                 # Handle the special case where weight is not a get_attr node
@@ -797,53 +794,53 @@ def transpose_conv2d_weights(model: GraphModule):
 
                 logger.debug(f"Insert permute before {arg} with dims {dims}")
 
-                if arg not in pre_permute_nodes:
+                if arg not in permute_nodes:
                     with graph.inserting_after(arg):
-                        pre_permute_nodes[arg] = graph.call_function(
+                        permute_nodes[arg] = graph.call_function(
                             torch.ops.aten.permute.default, (arg, dims),
                         )
-                n.replace_input_with(arg, pre_permute_nodes[arg])
+                conv_node.replace_input_with(arg, permute_nodes[arg])
 
-            for user in list(n.users.keys()):
-                if user in conv_chain or user in node_map:
+            for user in list(conv_node.users.keys()):
+                if user in conv_chain or user in swapped_nodes:
                     continue
-                logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
+                logger.debug(f"Insert permute after {conv_node} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
+                        torch.ops.aten.permute.default, (conv_node, (0, 3, 1, 2)),
                     )
-                user.replace_input_with(n, permute_node)
+                user.replace_input_with(conv_node, permute_node)
 
-            if n.target == torch.ops.quantized_ops.quantize_mx.default:
-                n.args = n.args[:1] + (-1,) + n.args[2:]
+            if conv_node.target == torch.ops.quantized_ops.quantize_mx.default:
+                conv_node.args = conv_node.args[:1] + (-1,) + conv_node.args[2:]
 
-            if not is_conv2d(n):
+            if not is_conv2d(conv_node):
                 continue
 
-            logger.debug(f"Permuting weights for {n}")
-            weight_node = n.args[1]
+            logger.debug(f"Permuting weights for {conv_node}")
+            weight_node = conv_node.args[1]
             if weight_node.op == "get_attr":
                 param = get_parameter_or_buffer(model, weight_node.target)
                 param.data = param.data.permute(2, 3, 1, 0)
 
-            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
-                scale_node = n.kwargs.get("weight_scale")
+            if conv_node.target == torch.ops.quantized_ops.conv2d_mx.default:
+                scale_node = conv_node.kwargs.get("weight_scale")
                 scale = get_parameter_or_buffer(model, scale_node.target)
                 scale.data = scale.data.permute(2, 3, 1, 0)
                 continue
 
-            with graph.inserting_before(n):
+            with graph.inserting_before(conv_node):
                 conv_node = graph.call_function(
-                    torch.ops.quantized_ops.conv2d.default, args=n.args
+                    torch.ops.quantized_ops.conv2d.default, args=conv_node.args
                 )
 
-            logger.debug(f"Replace conv2d node {n} with {conv_node}")
+            logger.debug(f"Replace conv2d node {conv_node} with {conv_node}")
 
-            conv_node.meta = n.meta
-            n.replace_all_uses_with(conv_node)
-            graph.erase_node(n)
+            conv_node.meta = conv_node.meta
+            conv_node.replace_all_uses_with(conv_node)
+            graph.erase_node(conv_node)
 
-            node_map[conv_node] = n
+            swapped_nodes.append(conv_node)
 
     graph.lint()
     model.recompile()
@@ -895,6 +892,24 @@ def eliminate_reshape_with_no_effect(model: GraphModule):
     return model
 
 
+def linear_transposed(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None
+) -> torch.Tensor:
+    return torch.ops.aten.linear.default(input, weight.T, bias)
+
+
+def linear_transposed_without_fc(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None
+) -> torch.Tensor:
+    if math.prod(input.shape[:-1]) == 1:
+        return torch.ops.aten.linear.default(input, weight, bias)
+    return torch.ops.aten.linear.default(input, weight.T, bias)
+
+
 def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     """
     Transpose the weights of linear layers in the given FX graph module.
@@ -906,7 +921,9 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     Returns:
         GraphModule: The transformed FX graph module with transposed weights.
     """
-    torch.nn.functional.linear = linear_transposed
+    torch.nn.functional.linear = (
+        linear_transposed if transpose_fc else linear_transposed_without_fc
+    )
 
     for node in model.graph.nodes: 
         if node.target not in [
@@ -917,12 +934,22 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
 
         input_node = node.args[0]
         input_shape = input_node.value.shape
-        if not transpose_fc and sum(input_shape[:-1]) == 1:
+
+        # TODO: handle torch.matmul second operand when not transposing FC
+        if not transpose_fc and math.prod(input_shape[:-1]) == 1:
             continue
 
         weight_node = node.args[1]
         weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
+
+        if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
+            shape = tiled_shapes["weight"]
+            tiled_shapes["weight"] = (shape[1], shape[0])
+
+            if "weight_scale" in tiled_shapes:
+                scale_shape = tiled_shapes["weight_scale"]
+                tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
 
         if node.target == torch.ops.quantized_ops.linear_mx.default:
             scale_node = node.kwargs.get("weight_scale")
@@ -1256,7 +1283,7 @@ def run_l2_tiling(
         X = int(input_value.numel() / C)
         total_size = X * C * input_bytes + C * K * weight_bytes + X * K * 2
 
-        if X == 1 or total_size <= cache_size:
+        if total_size <= cache_size:
             logger.info(f"{node}: X={X}, C={C}, K={K}, total_size={total_size} fits in cache, no tiling needed.")
             continue
 
