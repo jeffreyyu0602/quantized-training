@@ -108,7 +108,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
 def set_output_field(param, node, output_dir):
     if isinstance(node.value, torch.Tensor):
         if "tiled_shapes" in node.meta:
-            node.meta["shape"] = node.meta["tiled_shapes"].get("output")
+            node.meta["shape"] = node.meta["tiled_shapes"].get(node)
 
         if "scratchpad_mem" in node.meta:
             node.meta["scratchpad"] = node.meta["scratchpad_mem"].get(node)

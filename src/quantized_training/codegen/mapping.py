@@ -1151,6 +1151,11 @@ def run_memory_mapping(
             node.meta["memory"] = allocator.allocate_memory(node)
             allocator.snapshot()
 
+        nodes_to_delete = delete_unused_values(node)
+        for n in nodes_to_delete:
+            if n.op != "get_attr":
+                allocator.free_memory(n)
+
         # Determine scratchpad memory location
         if node.op == "call_module":
             mod = named_modules[node.target]
@@ -1233,11 +1238,6 @@ def run_memory_mapping(
                 node.meta["tiled_shapes"] = tiled_shapes
         else:
             logger.warning(f"Failed to allocate scratchpad memory for {node}")
-
-        nodes_to_delete = delete_unused_values(node)
-        for n in nodes_to_delete:
-            if n.op != "get_attr":
-                allocator.free_memory(n)
 
 
 def gen_code(model, args, output_dir=None):
