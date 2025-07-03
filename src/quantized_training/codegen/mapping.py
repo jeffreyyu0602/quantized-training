@@ -1,6 +1,7 @@
 import copy
 import itertools
 import logging
+import math
 import operator
 import os
 import re
@@ -22,6 +23,7 @@ from .mapping_utils import (
     map_node,
     set_output_field,
     set_tensor_field,
+    save_tensor,
 )
 from .memory import MemoryAllocator, Segment
 from .param_pb2 import Model, Operation, Tensor
@@ -32,6 +34,7 @@ from ..quantize_pt2e import create_getattr_from_value, export_model
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
+DEFAULT_CACHE_SIZE = 2 * 1024 * 1024  # 2 MiB
 
 
 def eliminate_dead_code(self):
@@ -686,7 +689,8 @@ def fuse_reshape_with_input(
     # Base case: Stop if the node is a GEMM or an elementwise operation
     if (
         _is_gemm_op(current_node) and
-        (is_tranpose(reshape_node) or is_mha_permute(reshape_node))
+        (is_tranpose(reshape_node) or is_mha_permute(reshape_node)) and
+        not "tiled_shapes" in current_node.meta
     ) or (
         _is_elementwise_op(current_node) and not is_tranpose(reshape_node)
     ):
@@ -837,9 +841,7 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     for node in list(graph.nodes):
         if is_mha_permute(node):
             match_found = True
-
             input_node = node.all_input_nodes[0]
-
             fused_nodes = [node]
             while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
                 if (
@@ -850,10 +852,11 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                     logger.debug(f"Cannot fuse {node} with {input_node}")
                     match_found = False
                     break
+
                 fused_nodes.insert(0, input_node)
                 input_node = input_node.all_input_nodes[0]
 
-            if match_found and len(input_node.users) == 1:
+            if match_found and len(input_node.users) == 1 and "tiled_shapes" not in input_node.meta:
                 nodes_map[node] = input_node
                 if (group := search_group(input_node, fused_nodes_list)) is not None:
                     group.extend(n for n in fused_nodes if n not in group)
@@ -863,9 +866,7 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                 continue
 
         if _is_reshape_op(node):
-            nodes = fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, node)
-
-            for n in nodes:
+            for n in fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, node):
                 if n.target == torch.ops.aten.transpose.int:
                     move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
@@ -939,28 +940,59 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
             node.value = output
 
     graph.lint()
-
     graph.eliminate_dead_code()
     model.recompile()
 
     return model
 
 
+def get_tiled_tensor(shape1, shape2):
+    """
+    Given:
+      - shape1: original shape of tensor A
+      - shape2: original shape of tensor B (broadcastable to shape1)
+      - tiled_last2: tuple (X, K) for the new last two dims of A after tiling
+
+    Returns:
+      - shape2_tiled: shape for B that is broadcastable to the new shape of A
+    """
+    # Align shape2 to the same number of dims as new_shape1
+    shape2 = list(shape2)
+    ndiff = len(shape1) - len(shape2)
+    # For each dim, if shape2 dim is 1 or matches, keep it, else set to 1
+    shape2_tiled = []
+    for i in range(len(shape2)):
+        shape2_tiled.append(shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i])
+    return tuple(shape2_tiled)
+
+
+def get_tiled_shape(shape, num_tiles):
+    if num_tiles is None:
+        return shape
+    ndiff = len(shape) - len(num_tiles)
+    tiled_shape = []
+    for i in range(len(shape)):
+        tiled_shape.append(int(shape[i] / num_tiles[i - ndiff]) if i - ndiff >= 0 else shape[i])
+    return tuple(tiled_shape)
+
+
 def run_memory_mapping(
     model: GraphModule,
     allocator: MemoryAllocator = None,
-    weight_persistent: bool = False,
+    cache_size: int = DEFAULT_CACHE_SIZE,
+    bank_size: int = None,
+    bank_width: int = None,
 ):
     graph = model.graph
+    named_modules = dict(model.named_modules(remove_duplicate=False))
 
     if allocator is None:
         allocator = MemoryAllocator(DEFAULT_MEMORY_SIZE)
 
     # Store all the weights in memory if persistent is enabled
-    if weight_persistent:
-        for node in model.graph.nodes:
-            if node.op == "get_attr" and not re.fullmatch(r"code_\d+", node.name):
-                node.meta["memory"] = allocator.allocate_memory(node)
+    for node in model.graph.nodes:
+        if node.op == "get_attr" and not re.fullmatch(r"code_\d+", node.name):
+            node.meta["memory"] = allocator.allocate_memory(node)
 
     # Store inputs to the model in memory
     for node in model.graph.nodes:
@@ -995,7 +1027,7 @@ def run_memory_mapping(
         """
         nodes_to_delete = user_to_last_uses.get(user, [])
         for n in list(nodes_to_delete):
-            if weight_persistent and n.op == "get_attr":
+            if n.op == "get_attr":
                 continue
             if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
                 nodes_to_delete.extend(delete_unused_values(n))
@@ -1049,19 +1081,18 @@ def run_memory_mapping(
                 n.meta["memory"] = segment
 
             # If the first node is a param node, we need to copy it to the new location
-            if _is_nop(node):
-                input_node = node.all_input_nodes[0]
-                if input_node.meta["memory"].start != segment.start:
-                    with graph.inserting_before(node):
-                        copy_node = graph.call_function(
-                            torch.ops.aten.add.Scalar, (input_node, 0)
-                        )
+            input_node = node.all_input_nodes[0]
+            if _is_nop(node) and input_node.meta["memory"].start != segment.start:
+                with graph.inserting_before(node):
+                    copy_node = graph.call_function(
+                        torch.ops.aten.add.Scalar, (input_node, 0)
+                    )
 
-                    node.replace_input_with(input_node, copy_node)
-                    register_last_uses(copy_node, node)
+                node.replace_input_with(input_node, copy_node)
+                register_last_uses(copy_node, node)
 
-                    copy_node.meta["memory"] = segment
-                    copy_node.value, copy_node.shape = input_node.value, input_node.shape
+                copy_node.meta["memory"] = segment
+                copy_node.value, copy_node.shape = input_node.value, input_node.shape
         elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             # print(f"Allocate stack node: {node}")
             node.meta["memory"] = allocator.allocate_memory(node)
@@ -1076,12 +1107,6 @@ def run_memory_mapping(
             continue
 
         skip_allocation = False
-
-        # Allocate memory for input parameters
-        if not weight_persistent:
-            for n in node.all_input_nodes:
-                if n.op == "get_attr" and not re.fullmatch(r"code_\d+", n.name):
-                    n.meta["memory"] = allocator.allocate_memory(n)
 
         # Propagate memory metadata for nop nodes
         if _is_nop(node):
@@ -1111,7 +1136,7 @@ def run_memory_mapping(
             skip_allocation = True
 
         # We use the partition of the first input tensor since it preallocates
-        # memory for all the tensors in the stack operation (read below)
+        # memory for all the tensors in the stack operation
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             if len(node.args) != 1 and node.args[1] != 0:
                 raise RuntimeError(f"Unsupported stack operation: {node}")
@@ -1126,12 +1151,92 @@ def run_memory_mapping(
             node.meta["memory"] = allocator.allocate_memory(node)
             allocator.snapshot()
 
-        # segments = [s.node.name if s.node is not None else "none" for s in allocator.segments]
-        # print(" ".join(segments))
+        # Determine scratchpad memory location
+        if node.op == "call_module":
+            mod = named_modules[node.target]
+            first_node = next(iter(n for n in mod.graph.nodes if n.op == "call_function"))
+        else:
+            first_node = node
+
+        from torch.fx.operator_schemas import normalize_function
+
+        args_and_kwargs = normalize_function(
+            first_node.target, first_node.args, first_node.kwargs, normalize_to_only_use_kwargs=True
+        )
+        node_to_key = {
+            n.meta.get('source_node', n): k
+            for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
+        }
+        node_to_key[first_node] = "output"
+
+        tiled_shapes = first_node.meta.get("tiled_shapes", {})
+        tiled_shapes = {n: tiled_shapes[k] for n, k in node_to_key.items() if k in tiled_shapes}
+
+        # Calculate tiled shape for other input/output nodes
+        if node.op == "call_module" and tiled_shapes:
+            output_shape = tiled_shapes[first_node]
+            for n in node.all_input_nodes:
+                if n not in tiled_shapes and "code" not in n.name:
+                    tiled_shapes[n] = get_tiled_tensor(output_shape, n.value.shape)
+
+            l2_tiling = first_node.meta.get("l2_tiling")
+            if isinstance(node.value, torch.Tensor):
+                tiled_shapes[node] = output_shape
+            else:
+                tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
+
+        def get_tensor_size(n: Node):
+            return (
+                math.prod(tiled_shapes.get(n, n.value.shape)) *
+                dtype_byte_size(n.meta.get('dtype') or n.value.dtype)
+            )
+
+        tensor_sizes = {
+            n: get_tensor_size(n) for n in node.all_input_nodes if "code" not in n.name
+        }
+
+        if isinstance(node.value, torch.Tensor):
+            tensor_sizes[node] = get_tensor_size(node)
+        elif isinstance(node.value, (tuple, list)):
+            shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
+            dtypes = node.meta.get('dtype', [None] * len(node.value))
+            tensor_sizes[node] = sum(
+                math.prod(shapes[i]) * dtype_byte_size(dtypes[i] or t.dtype)
+                for i, t in enumerate(node.value)
+            )
+
+        tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
+
+        bytes_to_allocate = sum(tensor_sizes.values())
+        remaining_cache_size = cache_size
+
+        if bytes_to_allocate <= remaining_cache_size:
+            scratchpad_mem = {}
+            sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size)
+
+            # Allocate large tensors first for better cache utilization
+            for n, size in tensor_sizes.items():
+                if bank_size is not None:
+                    bytes_to_allocate -= size
+                    align_bank = bytes_to_allocate <= remaining_cache_size - bank_size
+                    remaining_cache_size -= bank_size if align_bank else size
+                else:
+                    align_bank = False
+
+                scratchpad_mem[n] = sp_allocator.allocate_memory(
+                    n, shape=tiled_shapes.get(n), align_bank=align_bank
+                )
+
+            node.meta["scratchpad_mem"] = scratchpad_mem
+
+            if tiled_shapes:
+                node.meta["tiled_shapes"] = tiled_shapes
+        else:
+            logger.warning(f"Failed to allocate scratchpad memory for {node}")
 
         nodes_to_delete = delete_unused_values(node)
         for n in nodes_to_delete:
-            if n.op != "get_attr" or not weight_persistent:
+            if n.op != "get_attr":
                 allocator.free_memory(n)
 
 
@@ -1144,6 +1249,19 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     model_params = Model()
 
+    def map_arg(arg, tiled_shapes=None):
+        if not isinstance(arg, torch.fx.Node):
+            return arg
+
+        if tiled_shapes is None or arg not in tiled_shapes:
+            return arg.value.clone()
+        
+        tensor = arg.value.clone()
+        shape = tiled_shapes[arg]
+        n = len(shape)
+        slices = [slice(None)] * (tensor.ndim - n) + [slice(0, s) for s in shape]
+        return tensor[tuple(slices)]
+
     for node in model.graph.nodes:
         node_value = getattr(node, 'value', None)
         if not isinstance(node_value, (torch.Tensor, tuple, list)):
@@ -1153,28 +1271,51 @@ def gen_code(model, args, output_dir=None):
 
         if node.op == 'placeholder':
             tensor = Tensor()
-            set_tensor_field(tensor, node, output_dir, True)
+            set_tensor_field(tensor, node, output_dir)
             model_params.inputs.append(tensor)
             continue
         elif node.op == 'get_attr':
             tensor = Tensor()
-            set_tensor_field(tensor, node, output_dir, True)
+            set_tensor_field(tensor, node, output_dir)
             if "memory" in node.meta:
                 model_params.parameters.append(tensor)
             continue
         elif node.op == 'call_function':
-            op.op.CopyFrom(map_node(node, output_dir))
+            if (tiled_shapes := node.meta.get('tiled_shapes')) is not None:
+                args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
+                kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: map_arg(n, tiled_shapes))
+                output = node.target(*args, **kwargs)
+
+                if output_dir is not None:
+                    save_tensor(output, os.path.join(output_dir, f"{node.name}_tiled.bin"))
+
+            op.op.CopyFrom(map_node(node, output_dir if tiled_shapes else None))
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
-            submodule_args = torch.fx.node.map_arg(node.args, lambda n: n.value.clone())
-            ShapeProp(gm).propagate(*submodule_args)
+
+            tiled_shapes = node.meta.get('tiled_shapes')
+            args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
+            output = ShapeProp(gm).propagate(*args)
+
+            if tiled_shapes and output_dir is not None:
+                if isinstance(output, torch.Tensor):
+                    save_tensor(output, os.path.join(output_dir, f"{node.name}_tiled.bin"))
+                elif isinstance(output, (tuple, list)):
+                    for i, t in enumerate(output):
+                        save_tensor(t, os.path.join(output_dir, f"{node.name}_{i}_tiled.bin"))
+
+            scratchpad_mem = node.meta.get("scratchpad_mem")
 
             operators = []
             for n in gm.graph.nodes:
                 if n.op != 'call_function' or n.meta.get('fused', False) or _is_nop(n):
                     continue
-                operators.append(map_node(n, output_dir))
+
+                n.meta["tiled_shapes"] = tiled_shapes
+                n.meta["scratchpad_mem"] = scratchpad_mem
+
+                operators.append(map_node(n, output_dir if tiled_shapes else None))
 
             op.fused_op.name = node.name
             op.fused_op.op_list.extend(operators)

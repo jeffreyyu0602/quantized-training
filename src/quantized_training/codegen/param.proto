@@ -3,18 +3,26 @@ syntax = "proto3";
 package codegen;
 
 message Memory {
-  int32 partition = 1;
-  uint64 address = 2;
+  int32 partition = 2;
+  uint64 address = 3;
+}
+
+message ScratchpadInfo {
+  int32 bank = 1;        // Optional: scratchpad bank number
+  uint64 offset = 2;     // Global offset
 }
 
 message Tensor {
   string node = 1;           // Associated node name (for debugging)
   repeated int32 shape = 2;  // Shape of the tensor
   string dtype = 3;          // Data type (e.g., "float32", "int8")
+
   optional Memory memory = 4; // Optional memory info
-  optional double scale = 5;  // Optional scale for quantization
-  optional OpOverload reshape = 6; // Optional fused reshape/slicing
-  bool is_none = 7;
+  optional ScratchpadInfo scratchpad = 5;  // Optional scratchpad info
+
+  optional double scale = 6;  // Optional scale for quantization
+  optional OpOverload reshape = 7; // Optional fused reshape/slicing
+  bool is_none = 8;
 }
 
 // Wrapper for repeated tensors (since `oneof` doesn't allow repeated fields)

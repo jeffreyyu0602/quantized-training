@@ -74,17 +74,16 @@ class MemoryAllocator:
         self.memory_map = {}
         self.snapshots = []
 
-    def align_size(self, size):
-        if self.bank_size is not None:
+    def align_size(self, size, align_bank=False):
+        if self.bank_size is not None and align_bank:
             alignment = self.bank_size
         elif self.bank_width is not None:
             alignment = self.bank_width
         else:
-            alignment = 1
-        size = (size + alignment - 1) // alignment * alignment
-        return size
+            return size
+        return (size + alignment - 1) // alignment * alignment
 
-    def allocate_memory(self, node, size=None):
+    def allocate_memory(self, node, size=None, shape=None, align_bank=False):
         if not hasattr(node, 'value'):
             print(f"Node {node} does not have a value attribute")
             return None
@@ -106,11 +105,9 @@ class MemoryAllocator:
         if size is not None:
             tensor_size = size
         elif isinstance(node.value, torch.Tensor):
-            if node.meta.get('dtype', None) is not None:
-                num_bytes = dtype_byte_size(node.meta['dtype'])
-            else:
-                num_bytes = dtype_byte_size(node.value.dtype)
-            tensor_size = node.value.numel() * num_bytes
+            dtype = node.meta.get('dtype') or node.value.dtype
+            numel = math.prod(shape) if shape is not None else node.value.numel()
+            tensor_size = numel * dtype_byte_size(dtype)
 
             # This logic is going to be removed in the future
             conv2d_user = get_user_with_target(node, [
@@ -120,23 +117,28 @@ class MemoryAllocator:
 
             if conv2d_user is not None:
                 input_node = conv2d_user.args[0]
-                input_node = input_node.meta.get('source_node', input_node)
+                if "source_node" in input_node.meta:
+                    input_node = input_node.meta['source_node']
                 dim = 1 if conv2d_user.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
-                    logger.info(f"Node {node} has shape {node.value.shape}, which is too small for conv2d. Doubling size.")
                     tensor_size *= 2
+                    logger.info(
+                        f"Conv2d {node} has input with shape: {node.value.shape}. "
+                        "Doubling size to perform replication."
+                    )
 
-            tensor_size = self.align_size(tensor_size)
+            tensor_size = self.align_size(tensor_size, align_bank)
         elif isinstance(node.value, (tuple, list)):
-            dtypes = [t.dtype for t in node.value]
-            if "dtype" in node.meta:
-                dtypes = [dt or dtypes[i] for i, dt in enumerate(node.meta["dtype"])]
-
+            dtypes = node.meta.get('dtype', [None] * len(node.value))
+            if shape is not None and isinstance(shape, (tuple, list)):
+                shapes = [math.prod(s) for s in shape]
+            else:
+                shapes = [t.numel() for t in node.value]
             node.meta["output_sizes"] = [
-                self.align_size(t.numel() * dtype_byte_size(dt))
-                for t, dt in zip(node.value, dtypes)
+                self.align_size(shapes[i] * dtype_byte_size(dtypes[i] or t.dtype))
+                for i, t in enumerate(node.value)
             ]
-            tensor_size = sum(node.meta["output_sizes"])
+            tensor_size = self.align_size(sum(node.meta["output_sizes"]), align_bank=align_bank)
         else:
             logger.warning(f"Node {node} has a non-tensor output")
             return None

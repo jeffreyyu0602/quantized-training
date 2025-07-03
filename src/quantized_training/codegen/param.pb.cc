@@ -22,6 +22,26 @@ namespace _pbi = ::google::protobuf::internal;
 namespace _fl = ::google::protobuf::internal::field_layout;
 namespace codegen {
 
+inline constexpr ScratchpadInfo::Impl_::Impl_(
+    ::_pbi::ConstantInitialized) noexcept
+      : offset_{::uint64_t{0u}},
+        bank_{0},
+        _cached_size_{0} {}
+
+template <typename>
+PROTOBUF_CONSTEXPR ScratchpadInfo::ScratchpadInfo(::_pbi::ConstantInitialized)
+    : _impl_(::_pbi::ConstantInitialized()) {}
+struct ScratchpadInfoDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR ScratchpadInfoDefaultTypeInternal() : _instance(::_pbi::ConstantInitialized{}) {}
+  ~ScratchpadInfoDefaultTypeInternal() {}
+  union {
+    ScratchpadInfo _instance;
+  };
+};
+
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
+    PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ScratchpadInfoDefaultTypeInternal _ScratchpadInfo_default_instance_;
+
 inline constexpr ScalarList::Impl_::Impl_(
     ::_pbi::ConstantInitialized) noexcept
       : values_{},
@@ -173,6 +193,7 @@ inline constexpr Tensor::Impl_::Impl_(
             &::google::protobuf::internal::fixed_address_empty_string,
             ::_pbi::ConstantInitialized()),
         memory_{nullptr},
+        scratchpad_{nullptr},
         reshape_{nullptr},
         scale_{0},
         is_none_{false} {}
@@ -274,7 +295,7 @@ struct ModelDefaultTypeInternal {
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT
     PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ModelDefaultTypeInternal _Model_default_instance_;
 }  // namespace codegen
-static ::_pb::Metadata file_level_metadata_param_2eproto[12];
+static ::_pb::Metadata file_level_metadata_param_2eproto[13];
 static constexpr const ::_pb::EnumDescriptor**
     file_level_enum_descriptors_param_2eproto = nullptr;
 static constexpr const ::_pb::ServiceDescriptor**
@@ -291,6 +312,16 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     ~0u,  // no sizeof(Split)
     PROTOBUF_FIELD_OFFSET(::codegen::Memory, _impl_.partition_),
     PROTOBUF_FIELD_OFFSET(::codegen::Memory, _impl_.address_),
+    ~0u,  // no _has_bits_
+    PROTOBUF_FIELD_OFFSET(::codegen::ScratchpadInfo, _internal_metadata_),
+    ~0u,  // no _extensions_
+    ~0u,  // no _oneof_case_
+    ~0u,  // no _weak_field_map_
+    ~0u,  // no _inlined_string_donated_
+    ~0u,  // no _split_
+    ~0u,  // no sizeof(Split)
+    PROTOBUF_FIELD_OFFSET(::codegen::ScratchpadInfo, _impl_.bank_),
+    PROTOBUF_FIELD_OFFSET(::codegen::ScratchpadInfo, _impl_.offset_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_._has_bits_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _internal_metadata_),
     ~0u,  // no _extensions_
@@ -303,6 +334,7 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.shape_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.dtype_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.memory_),
+    PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.scratchpad_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.scale_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.reshape_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.is_none_),
@@ -310,8 +342,9 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     ~0u,
     ~0u,
     0,
-    2,
     1,
+    3,
+    2,
     ~0u,
     ~0u,  // no _has_bits_
     PROTOBUF_FIELD_OFFSET(::codegen::TensorList, _internal_metadata_),
@@ -432,21 +465,23 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
 static const ::_pbi::MigrationSchema
     schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
         {0, -1, -1, sizeof(::codegen::Memory)},
-        {10, 25, -1, sizeof(::codegen::Tensor)},
-        {32, -1, -1, sizeof(::codegen::TensorList)},
-        {41, -1, -1, sizeof(::codegen::IntList)},
-        {50, -1, -1, sizeof(::codegen::BoolList)},
-        {59, -1, -1, sizeof(::codegen::ScalarList)},
-        {68, -1, -1, sizeof(::codegen::Argument)},
-        {86, 96, -1, sizeof(::codegen::OpOverload_KwargsEntry_DoNotUse)},
-        {98, -1, -1, sizeof(::codegen::OpOverload)},
-        {111, -1, -1, sizeof(::codegen::OpOverloadList)},
-        {121, -1, -1, sizeof(::codegen::Operation)},
-        {135, -1, -1, sizeof(::codegen::Model)},
+        {10, -1, -1, sizeof(::codegen::ScratchpadInfo)},
+        {20, 36, -1, sizeof(::codegen::Tensor)},
+        {44, -1, -1, sizeof(::codegen::TensorList)},
+        {53, -1, -1, sizeof(::codegen::IntList)},
+        {62, -1, -1, sizeof(::codegen::BoolList)},
+        {71, -1, -1, sizeof(::codegen::ScalarList)},
+        {80, -1, -1, sizeof(::codegen::Argument)},
+        {98, 108, -1, sizeof(::codegen::OpOverload_KwargsEntry_DoNotUse)},
+        {110, -1, -1, sizeof(::codegen::OpOverload)},
+        {123, -1, -1, sizeof(::codegen::OpOverloadList)},
+        {133, -1, -1, sizeof(::codegen::Operation)},
+        {147, -1, -1, sizeof(::codegen::Model)},
 };
 
 static const ::_pb::Message* const file_default_instances[] = {
     &::codegen::_Memory_default_instance_._instance,
+    &::codegen::_ScratchpadInfo_default_instance_._instance,
     &::codegen::_Tensor_default_instance_._instance,
     &::codegen::_TensorList_default_instance_._instance,
     &::codegen::_IntList_default_instance_._instance,
@@ -461,50 +496,53 @@ static const ::_pb::Message* const file_default_instances[] = {
 };
 const char descriptor_table_protodef_param_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
     "\n\013param.proto\022\007codegen\",\n\006Memory\022\021\n\tpart"
-    "ition\030\001 \001(\005\022\017\n\007address\030\002 \001(\004\"\313\001\n\006Tensor\022"
-    "\014\n\004node\030\001 \001(\t\022\r\n\005shape\030\002 \003(\005\022\r\n\005dtype\030\003 "
-    "\001(\t\022$\n\006memory\030\004 \001(\0132\017.codegen.MemoryH\000\210\001"
-    "\001\022\022\n\005scale\030\005 \001(\001H\001\210\001\001\022)\n\007reshape\030\006 \001(\0132\023"
-    ".codegen.OpOverloadH\002\210\001\001\022\017\n\007is_none\030\007 \001("
-    "\010B\t\n\007_memoryB\010\n\006_scaleB\n\n\010_reshape\".\n\nTe"
-    "nsorList\022 \n\007tensors\030\001 \003(\0132\017.codegen.Tens"
-    "or\"\031\n\007IntList\022\016\n\006values\030\001 \003(\003\"\032\n\010BoolLis"
-    "t\022\016\n\006values\030\001 \003(\010\"\034\n\nScalarList\022\016\n\006value"
-    "s\030\001 \003(\001\"\266\002\n\010Argument\022!\n\006tensor\030\001 \001(\0132\017.c"
-    "odegen.TensorH\000\022*\n\013tensor_list\030\002 \001(\0132\023.c"
-    "odegen.TensorListH\000\022$\n\010int_list\030\003 \001(\0132\020."
-    "codegen.IntListH\000\022\023\n\tint_value\030\004 \001(\003H\000\022\025"
-    "\n\013float_value\030\005 \001(\001H\000\022\024\n\nbool_value\030\006 \001("
-    "\010H\000\022\023\n\tstr_value\030\007 \001(\tH\000\022&\n\tbool_list\030\010 "
-    "\001(\0132\021.codegen.BoolListH\000\022*\n\013scalar_list\030"
-    "\t \001(\0132\023.codegen.ScalarListH\000B\n\n\010arg_type"
-    "\"\312\001\n\nOpOverload\022\014\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001("
-    "\t\022\016\n\006target\030\003 \001(\t\022\037\n\004args\030\004 \003(\0132\021.codege"
-    "n.Argument\022/\n\006kwargs\030\005 \003(\0132\037.codegen.OpO"
-    "verload.KwargsEntry\032@\n\013KwargsEntry\022\013\n\003ke"
-    "y\030\001 \001(\t\022 \n\005value\030\002 \001(\0132\021.codegen.Argumen"
-    "t:\0028\001\"D\n\016OpOverloadList\022\014\n\004name\030\001 \001(\t\022$\n"
-    "\007op_list\030\002 \003(\0132\023.codegen.OpOverload\"\300\001\n\t"
-    "Operation\022!\n\002op\030\002 \001(\0132\023.codegen.OpOverlo"
-    "adH\000\022+\n\010fused_op\030\003 \001(\0132\027.codegen.OpOverl"
-    "oadListH\000\022!\n\006output\030\004 \001(\0132\017.codegen.Tens"
-    "orH\001\022&\n\007outputs\030\005 \001(\0132\023.codegen.TensorLi"
-    "stH\001B\t\n\007op_typeB\r\n\013return_type\"n\n\005Model\022"
-    "\037\n\006inputs\030\001 \003(\0132\017.codegen.Tensor\022#\n\npara"
-    "meters\030\002 \003(\0132\017.codegen.Tensor\022\037\n\003ops\030\003 \003"
-    "(\0132\022.codegen.Operationb\006proto3"
+    "ition\030\002 \001(\005\022\017\n\007address\030\003 \001(\004\".\n\016Scratchp"
+    "adInfo\022\014\n\004bank\030\001 \001(\005\022\016\n\006offset\030\002 \001(\004\"\214\002\n"
+    "\006Tensor\022\014\n\004node\030\001 \001(\t\022\r\n\005shape\030\002 \003(\005\022\r\n\005"
+    "dtype\030\003 \001(\t\022$\n\006memory\030\004 \001(\0132\017.codegen.Me"
+    "moryH\000\210\001\001\0220\n\nscratchpad\030\005 \001(\0132\027.codegen."
+    "ScratchpadInfoH\001\210\001\001\022\022\n\005scale\030\006 \001(\001H\002\210\001\001\022"
+    ")\n\007reshape\030\007 \001(\0132\023.codegen.OpOverloadH\003\210"
+    "\001\001\022\017\n\007is_none\030\010 \001(\010B\t\n\007_memoryB\r\n\013_scrat"
+    "chpadB\010\n\006_scaleB\n\n\010_reshape\".\n\nTensorLis"
+    "t\022 \n\007tensors\030\001 \003(\0132\017.codegen.Tensor\"\031\n\007I"
+    "ntList\022\016\n\006values\030\001 \003(\003\"\032\n\010BoolList\022\016\n\006va"
+    "lues\030\001 \003(\010\"\034\n\nScalarList\022\016\n\006values\030\001 \003(\001"
+    "\"\266\002\n\010Argument\022!\n\006tensor\030\001 \001(\0132\017.codegen."
+    "TensorH\000\022*\n\013tensor_list\030\002 \001(\0132\023.codegen."
+    "TensorListH\000\022$\n\010int_list\030\003 \001(\0132\020.codegen"
+    ".IntListH\000\022\023\n\tint_value\030\004 \001(\003H\000\022\025\n\013float"
+    "_value\030\005 \001(\001H\000\022\024\n\nbool_value\030\006 \001(\010H\000\022\023\n\t"
+    "str_value\030\007 \001(\tH\000\022&\n\tbool_list\030\010 \001(\0132\021.c"
+    "odegen.BoolListH\000\022*\n\013scalar_list\030\t \001(\0132\023"
+    ".codegen.ScalarListH\000B\n\n\010arg_type\"\312\001\n\nOp"
+    "Overload\022\014\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001(\t\022\016\n\006ta"
+    "rget\030\003 \001(\t\022\037\n\004args\030\004 \003(\0132\021.codegen.Argum"
+    "ent\022/\n\006kwargs\030\005 \003(\0132\037.codegen.OpOverload"
+    ".KwargsEntry\032@\n\013KwargsEntry\022\013\n\003key\030\001 \001(\t"
+    "\022 \n\005value\030\002 \001(\0132\021.codegen.Argument:\0028\001\"D"
+    "\n\016OpOverloadList\022\014\n\004name\030\001 \001(\t\022$\n\007op_lis"
+    "t\030\002 \003(\0132\023.codegen.OpOverload\"\300\001\n\tOperati"
+    "on\022!\n\002op\030\002 \001(\0132\023.codegen.OpOverloadH\000\022+\n"
+    "\010fused_op\030\003 \001(\0132\027.codegen.OpOverloadList"
+    "H\000\022!\n\006output\030\004 \001(\0132\017.codegen.TensorH\001\022&\n"
+    "\007outputs\030\005 \001(\0132\023.codegen.TensorListH\001B\t\n"
+    "\007op_typeB\r\n\013return_type\"n\n\005Model\022\037\n\006inpu"
+    "ts\030\001 \003(\0132\017.codegen.Tensor\022#\n\nparameters\030"
+    "\002 \003(\0132\017.codegen.Tensor\022\037\n\003ops\030\003 \003(\0132\022.co"
+    "degen.Operationb\006proto3"
 };
 static ::absl::once_flag descriptor_table_param_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_param_2eproto = {
     false,
     false,
-    1310,
+    1423,
     descriptor_table_protodef_param_2eproto,
     "param.proto",
     &descriptor_table_param_2eproto_once,
     nullptr,
     0,
-    12,
+    13,
     schemas,
     file_default_instances,
     TableStruct_param_2eproto::offsets,
@@ -596,9 +634,9 @@ const ::_pbi::TcParseTable<1, 2, 0, 0, 2> Memory::_table_ = {
   {
     0,  // no _has_bits_
     0, // no _extensions_
-    2, 8,  // max_field_number, fast_idx_mask
+    3, 8,  // max_field_number, fast_idx_mask
     offsetof(decltype(_table_), field_lookup_table),
-    4294967292,  // skipmap
+    4294967289,  // skipmap
     offsetof(decltype(_table_), field_entries),
     2,  // num_field_entries
     0,  // num_aux_entries
@@ -606,19 +644,19 @@ const ::_pbi::TcParseTable<1, 2, 0, 0, 2> Memory::_table_ = {
     &_Memory_default_instance_._instance,
     ::_pbi::TcParser::GenericFallback,  // fallback
   }, {{
-    // uint64 address = 2;
-    {::_pbi::TcParser::SingularVarintNoZag1<::uint64_t, offsetof(Memory, _impl_.address_), 63>(),
-     {16, 63, 0, PROTOBUF_FIELD_OFFSET(Memory, _impl_.address_)}},
-    // int32 partition = 1;
+    // int32 partition = 2;
     {::_pbi::TcParser::SingularVarintNoZag1<::uint32_t, offsetof(Memory, _impl_.partition_), 63>(),
-     {8, 63, 0, PROTOBUF_FIELD_OFFSET(Memory, _impl_.partition_)}},
+     {16, 63, 0, PROTOBUF_FIELD_OFFSET(Memory, _impl_.partition_)}},
+    // uint64 address = 3;
+    {::_pbi::TcParser::SingularVarintNoZag1<::uint64_t, offsetof(Memory, _impl_.address_), 63>(),
+     {24, 63, 0, PROTOBUF_FIELD_OFFSET(Memory, _impl_.address_)}},
   }}, {{
     65535, 65535
   }}, {{
-    // int32 partition = 1;
+    // int32 partition = 2;
     {PROTOBUF_FIELD_OFFSET(Memory, _impl_.partition_), 0, 0,
     (0 | ::_fl::kFcSingular | ::_fl::kInt32)},
-    // uint64 address = 2;
+    // uint64 address = 3;
     {PROTOBUF_FIELD_OFFSET(Memory, _impl_.address_), 0, 0,
     (0 | ::_fl::kFcSingular | ::_fl::kUInt64)},
   }},
@@ -634,18 +672,18 @@ const ::_pbi::TcParseTable<1, 2, 0, 0, 2> Memory::_table_ = {
   ::uint32_t cached_has_bits = 0;
   (void)cached_has_bits;
 
-  // int32 partition = 1;
+  // int32 partition = 2;
   if (this->_internal_partition() != 0) {
     target = ::google::protobuf::internal::WireFormatLite::
-        WriteInt32ToArrayWithField<1>(
+        WriteInt32ToArrayWithField<2>(
             stream, this->_internal_partition(), target);
   }
 
-  // uint64 address = 2;
+  // uint64 address = 3;
   if (this->_internal_address() != 0) {
     target = stream->EnsureSpace(target);
     target = ::_pbi::WireFormatLite::WriteUInt64ToArray(
-        2, this->_internal_address(), target);
+        3, this->_internal_address(), target);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -665,13 +703,13 @@ const ::_pbi::TcParseTable<1, 2, 0, 0, 2> Memory::_table_ = {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  // uint64 address = 2;
+  // uint64 address = 3;
   if (this->_internal_address() != 0) {
     total_size += ::_pbi::WireFormatLite::UInt64SizePlusOne(
         this->_internal_address());
   }
 
-  // int32 partition = 1;
+  // int32 partition = 2;
   if (this->_internal_partition() != 0) {
     total_size += ::_pbi::WireFormatLite::Int32SizePlusOne(
         this->_internal_partition());
@@ -737,6 +775,210 @@ void Memory::InternalSwap(Memory* PROTOBUF_RESTRICT other) {
 }
 // ===================================================================
 
+class ScratchpadInfo::_Internal {
+ public:
+};
+
+ScratchpadInfo::ScratchpadInfo(::google::protobuf::Arena* arena)
+    : ::google::protobuf::Message(arena) {
+  SharedCtor(arena);
+  // @@protoc_insertion_point(arena_constructor:codegen.ScratchpadInfo)
+}
+ScratchpadInfo::ScratchpadInfo(
+    ::google::protobuf::Arena* arena, const ScratchpadInfo& from)
+    : ScratchpadInfo(arena) {
+  MergeFrom(from);
+}
+inline PROTOBUF_NDEBUG_INLINE ScratchpadInfo::Impl_::Impl_(
+    ::google::protobuf::internal::InternalVisibility visibility,
+    ::google::protobuf::Arena* arena)
+      : _cached_size_{0} {}
+
+inline void ScratchpadInfo::SharedCtor(::_pb::Arena* arena) {
+  new (&_impl_) Impl_(internal_visibility(), arena);
+  ::memset(reinterpret_cast<char *>(&_impl_) +
+               offsetof(Impl_, offset_),
+           0,
+           offsetof(Impl_, bank_) -
+               offsetof(Impl_, offset_) +
+               sizeof(Impl_::bank_));
+}
+ScratchpadInfo::~ScratchpadInfo() {
+  // @@protoc_insertion_point(destructor:codegen.ScratchpadInfo)
+  _internal_metadata_.Delete<::google::protobuf::UnknownFieldSet>();
+  SharedDtor();
+}
+inline void ScratchpadInfo::SharedDtor() {
+  ABSL_DCHECK(GetArena() == nullptr);
+  _impl_.~Impl_();
+}
+
+PROTOBUF_NOINLINE void ScratchpadInfo::Clear() {
+// @@protoc_insertion_point(message_clear_start:codegen.ScratchpadInfo)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  ::memset(&_impl_.offset_, 0, static_cast<::size_t>(
+      reinterpret_cast<char*>(&_impl_.bank_) -
+      reinterpret_cast<char*>(&_impl_.offset_)) + sizeof(_impl_.bank_));
+  _internal_metadata_.Clear<::google::protobuf::UnknownFieldSet>();
+}
+
+const char* ScratchpadInfo::_InternalParse(
+    const char* ptr, ::_pbi::ParseContext* ctx) {
+  ptr = ::_pbi::TcParser::ParseLoop(this, ptr, ctx, &_table_.header);
+  return ptr;
+}
+
+
+PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
+const ::_pbi::TcParseTable<1, 2, 0, 0, 2> ScratchpadInfo::_table_ = {
+  {
+    0,  // no _has_bits_
+    0, // no _extensions_
+    2, 8,  // max_field_number, fast_idx_mask
+    offsetof(decltype(_table_), field_lookup_table),
+    4294967292,  // skipmap
+    offsetof(decltype(_table_), field_entries),
+    2,  // num_field_entries
+    0,  // num_aux_entries
+    offsetof(decltype(_table_), field_names),  // no aux_entries
+    &_ScratchpadInfo_default_instance_._instance,
+    ::_pbi::TcParser::GenericFallback,  // fallback
+  }, {{
+    // uint64 offset = 2;
+    {::_pbi::TcParser::SingularVarintNoZag1<::uint64_t, offsetof(ScratchpadInfo, _impl_.offset_), 63>(),
+     {16, 63, 0, PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.offset_)}},
+    // int32 bank = 1;
+    {::_pbi::TcParser::SingularVarintNoZag1<::uint32_t, offsetof(ScratchpadInfo, _impl_.bank_), 63>(),
+     {8, 63, 0, PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.bank_)}},
+  }}, {{
+    65535, 65535
+  }}, {{
+    // int32 bank = 1;
+    {PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.bank_), 0, 0,
+    (0 | ::_fl::kFcSingular | ::_fl::kInt32)},
+    // uint64 offset = 2;
+    {PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.offset_), 0, 0,
+    (0 | ::_fl::kFcSingular | ::_fl::kUInt64)},
+  }},
+  // no aux_entries
+  {{
+  }},
+};
+
+::uint8_t* ScratchpadInfo::_InternalSerialize(
+    ::uint8_t* target,
+    ::google::protobuf::io::EpsCopyOutputStream* stream) const {
+  // @@protoc_insertion_point(serialize_to_array_start:codegen.ScratchpadInfo)
+  ::uint32_t cached_has_bits = 0;
+  (void)cached_has_bits;
+
+  // int32 bank = 1;
+  if (this->_internal_bank() != 0) {
+    target = ::google::protobuf::internal::WireFormatLite::
+        WriteInt32ToArrayWithField<1>(
+            stream, this->_internal_bank(), target);
+  }
+
+  // uint64 offset = 2;
+  if (this->_internal_offset() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteUInt64ToArray(
+        2, this->_internal_offset(), target);
+  }
+
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target =
+        ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+            _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance), target, stream);
+  }
+  // @@protoc_insertion_point(serialize_to_array_end:codegen.ScratchpadInfo)
+  return target;
+}
+
+::size_t ScratchpadInfo::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:codegen.ScratchpadInfo)
+  ::size_t total_size = 0;
+
+  ::uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  // uint64 offset = 2;
+  if (this->_internal_offset() != 0) {
+    total_size += ::_pbi::WireFormatLite::UInt64SizePlusOne(
+        this->_internal_offset());
+  }
+
+  // int32 bank = 1;
+  if (this->_internal_bank() != 0) {
+    total_size += ::_pbi::WireFormatLite::Int32SizePlusOne(
+        this->_internal_bank());
+  }
+
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
+}
+
+const ::google::protobuf::Message::ClassData ScratchpadInfo::_class_data_ = {
+    ScratchpadInfo::MergeImpl,
+    nullptr,  // OnDemandRegisterArenaDtor
+};
+const ::google::protobuf::Message::ClassData* ScratchpadInfo::GetClassData() const {
+  return &_class_data_;
+}
+
+void ScratchpadInfo::MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg) {
+  auto* const _this = static_cast<ScratchpadInfo*>(&to_msg);
+  auto& from = static_cast<const ScratchpadInfo&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:codegen.ScratchpadInfo)
+  ABSL_DCHECK_NE(&from, _this);
+  ::uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  if (from._internal_offset() != 0) {
+    _this->_internal_set_offset(from._internal_offset());
+  }
+  if (from._internal_bank() != 0) {
+    _this->_internal_set_bank(from._internal_bank());
+  }
+  _this->_internal_metadata_.MergeFrom<::google::protobuf::UnknownFieldSet>(from._internal_metadata_);
+}
+
+void ScratchpadInfo::CopyFrom(const ScratchpadInfo& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:codegen.ScratchpadInfo)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+PROTOBUF_NOINLINE bool ScratchpadInfo::IsInitialized() const {
+  return true;
+}
+
+::_pbi::CachedSize* ScratchpadInfo::AccessCachedSize() const {
+  return &_impl_._cached_size_;
+}
+void ScratchpadInfo::InternalSwap(ScratchpadInfo* PROTOBUF_RESTRICT other) {
+  using std::swap;
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  ::google::protobuf::internal::memswap<
+      PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.bank_)
+      + sizeof(ScratchpadInfo::_impl_.bank_)
+      - PROTOBUF_FIELD_OFFSET(ScratchpadInfo, _impl_.offset_)>(
+          reinterpret_cast<char*>(&_impl_.offset_),
+          reinterpret_cast<char*>(&other->_impl_.offset_));
+}
+
+::google::protobuf::Metadata ScratchpadInfo::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
+      file_level_metadata_param_2eproto[1]);
+}
+// ===================================================================
+
 class Tensor::_Internal {
  public:
   using HasBits = decltype(std::declval<Tensor>()._impl_._has_bits_);
@@ -746,17 +988,24 @@ class Tensor::_Internal {
   static void set_has_memory(HasBits* has_bits) {
     (*has_bits)[0] |= 1u;
   }
+  static const ::codegen::ScratchpadInfo& scratchpad(const Tensor* msg);
+  static void set_has_scratchpad(HasBits* has_bits) {
+    (*has_bits)[0] |= 2u;
+  }
   static void set_has_scale(HasBits* has_bits) {
-    (*has_bits)[0] |= 4u;
+    (*has_bits)[0] |= 8u;
   }
   static const ::codegen::OpOverload& reshape(const Tensor* msg);
   static void set_has_reshape(HasBits* has_bits) {
-    (*has_bits)[0] |= 2u;
+    (*has_bits)[0] |= 4u;
   }
 };
 
 const ::codegen::Memory& Tensor::_Internal::memory(const Tensor* msg) {
   return *msg->_impl_.memory_;
+}
+const ::codegen::ScratchpadInfo& Tensor::_Internal::scratchpad(const Tensor* msg) {
+  return *msg->_impl_.scratchpad_;
 }
 const ::codegen::OpOverload& Tensor::_Internal::reshape(const Tensor* msg) {
   return *msg->_impl_.reshape_;
@@ -789,7 +1038,10 @@ Tensor::Tensor(
   _impl_.memory_ = (cached_has_bits & 0x00000001u)
                 ? CreateMaybeMessage<::codegen::Memory>(arena, *from._impl_.memory_)
                 : nullptr;
-  _impl_.reshape_ = (cached_has_bits & 0x00000002u)
+  _impl_.scratchpad_ = (cached_has_bits & 0x00000002u)
+                ? CreateMaybeMessage<::codegen::ScratchpadInfo>(arena, *from._impl_.scratchpad_)
+                : nullptr;
+  _impl_.reshape_ = (cached_has_bits & 0x00000004u)
                 ? CreateMaybeMessage<::codegen::OpOverload>(arena, *from._impl_.reshape_)
                 : nullptr;
   ::memcpy(reinterpret_cast<char *>(&_impl_) +
@@ -830,6 +1082,7 @@ inline void Tensor::SharedDtor() {
   _impl_.node_.Destroy();
   _impl_.dtype_.Destroy();
   delete _impl_.memory_;
+  delete _impl_.scratchpad_;
   delete _impl_.reshape_;
   _impl_.~Impl_();
 }
@@ -845,12 +1098,16 @@ PROTOBUF_NOINLINE void Tensor::Clear() {
   _impl_.node_.ClearToEmpty();
   _impl_.dtype_.ClearToEmpty();
   cached_has_bits = _impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000003u) {
+  if (cached_has_bits & 0x00000007u) {
     if (cached_has_bits & 0x00000001u) {
       ABSL_DCHECK(_impl_.memory_ != nullptr);
       _impl_.memory_->Clear();
     }
     if (cached_has_bits & 0x00000002u) {
+      ABSL_DCHECK(_impl_.scratchpad_ != nullptr);
+      _impl_.scratchpad_->Clear();
+    }
+    if (cached_has_bits & 0x00000004u) {
       ABSL_DCHECK(_impl_.reshape_ != nullptr);
       _impl_.reshape_->Clear();
     }
@@ -869,21 +1126,23 @@ const char* Tensor::_InternalParse(
 
 
 PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
-const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
+const ::_pbi::TcParseTable<3, 8, 3, 40, 2> Tensor::_table_ = {
   {
     PROTOBUF_FIELD_OFFSET(Tensor, _impl_._has_bits_),
     0, // no _extensions_
-    7, 56,  // max_field_number, fast_idx_mask
+    8, 56,  // max_field_number, fast_idx_mask
     offsetof(decltype(_table_), field_lookup_table),
-    4294967168,  // skipmap
+    4294967040,  // skipmap
     offsetof(decltype(_table_), field_entries),
-    7,  // num_field_entries
-    2,  // num_aux_entries
+    8,  // num_field_entries
+    3,  // num_aux_entries
     offsetof(decltype(_table_), aux_entries),
     &_Tensor_default_instance_._instance,
     ::_pbi::TcParser::GenericFallback,  // fallback
   }, {{
-    {::_pbi::TcParser::MiniParse, {}},
+    // bool is_none = 8;
+    {::_pbi::TcParser::SingularVarintNoZag1<bool, offsetof(Tensor, _impl_.is_none_), 63>(),
+     {64, 63, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_)}},
     // string node = 1;
     {::_pbi::TcParser::FastUS1,
      {10, 63, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.node_)}},
@@ -896,15 +1155,15 @@ const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
     // optional .codegen.Memory memory = 4;
     {::_pbi::TcParser::FastMtS1,
      {34, 0, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.memory_)}},
-    // optional double scale = 5;
-    {::_pbi::TcParser::FastF64S1,
-     {41, 2, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)}},
-    // optional .codegen.OpOverload reshape = 6;
+    // optional .codegen.ScratchpadInfo scratchpad = 5;
     {::_pbi::TcParser::FastMtS1,
-     {50, 1, 1, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_)}},
-    // bool is_none = 7;
-    {::_pbi::TcParser::SingularVarintNoZag1<bool, offsetof(Tensor, _impl_.is_none_), 63>(),
-     {56, 63, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_)}},
+     {42, 1, 1, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scratchpad_)}},
+    // optional double scale = 6;
+    {::_pbi::TcParser::FastF64S1,
+     {49, 3, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)}},
+    // optional .codegen.OpOverload reshape = 7;
+    {::_pbi::TcParser::FastMtS1,
+     {58, 2, 2, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_)}},
   }}, {{
     65535, 65535
   }}, {{
@@ -920,20 +1179,24 @@ const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
     // optional .codegen.Memory memory = 4;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.memory_), _Internal::kHasBitsOffset + 0, 0,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
-    // optional double scale = 5;
-    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_), _Internal::kHasBitsOffset + 2, 0,
-    (0 | ::_fl::kFcOptional | ::_fl::kDouble)},
-    // optional .codegen.OpOverload reshape = 6;
-    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_), _Internal::kHasBitsOffset + 1, 1,
+    // optional .codegen.ScratchpadInfo scratchpad = 5;
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scratchpad_), _Internal::kHasBitsOffset + 1, 1,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
-    // bool is_none = 7;
+    // optional double scale = 6;
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_), _Internal::kHasBitsOffset + 3, 0,
+    (0 | ::_fl::kFcOptional | ::_fl::kDouble)},
+    // optional .codegen.OpOverload reshape = 7;
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_), _Internal::kHasBitsOffset + 2, 2,
+    (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
+    // bool is_none = 8;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_), -1, 0,
     (0 | ::_fl::kFcSingular | ::_fl::kBool)},
   }}, {{
     {::_pbi::TcParser::GetTable<::codegen::Memory>()},
+    {::_pbi::TcParser::GetTable<::codegen::ScratchpadInfo>()},
     {::_pbi::TcParser::GetTable<::codegen::OpOverload>()},
   }}, {{
-    "\16\4\0\5\0\0\0\0"
+    "\16\4\0\5\0\0\0\0\0\0\0\0\0\0\0\0"
     "codegen.Tensor"
     "node"
     "dtype"
@@ -980,25 +1243,32 @@ const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
         _Internal::memory(this).GetCachedSize(), target, stream);
   }
 
-  // optional double scale = 5;
-  if (cached_has_bits & 0x00000004u) {
-    target = stream->EnsureSpace(target);
-    target = ::_pbi::WireFormatLite::WriteDoubleToArray(
-        5, this->_internal_scale(), target);
-  }
-
-  // optional .codegen.OpOverload reshape = 6;
+  // optional .codegen.ScratchpadInfo scratchpad = 5;
   if (cached_has_bits & 0x00000002u) {
     target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
-        6, _Internal::reshape(this),
+        5, _Internal::scratchpad(this),
+        _Internal::scratchpad(this).GetCachedSize(), target, stream);
+  }
+
+  // optional double scale = 6;
+  if (cached_has_bits & 0x00000008u) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteDoubleToArray(
+        6, this->_internal_scale(), target);
+  }
+
+  // optional .codegen.OpOverload reshape = 7;
+  if (cached_has_bits & 0x00000004u) {
+    target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
+        7, _Internal::reshape(this),
         _Internal::reshape(this).GetCachedSize(), target, stream);
   }
 
-  // bool is_none = 7;
+  // bool is_none = 8;
   if (this->_internal_is_none() != 0) {
     target = stream->EnsureSpace(target);
     target = ::_pbi::WireFormatLite::WriteBoolToArray(
-        7, this->_internal_is_none(), target);
+        8, this->_internal_is_none(), target);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -1044,26 +1314,32 @@ const ::_pbi::TcParseTable<3, 7, 2, 32, 2> Tensor::_table_ = {
   }
 
   cached_has_bits = _impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000007u) {
+  if (cached_has_bits & 0x0000000fu) {
     // optional .codegen.Memory memory = 4;
     if (cached_has_bits & 0x00000001u) {
       total_size +=
           1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.memory_);
     }
 
-    // optional .codegen.OpOverload reshape = 6;
+    // optional .codegen.ScratchpadInfo scratchpad = 5;
     if (cached_has_bits & 0x00000002u) {
+      total_size +=
+          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.scratchpad_);
+    }
+
+    // optional .codegen.OpOverload reshape = 7;
+    if (cached_has_bits & 0x00000004u) {
       total_size +=
           1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.reshape_);
     }
 
-    // optional double scale = 5;
-    if (cached_has_bits & 0x00000004u) {
+    // optional double scale = 6;
+    if (cached_has_bits & 0x00000008u) {
       total_size += 9;
     }
 
   }
-  // bool is_none = 7;
+  // bool is_none = 8;
   if (this->_internal_is_none() != 0) {
     total_size += 2;
   }
@@ -1095,16 +1371,20 @@ void Tensor::MergeImpl(::google::protobuf::Message& to_msg, const ::google::prot
     _this->_internal_set_dtype(from._internal_dtype());
   }
   cached_has_bits = from._impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000007u) {
+  if (cached_has_bits & 0x0000000fu) {
     if (cached_has_bits & 0x00000001u) {
       _this->_internal_mutable_memory()->::codegen::Memory::MergeFrom(
           from._internal_memory());
     }
     if (cached_has_bits & 0x00000002u) {
+      _this->_internal_mutable_scratchpad()->::codegen::ScratchpadInfo::MergeFrom(
+          from._internal_scratchpad());
+    }
+    if (cached_has_bits & 0x00000004u) {
       _this->_internal_mutable_reshape()->::codegen::OpOverload::MergeFrom(
           from._internal_reshape());
     }
-    if (cached_has_bits & 0x00000004u) {
+    if (cached_has_bits & 0x00000008u) {
       _this->_impl_.scale_ = from._impl_.scale_;
     }
     _this->_impl_._has_bits_[0] |= cached_has_bits;
@@ -1149,7 +1429,7 @@ void Tensor::InternalSwap(Tensor* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Tensor::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[1]);
+      file_level_metadata_param_2eproto[2]);
 }
 // ===================================================================
 
@@ -1332,7 +1612,7 @@ void TensorList::InternalSwap(TensorList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata TensorList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[2]);
+      file_level_metadata_param_2eproto[3]);
 }
 // ===================================================================
 
@@ -1524,7 +1804,7 @@ void IntList::InternalSwap(IntList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata IntList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[3]);
+      file_level_metadata_param_2eproto[4]);
 }
 // ===================================================================
 
@@ -1709,7 +1989,7 @@ void BoolList::InternalSwap(BoolList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata BoolList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[4]);
+      file_level_metadata_param_2eproto[5]);
 }
 // ===================================================================
 
@@ -1894,7 +2174,7 @@ void ScalarList::InternalSwap(ScalarList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata ScalarList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[5]);
+      file_level_metadata_param_2eproto[6]);
 }
 // ===================================================================
 
@@ -2434,7 +2714,7 @@ void Argument::InternalSwap(Argument* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Argument::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[6]);
+      file_level_metadata_param_2eproto[7]);
 }
 // ===================================================================
 
@@ -2444,7 +2724,7 @@ OpOverload_KwargsEntry_DoNotUse::OpOverload_KwargsEntry_DoNotUse(::google::proto
 ::google::protobuf::Metadata OpOverload_KwargsEntry_DoNotUse::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[7]);
+      file_level_metadata_param_2eproto[8]);
 }
 // ===================================================================
 
@@ -2766,7 +3046,7 @@ void OpOverload::InternalSwap(OpOverload* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata OpOverload::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[8]);
+      file_level_metadata_param_2eproto[9]);
 }
 // ===================================================================
 
@@ -2982,7 +3262,7 @@ void OpOverloadList::InternalSwap(OpOverloadList* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata OpOverloadList::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[9]);
+      file_level_metadata_param_2eproto[10]);
 }
 // ===================================================================
 
@@ -3406,7 +3686,7 @@ void Operation::InternalSwap(Operation* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Operation::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[10]);
+      file_level_metadata_param_2eproto[11]);
 }
 // ===================================================================
 
@@ -3644,7 +3924,7 @@ void Model::InternalSwap(Model* PROTOBUF_RESTRICT other) {
 ::google::protobuf::Metadata Model::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_param_2eproto_getter, &descriptor_table_param_2eproto_once,
-      file_level_metadata_param_2eproto[11]);
+      file_level_metadata_param_2eproto[12]);
 }
 // @@protoc_insertion_point(namespace_scope)
 }  // namespace codegen
