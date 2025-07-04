@@ -83,6 +83,46 @@ class MemoryAllocator:
             return size
         return (size + alignment - 1) // alignment * alignment
 
+    def get_tensor_size(self, node, shape, align_bank=False):
+        if isinstance(node.value, torch.Tensor):
+            dtype = node.meta.get('dtype') or node.value.dtype
+            numel = math.prod(shape) if shape is not None else node.value.numel()
+            tensor_size = numel * dtype_byte_size(dtype)
+
+            # This logic is going to be removed in the future
+            conv2d_user = get_user_with_target(node, [
+                torch.ops.aten.conv2d.default,
+                torch.ops.quantized_ops.conv2d.default,
+            ])
+
+            if conv2d_user is not None:
+                input_node = conv2d_user.args[0]
+                input_node = input_node.meta.get('source_node', input_node)
+                dim = 1 if conv2d_user.target == torch.ops.aten.conv2d.default else -1
+                if input_node == node and node.value.shape[dim] < 16:
+                    tensor_size *= 2
+                    logger.info(
+                        f"Conv2d {node} has input with shape: {node.value.shape}. "
+                        "Doubling size to perform replication."
+                    )
+
+            return self.align_size(tensor_size, align_bank)
+
+        if isinstance(node.value, (tuple, list)):
+            dtypes = node.meta.get('dtype', [None] * len(node.value))
+            if shape is not None and isinstance(shape, (tuple, list)):
+                numel = [math.prod(s) for s in shape]
+            else:
+                numel = [t.numel() for t in node.value]
+            node.meta["output_sizes"] = [
+                self.align_size(numel[i] * dtype_byte_size(dtypes[i] or t.dtype))
+                for i, t in enumerate(node.value)
+            ]
+            return self.align_size(sum(node.meta["output_sizes"]), align_bank=align_bank)
+
+        logger.warning(f"Node {node} has a non-tensor output")
+        return None
+
     def allocate_memory(self, node, size=None, shape=None, align_bank=False):
         if not hasattr(node, 'value'):
             print(f"Node {node} does not have a value attribute")
@@ -102,45 +142,12 @@ class MemoryAllocator:
             logger.info(f"Skipping allocation for scalar scale tensor: {node.name}")
             return None
 
-        if size is not None:
-            tensor_size = size
-        elif isinstance(node.value, torch.Tensor):
-            dtype = node.meta.get('dtype') or node.value.dtype
-            numel = math.prod(shape) if shape is not None else node.value.numel()
-            tensor_size = numel * dtype_byte_size(dtype)
+        tensor_size = (
+            size if size is not None else
+            self.get_tensor_size(node, shape, align_bank=align_bank)
+        )
 
-            # This logic is going to be removed in the future
-            conv2d_user = get_user_with_target(node, [
-                torch.ops.aten.conv2d.default,
-                torch.ops.quantized_ops.conv2d.default,
-            ])
-
-            if conv2d_user is not None:
-                input_node = conv2d_user.args[0]
-                if "source_node" in input_node.meta:
-                    input_node = input_node.meta['source_node']
-                dim = 1 if conv2d_user.target == torch.ops.aten.conv2d.default else -1
-                if input_node == node and node.value.shape[dim] < 16:
-                    tensor_size *= 2
-                    logger.info(
-                        f"Conv2d {node} has input with shape: {node.value.shape}. "
-                        "Doubling size to perform replication."
-                    )
-
-            tensor_size = self.align_size(tensor_size, align_bank)
-        elif isinstance(node.value, (tuple, list)):
-            dtypes = node.meta.get('dtype', [None] * len(node.value))
-            if shape is not None and isinstance(shape, (tuple, list)):
-                shapes = [math.prod(s) for s in shape]
-            else:
-                shapes = [t.numel() for t in node.value]
-            node.meta["output_sizes"] = [
-                self.align_size(shapes[i] * dtype_byte_size(dtypes[i] or t.dtype))
-                for i, t in enumerate(node.value)
-            ]
-            tensor_size = self.align_size(sum(node.meta["output_sizes"]), align_bank=align_bank)
-        else:
-            logger.warning(f"Node {node} has a non-tensor output")
+        if tensor_size is None:
             return None
 
         for index, segment in enumerate(self.segments):

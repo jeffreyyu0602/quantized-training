@@ -1190,25 +1190,18 @@ def run_memory_mapping(
             else:
                 tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
 
-        def get_tensor_size(n: Node):
-            return (
-                math.prod(tiled_shapes.get(n, n.value.shape)) *
-                dtype_byte_size(n.meta.get('dtype') or n.value.dtype)
-            )
+        sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size)
 
         tensor_sizes = {
-            n: get_tensor_size(n) for n in node.all_input_nodes if "code" not in n.name
+            n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
+            for n in node.all_input_nodes if "code" not in n.name
         }
 
         if isinstance(node.value, torch.Tensor):
-            tensor_sizes[node] = get_tensor_size(node)
+            tensor_sizes[node] = sp_allocator.get_tensor_size(node, tiled_shapes.get(node))
         elif isinstance(node.value, (tuple, list)):
-            shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            dtypes = node.meta.get('dtype', [None] * len(node.value))
-            tensor_sizes[node] = sum(
-                math.prod(shapes[i]) * dtype_byte_size(dtypes[i] or t.dtype)
-                for i, t in enumerate(node.value)
-            )
+            output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
+            tensor_sizes[node] = sp_allocator.get_tensor_size(n, output_shapes)
 
         tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
 
@@ -1217,7 +1210,6 @@ def run_memory_mapping(
 
         if bytes_to_allocate <= remaining_cache_size:
             scratchpad_mem = {}
-            sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size)
 
             # Allocate large tensors first for better cache utilization
             for n, size in tensor_sizes.items():
