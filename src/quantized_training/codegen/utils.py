@@ -77,10 +77,10 @@ def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
             len(node.args[0].users) == 1 and
             node.args[5] == False  # inference mode
         ):
-            conv_node = node.args[0]
+            n = node.args[0]
 
-            conv_w = model.get_parameter(conv_node.args[1])
-            conv_b = model.get_parameter(conv_node.args[2])
+            conv_w = model.get_parameter(n.args[1])
+            conv_b = model.get_parameter(n.args[2])
 
             bn_w = model.get_parameter(node.args[1])
             bn_b = model.get_parameter(node.args[2])
@@ -92,10 +92,10 @@ def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
                 conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b
             )
 
-            model.register_parameter(conv_node.args[1].target, fused_conv_w)
-            model.register_parameter(conv_node.args[2].target, fused_conv_b)
+            model.register_parameter(n.args[1].target, fused_conv_w)
+            model.register_parameter(n.args[2].target, fused_conv_b)
 
-            node.replace_all_uses_with(conv_node)
+            node.replace_all_uses_with(n)
             model.graph.erase_node(node)
 
     model.graph.lint()
@@ -774,8 +774,8 @@ def transpose_conv2d_weights(model: GraphModule):
         permute_nodes = {}
         swapped_nodes = []
 
-        for conv_node in conv_chain:
-            for arg in conv_node.all_input_nodes:
+        for n in conv_chain:
+            for arg in n.all_input_nodes:
                 if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
                     continue
 
@@ -799,46 +799,49 @@ def transpose_conv2d_weights(model: GraphModule):
                         permute_nodes[arg] = graph.call_function(
                             torch.ops.aten.permute.default, (arg, dims),
                         )
-                conv_node.replace_input_with(arg, permute_nodes[arg])
+                n.replace_input_with(arg, permute_nodes[arg])
 
-            for user in list(conv_node.users.keys()):
+            for user in list(n.users.keys()):
                 if user in conv_chain or user in swapped_nodes:
                     continue
-                logger.debug(f"Insert permute after {conv_node} with dims (0, 3, 1, 2)")
+                logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (conv_node, (0, 3, 1, 2)),
+                        torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
                     )
-                user.replace_input_with(conv_node, permute_node)
+                user.replace_input_with(n, permute_node)
 
-            if conv_node.target == torch.ops.quantized_ops.quantize_mx.default:
-                conv_node.args = conv_node.args[:1] + (-1,) + conv_node.args[2:]
+            if n.target == torch.ops.quantized_ops.quantize_mx.default:
+                n.args = n.args[:1] + (-1,) + n.args[2:]
 
-            if not is_conv2d(conv_node):
+            if not is_conv2d(n):
                 continue
 
-            logger.debug(f"Permuting weights for {conv_node}")
-            weight_node = conv_node.args[1]
+            weight_node = n.args[1]
             if weight_node.op == "get_attr":
                 param = get_parameter_or_buffer(model, weight_node.target)
+                logger.debug(
+                    f"Permuting weights for {n}: {tuple(param.data.shape)}"
+                    f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
+                )
                 param.data = param.data.permute(2, 3, 1, 0)
 
-            if conv_node.target == torch.ops.quantized_ops.conv2d_mx.default:
-                scale_node = conv_node.kwargs.get("weight_scale")
+            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
+                scale_node = n.kwargs.get("weight_scale")
                 scale = get_parameter_or_buffer(model, scale_node.target)
                 scale.data = scale.data.permute(2, 3, 1, 0)
                 continue
 
-            with graph.inserting_before(conv_node):
+            with graph.inserting_before(n):
                 conv_node = graph.call_function(
-                    torch.ops.quantized_ops.conv2d.default, args=conv_node.args
+                    torch.ops.quantized_ops.conv2d.default, args=n.args
                 )
 
-            logger.debug(f"Replace conv2d node {conv_node} with {conv_node}")
+            logger.debug(f"Replace conv2d node {n} with {conv_node}")
 
-            conv_node.meta = conv_node.meta
-            conv_node.replace_all_uses_with(conv_node)
-            graph.erase_node(conv_node)
+            conv_node.meta = n.meta
+            n.replace_all_uses_with(conv_node)
+            graph.erase_node(n)
 
             swapped_nodes.append(conv_node)
 

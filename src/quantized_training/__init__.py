@@ -149,6 +149,7 @@ def transform(
             aten.adaptive_avg_pool2d.default,
             quantized_ops.adaptive_avg_pool2d.default
         )
+        model.graph.print_tabular()
 
         ShapeProp(model).propagate(*flatten_args)
 
