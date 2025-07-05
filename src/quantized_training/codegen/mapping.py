@@ -1201,7 +1201,7 @@ def run_memory_mapping(
             tensor_sizes[node] = sp_allocator.get_tensor_size(node, tiled_shapes.get(node))
         elif isinstance(node.value, (tuple, list)):
             output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            tensor_sizes[node] = sp_allocator.get_tensor_size(n, output_shapes)
+            tensor_sizes[node] = sp_allocator.get_tensor_size(node, output_shapes)
 
         tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
 
