@@ -1194,7 +1194,7 @@ def run_memory_mapping(
 
         tensor_sizes = {
             n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
-            for n in node.all_input_nodes if "code" not in n.name
+            for n in node.all_input_nodes if not n.name.startswith("code")
         }
 
         if isinstance(node.value, torch.Tensor):
