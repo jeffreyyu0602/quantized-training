@@ -1255,7 +1255,12 @@ def run_l2_tiling(
         return dtype_byte_size(dtype)
 
     for node in list(graph.nodes):
-        if not _is_gemm_op(node):
+        if node.target not in [
+            torch.ops.aten.linear.default,
+            torch.ops.aten.matmul.default,
+            torch.ops.quantized_ops.linear_mx.default,
+            torch.ops.quantized_ops.matmul_mx.default,
+        ]:
             continue
 
         input_node = node.args[0]
@@ -1310,6 +1315,7 @@ def run_l2_tiling(
             node.meta["tiled_shapes"] = {
                 "input": (X_tile, C),
                 weight_key: (C, K_tile) if is_matmul else (K_tile, C),
+                "bias": (K_tile,),
                 "input_scale": (X_tile, C // block_size),
                 "weight_scale": (C // block_size, K_tile) if is_matmul else (K_tile, C // block_size),
                 "output": (X_tile, K_tile),
@@ -1417,6 +1423,7 @@ def run_l2_tiling(
             tiled_gemm.meta["tiled_shapes"] = {
                 "input": (X_tile, C_tile),
                 weight_key: (C_tile, K_tile) if is_matmul else (K_tile, C_tile),
+                "bias": (K_tile,),
                 "input_scale": (X_tile, C_tile // block_size),
                 "weight_scale": (C_tile // block_size, K_tile) if is_matmul else (K_tile, C_tile // block_size),
                 "output": (X_tile, K_tile),
