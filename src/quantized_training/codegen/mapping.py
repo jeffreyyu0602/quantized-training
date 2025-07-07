@@ -1011,7 +1011,7 @@ def run_memory_mapping(
     user_to_last_uses : Dict[Node, List[Node]] = {}
 
     def register_last_uses(n: Node, user: Node):
-        if n not in node_to_last_use:
+        if n not in node_to_last_use and n.op != "get_attr":
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
 
@@ -1019,7 +1019,7 @@ def run_memory_mapping(
         map_arg(node.args, lambda n: register_last_uses(n, node))
         map_arg(node.kwargs, lambda n: register_last_uses(n, node))
 
-    def delete_unused_values(user: Node):
+    def get_unused_values(user: Node):
         """
         Delete values after their last use. This ensures that values that are
         not used in the remainder of the code are freed and the memory usage
@@ -1027,10 +1027,8 @@ def run_memory_mapping(
         """
         nodes_to_delete = user_to_last_uses.get(user, [])
         for n in list(nodes_to_delete):
-            if n.op == "get_attr":
-                continue
             if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
-                nodes_to_delete.extend(delete_unused_values(n))
+                nodes_to_delete.extend(get_unused_values(n))
         return nodes_to_delete
 
     def get_num_bytes(n: Node):
@@ -1053,109 +1051,7 @@ def run_memory_mapping(
                     return [node] + path
         return None
 
-    def allocate_for_stack_op(node: Node):
-        """
-        For stacked layers, place them next to each other so that we can read
-        them using a single memory access in the next operation
-        """
-        nodes = get_path_to_target(
-            node, [torch.ops.aten.stack.default, torch.ops.aten.cat.default]
-        )
-
-        if nodes is not None:
-            stack_node = nodes[-1]
-            # print(f"Found stack node: {stack_node}")
-            if (memory := stack_node.meta.get("memory", None)) is None:
-                memory = allocate_for_stack_op(stack_node)
-
-            tensor_sizes = [n.value.numel() * get_num_bytes(n) for n in stack_node.args[0]]
-
-            index = stack_node.args[0].index(nodes[-2])
-            start_offset = memory.start + sum(tensor_sizes[:index])
-            size = tensor_sizes[index]
-            segment = Segment(start_offset, start_offset + size, allocator.partition_id)
-
-            # TODO: if there is a select/slice operation, and the output has multiple
-            # users, we need to make a copy to avoid overwriting the memory
-            for n in reversed(nodes[:-1]):
-                n.meta["memory"] = segment
-
-            # If the first node is a param node, we need to copy it to the new location
-            input_node = node.all_input_nodes[0]
-            if _is_nop(node) and input_node.meta["memory"].start != segment.start:
-                with graph.inserting_before(node):
-                    copy_node = graph.call_function(
-                        torch.ops.aten.add.Scalar, (input_node, 0)
-                    )
-
-                node.replace_input_with(input_node, copy_node)
-                register_last_uses(copy_node, node)
-
-                copy_node.meta["memory"] = segment
-                copy_node.value, copy_node.shape = input_node.value, input_node.shape
-        elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            # print(f"Allocate stack node: {node}")
-            node.meta["memory"] = allocator.allocate_memory(node)
-
-        return node.meta.get("memory")
-
-    for node in list(model.graph.nodes):
-        if node.op not in ["call_function", "call_module"]:
-            continue
-
-        if "memory" in node.meta:
-            continue
-
-        skip_allocation = False
-
-        # Propagate memory metadata for nop nodes
-        if _is_nop(node):
-            if "memory" not in node.args[0].meta:
-                raise RuntimeError(f"Cannot propagate memory for {node}")
-            node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
-            skip_allocation = True
-
-        if node.target == operator.getitem:
-            input_node = node.args[0]
-            output_sizes = input_node.meta["output_sizes"]
-            start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
-            size = output_sizes[node.args[1]]
-            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
-            skip_allocation = True
-
-        # We do not allocate new memory for select operations. Instead, calculate
-        # the memory offset from the select index
-        # TODO: add slice support
-        if (
-            node.target == torch.ops.aten.select.int and
-            all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
-        ):
-            size = node.value.numel() * get_num_bytes(node)
-            start_offset = node.args[0].meta["memory"].start + node.args[2] * size
-            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
-            skip_allocation = True
-
-        # We use the partition of the first input tensor since it preallocates
-        # memory for all the tensors in the stack operation
-        if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            if len(node.args) != 1 and node.args[1] != 0:
-                raise RuntimeError(f"Unsupported stack operation: {node}")
-            continue
-
-        allocate_for_stack_op(node)
-
-        if skip_allocation:
-            continue
-
-        if node.meta.get("memory") is None:
-            node.meta["memory"] = allocator.allocate_memory(node)
-            allocator.snapshot()
-
-        nodes_to_delete = delete_unused_values(node)
-        for n in nodes_to_delete:
-            if n.op != "get_attr":
-                allocator.free_memory(n)
-
+    def allocate_scratchpad(node: Node):
         # Determine scratchpad memory location
         if node.op == "call_module":
             mod = named_modules[node.target]
@@ -1230,6 +1126,111 @@ def run_memory_mapping(
                 node.meta["tiled_shapes"] = tiled_shapes
         else:
             logger.warning(f"Failed to allocate scratchpad memory for {node}")
+
+    def allocate_for_stack_op(node: Node):
+        """
+        For stacked layers, place them next to each other so that we can read
+        them using a single memory access in the next operation
+        """
+        nodes = get_path_to_target(
+            node, [torch.ops.aten.stack.default, torch.ops.aten.cat.default]
+        )
+
+        if nodes is not None:
+            stack_node = nodes[-1]
+            # print(f"Found stack node: {stack_node}")
+            if (memory := stack_node.meta.get("memory", None)) is None:
+                memory = allocate_for_stack_op(stack_node)
+
+            tensor_sizes = [n.value.numel() * get_num_bytes(n) for n in stack_node.args[0]]
+
+            index = stack_node.args[0].index(nodes[-2])
+            start_offset = memory.start + sum(tensor_sizes[:index])
+            size = tensor_sizes[index]
+            segment = Segment(start_offset, start_offset + size, allocator.partition_id)
+
+            # TODO: if there is a select/slice operation, and the output has multiple
+            # users, we need to make a copy to avoid overwriting the memory
+            for n in reversed(nodes[:-1]):
+                n.meta["memory"] = segment
+
+            # If the first node is a param node, we need to copy it to the new location
+            input_node = node.all_input_nodes[0]
+            if _is_nop(node) and input_node.meta["memory"].start != segment.start:
+                with graph.inserting_before(node):
+                    copy_node = graph.call_function(
+                        torch.ops.aten.add.Scalar, (input_node, 0)
+                    )
+
+                node.replace_input_with(input_node, copy_node)
+                register_last_uses(copy_node, node)
+
+                copy_node.meta["memory"] = segment
+                copy_node.value, copy_node.shape = input_node.value, input_node.shape
+
+                allocate_scratchpad(copy_node)
+        elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            # print(f"Allocate stack node: {node}")
+            node.meta["memory"] = allocator.allocate_memory(node)
+
+        return node.meta.get("memory")
+
+    for node in list(model.graph.nodes):
+        if node.op not in ["call_function", "call_module"]:
+            continue
+
+        if "memory" in node.meta:
+            continue
+
+        skip_allocation = False
+
+        # Propagate memory metadata for nop nodes
+        if _is_nop(node):
+            if "memory" not in node.args[0].meta:
+                raise RuntimeError(f"Cannot propagate memory for {node}")
+            node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
+            skip_allocation = True
+
+        if node.target == operator.getitem:
+            input_node = node.args[0]
+            output_sizes = input_node.meta["output_sizes"]
+            start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
+            size = output_sizes[node.args[1]]
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
+            skip_allocation = True
+
+        # We do not allocate new memory for select operations. Instead, calculate
+        # the memory offset from the select index
+        # TODO: add slice support
+        if (
+            node.target == torch.ops.aten.select.int and
+            all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
+        ):
+            size = node.value.numel() * get_num_bytes(node)
+            start_offset = node.args[0].meta["memory"].start + node.args[2] * size
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
+            skip_allocation = True
+
+        # We use the partition of the first input tensor since it preallocates
+        # memory for all the tensors in the stack operation
+        if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
+            if len(node.args) != 1 and node.args[1] != 0:
+                raise RuntimeError(f"Unsupported stack operation: {node}")
+            continue
+
+        allocate_for_stack_op(node)
+
+        if skip_allocation:
+            continue
+
+        if node.meta.get("memory") is None:
+            node.meta["memory"] = allocator.allocate_memory(node)
+            allocator.snapshot()
+
+        for n in get_unused_values(node):
+            allocator.free_memory(n)
+
+        allocate_scratchpad(node)
 
 
 def gen_code(model, args, output_dir=None):

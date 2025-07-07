@@ -170,8 +170,8 @@ def compile(
     example_kwargs=None,
     total_memory=None,
     cache_size=None,
-    bank_width=None,
     bank_size=None,
+    bank_width=None,
     output_dir=None,
     output_file="compute_graph",
     dump_snapshop=False,
@@ -181,7 +181,7 @@ def compile(
     ShapeProp(model).propagate(*flatten_args)
 
     allocator = MemoryAllocator(total_memory, bank_width, bank_size)
-    run_memory_mapping(model, allocator, cache_size)
+    run_memory_mapping(model, allocator, cache_size, bank_size, bank_width)
 
     if dump_snapshop:
         os.makedirs(output_dir, exist_ok=True)

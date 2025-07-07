@@ -60,7 +60,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     ):
         field.reshape.CopyFrom(map_node(reshape_node))
         field.reshape.kwargs["output_shape"].int_list.values.extend(node.shape)
-        node = reshape_node.args[0] if not is_output else reshape_node
+        node = reshape_node.args[0] if not is_output else node
 
     if (getitem_node := node.meta.get("slicing")) is not None:
         field.reshape.CopyFrom(map_node(getitem_node))
@@ -89,6 +89,9 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if (memory := node.meta.get("memory")) is not None:
         field.memory.partition = memory.partition_id
         field.memory.address = memory.start
+    elif is_output:
+        print(f"Warning: Node {node.name} has no memory allocation.")
+        print(node)
 
     if (scratchpad := original_node.meta.get("scratchpad")) is not None:
         field.scratchpad.offset = scratchpad.start
