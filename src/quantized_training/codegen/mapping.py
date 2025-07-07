@@ -579,7 +579,7 @@ def is_tranpose(node: Node):
     return False
 
 
-def is_mha_permute(node):
+def is_mha_qkv_permute(node):
     """
     Check if the node is a permutation used in multi-head attention (MHA) operations.
     It has characteristics that last dimension is a power of 2 and the permuted
@@ -689,7 +689,7 @@ def fuse_reshape_with_input(
     # Base case: Stop if the node is a GEMM or an elementwise operation
     if (
         _is_gemm_op(current_node) and
-        (is_tranpose(reshape_node) or is_mha_permute(reshape_node)) and
+        (is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)) and
         not "tiled_shapes" in current_node.meta
     ) or (
         _is_elementwise_op(current_node) and not is_tranpose(reshape_node)
@@ -839,34 +839,42 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
         fused_nodes_list = find_sequential_nodes(model, operations)
 
     for node in list(graph.nodes):
-        if is_mha_permute(node):
-            match_found = True
+        # For MHA query, key, and value permutation, we can fuse them their previous
+        # GEMM operation
+        if is_mha_qkv_permute(node):
             input_node = node.all_input_nodes[0]
             fused_nodes = [node]
-            while not _is_gemm_op(input_node) and not _is_elementwise_op(input_node):
+            while not (_is_gemm_op(input_node) or _is_elementwise_op(input_node)):
                 if (
                     len(input_node.users) > 1 or
                     len(input_node.all_input_nodes) != 1 or
                     not _is_nop(input_node)
                 ):
                     logger.debug(f"Cannot fuse {node} with {input_node}")
-                    match_found = False
                     break
 
                 fused_nodes.insert(0, input_node)
                 input_node = input_node.all_input_nodes[0]
+            else:
+                if len(input_node.users) == 1 and "tiled_shapes" not in input_node.meta:
+                    if (group := search_group(input_node, fused_nodes_list)) is not None:
+                        if all("tiled_shapes" not in n.meta for n in group):
+                            nodes_map[node] = input_node
+                            group.extend(n for n in fused_nodes if n not in group)
+                            continue
+                    else:
+                        nodes_map[node] = input_node
+                        fused_nodes_list.append([input_node, *fused_nodes])
+                        continue
 
-            if match_found and len(input_node.users) == 1 and "tiled_shapes" not in input_node.meta:
-                nodes_map[node] = input_node
-                if (group := search_group(input_node, fused_nodes_list)) is not None:
-                    group.extend(n for n in fused_nodes if n not in group)
-                else:
-                    fused_nodes.insert(0, input_node)
-                    fused_nodes_list.append(fused_nodes)
-                continue
-
+        # If the reshape op cannot be fused with its predecesor, attempt to fuse it
+        # with its immediate user
         if _is_reshape_op(node):
-            for n in fuse_reshape_with_input(graph, fused_nodes_list, nodes_map, node):
+            fused_reshape_nodes = fuse_reshape_with_input(
+                graph, fused_nodes_list, nodes_map, node
+            )
+
+            for n in fused_reshape_nodes:
                 if n.target == torch.ops.aten.transpose.int:
                     move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
@@ -903,34 +911,36 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
 
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
-
         gm = named_modules[node.target]
-        nodes = list(gm.graph.nodes)
 
-        for n in nodes:
+        for n in list(gm.graph.nodes):
             if (name := nodes_map.get(n.name, None)) is None:
                 continue
 
-            source_node = next(iter(n for n in nodes if n.name == name))
-            source_node.meta['fused'] = True
+            fused_node = next(iter(n for n in gm.graph.nodes if n.name == name))
+            fused_node.meta['fused'] = True
 
-            if _is_reshape_op(source_node):
-                if next(iter(source_node.users)).op == 'output':
-                    node.meta['reshape'] = source_node
+            if _is_reshape_op(fused_node):
+                if next(iter(fused_node.users)).op == 'output':
+                    node.meta['reshape'] = fused_node
                 else:
-                    n.meta['reshape'] = source_node
+                    n.meta['reshape'] = fused_node
 
-            if _is_indexing_or_concatenation_op(source_node):
-                n.meta['slicing'] = source_node
+            if _is_indexing_or_concatenation_op(fused_node):
+                n.meta['slicing'] = fused_node
 
-            if source_node.target == torch.ops.quantized_ops.dequantize.default:
-                n.meta['dq_scale'] = named_buffers[source_node.args[1].target]
+            if fused_node.target == torch.ops.quantized_ops.dequantize.default:
+                n.meta['dq_scale'] = named_buffers[fused_node.args[1].target]
+
+            if next(iter(fused_node.users)).op != 'output':
+                n.meta['input_node'] = fused_node.args[0]
 
         update_submodule_user(model, node)
 
         args = map_arg(node.args, lambda n: n.value)
         kwargs = map_arg(node.kwargs, lambda n: n.value)
         output = gm(*args, **kwargs)
+
         if isinstance(output, torch.Tensor):
             node.shape = output.shape
             node.value = output.cpu().clone()
@@ -1077,7 +1087,7 @@ def run_memory_mapping(
         if node.op == "call_module" and tiled_shapes:
             output_shape = tiled_shapes[first_node]
             for n in node.all_input_nodes:
-                if n not in tiled_shapes and "code" not in n.name:
+                if n not in tiled_shapes and not n.name.startswith("code"):
                     tiled_shapes[n] = get_tiled_tensor(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
@@ -1109,12 +1119,11 @@ def run_memory_mapping(
 
             # Allocate large tensors first for better cache utilization
             for n, size in tensor_sizes.items():
-                if bank_size is not None:
-                    bytes_to_allocate -= size
-                    align_bank = bytes_to_allocate <= remaining_cache_size - bank_size
-                    remaining_cache_size -= bank_size if align_bank else size
-                else:
-                    align_bank = False
+                aligned_size = sp_allocator.align_size(size, True)
+
+                bytes_to_allocate -= size
+                align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
+                remaining_cache_size -= aligned_size if align_bank else size
 
                 scratchpad_mem[n] = sp_allocator.allocate_memory(
                     n, shape=tiled_shapes.get(n), align_bank=align_bank
@@ -1138,7 +1147,6 @@ def run_memory_mapping(
 
         if nodes is not None:
             stack_node = nodes[-1]
-            # print(f"Found stack node: {stack_node}")
             if (memory := stack_node.meta.get("memory", None)) is None:
                 memory = allocate_for_stack_op(stack_node)
 
@@ -1170,7 +1178,6 @@ def run_memory_mapping(
 
                 allocate_scratchpad(copy_node)
         elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            # print(f"Allocate stack node: {node}")
             node.meta["memory"] = allocator.allocate_memory(node)
 
         return node.meta.get("memory")

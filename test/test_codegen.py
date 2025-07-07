@@ -243,12 +243,10 @@ if __name__ == "__main__":
         "perform_tiling": args.perform_tiling,
     }
 
-    bank_size = None if args.cache_size is None else args.cache_size // args.num_banks
-
     compile_args = {
         "cache_size": args.cache_size,
+        "bank_size": None if args.cache_size is None else args.cache_size // args.num_banks,
         "bank_width": args.bank_width,
-        "bank_size": bank_size,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
     }

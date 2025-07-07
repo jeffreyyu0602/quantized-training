@@ -244,7 +244,8 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
             continue
 
         if isinstance(value, torch.fx.Node):
-            n = value.meta.get("source_node", value)
+            n = value.meta.get("input_node", value)
+            n = n.meta.get("source_node", n)
             if tiled_shapes is not None:
                 value.meta["shape"] = tiled_shapes.get(n)
 
