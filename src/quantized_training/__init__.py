@@ -64,7 +64,7 @@ aten = torch.ops.aten
 quantized_ops = torch.ops.quantized_ops
 OPERATOR_MAPPINGS = {
     "gemm": [nn.Conv2d, nn.Linear, F.conv2d, F.linear, torch.matmul, operator.matmul],
-    "add": ["add", "add_", operator.add, torch.add, operator.iadd],
+    "add": ["add", "add_", operator.add, torch.add, operator.iadd, aten.add.Tensor],
     "sub": ["sub", "sub_", operator.sub, torch.sub, operator.isub],
     "mul": ["mul", "mul_", operator.mul, torch.mul, operator.imul],
     "div": ["div", "div_", operator.truediv, torch.div, operator.itruediv],
@@ -132,7 +132,7 @@ def transform(
     convert_cat_with_mismatched_shapes_to_stack(model)
 
     if perform_tiling:
-        run_tiling(model, cache_size, num_banks, block_size)
+        run_l2_tiling(model, cache_size, num_banks, block_size)
 
     if conv2d_padding is not None:
         pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
@@ -149,6 +149,7 @@ def transform(
             aten.adaptive_avg_pool2d.default,
             quantized_ops.adaptive_avg_pool2d.default
         )
+        model.graph.print_tabular()
 
         ShapeProp(model).propagate(*flatten_args)
 
@@ -168,9 +169,9 @@ def compile(
     example_args,
     example_kwargs=None,
     total_memory=None,
-    bank_width=None,
+    cache_size=None,
     bank_size=None,
-    weight_persistent=True,
+    bank_width=None,
     output_dir=None,
     output_file="compute_graph",
     dump_snapshop=False,
@@ -179,25 +180,23 @@ def compile(
 
     ShapeProp(model).propagate(*flatten_args)
 
-    allocator = MemoryAllocator(
-        total_memory, bank_width=bank_width, bank_size=bank_size
-    )
-    run_memory_mapping(model, allocator, weight_persistent)
+    allocator = MemoryAllocator(total_memory, bank_width, bank_size)
+    run_memory_mapping(model, allocator, cache_size, bank_size, bank_width)
 
     if dump_snapshop:
         os.makedirs(output_dir, exist_ok=True)
         allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
-    model_params = gen_code(
+    params = gen_code(
         model, flatten_args, os.path.join(output_dir, "tensor_files")
     )
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:
-        f.write(text_format.MessageToString(model_params))
+        f.write(text_format.MessageToString(params))
 
     operations = [
         op.op.name if op.WhichOneof('op_type') == 'op' else op.fused_op.name
-        for op in model_params.ops if op.op.op != 'nop'
+        for op in params.ops if op.op.op != 'nop'
     ]
 
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:

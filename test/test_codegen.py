@@ -117,7 +117,7 @@ def get_mp_qscheme(bs=64):
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-    torch.set_printoptions(precision=10)
+    torch.set_printoptions(sci_mode=False, precision=10)
     torch.set_num_threads(32)
 
     parser = argparse.ArgumentParser()
@@ -169,15 +169,21 @@ if __name__ == "__main__":
         help="Block size for quantization."
     )
     parser.add_argument(
-       "--bank_size",
+        "--cache_size",
         type=int,
-        default=None,
-        help="Total memory size in bytes in each bank of memory."
+        default=1024 * 1024,
+        help="Total L2 SRAM size in SoC."
     )
     parser.add_argument(
-        "--weight_persistent",
+        "--num_banks",
+        type=int,
+        default=8,
+        help="Number of banks in the accelerator."
+    )
+    parser.add_argument(
+        "--perform_tiling",
         action="store_true",
-        help="Whether to keep weights in memory during inference."
+        help="Whether to perform tiling for GEMM and Conv2D operations."
     )
     parser.add_argument(
         "--transpose_weight",
@@ -234,9 +240,9 @@ if __name__ == "__main__":
     }
 
     compile_args = {
+        "cache_size": args.cache_size,
+        "bank_size": None if args.cache_size is None else args.cache_size // args.num_banks,
         "bank_width": args.bank_width,
-        "bank_size": args.bank_size,
-        "weight_persistent": args.weight_persistent,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
     }

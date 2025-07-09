@@ -89,6 +89,9 @@ extern OperationDefaultTypeInternal _Operation_default_instance_;
 class ScalarList;
 struct ScalarListDefaultTypeInternal;
 extern ScalarListDefaultTypeInternal _ScalarList_default_instance_;
+class ScratchpadInfo;
+struct ScratchpadInfoDefaultTypeInternal;
+extern ScratchpadInfoDefaultTypeInternal _ScratchpadInfo_default_instance_;
 class Tensor;
 struct TensorDefaultTypeInternal;
 extern TensorDefaultTypeInternal _Tensor_default_instance_;
@@ -107,6 +110,193 @@ namespace codegen {
 
 
 // -------------------------------------------------------------------
+
+class ScratchpadInfo final :
+    public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.ScratchpadInfo) */ {
+ public:
+  inline ScratchpadInfo() : ScratchpadInfo(nullptr) {}
+  ~ScratchpadInfo() override;
+  template<typename = void>
+  explicit PROTOBUF_CONSTEXPR ScratchpadInfo(::google::protobuf::internal::ConstantInitialized);
+
+  inline ScratchpadInfo(const ScratchpadInfo& from)
+      : ScratchpadInfo(nullptr, from) {}
+  ScratchpadInfo(ScratchpadInfo&& from) noexcept
+    : ScratchpadInfo() {
+    *this = ::std::move(from);
+  }
+
+  inline ScratchpadInfo& operator=(const ScratchpadInfo& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline ScratchpadInfo& operator=(ScratchpadInfo&& from) noexcept {
+    if (this == &from) return *this;
+    if (GetArena() == from.GetArena()
+  #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
+        && GetArena() != nullptr
+  #endif  // !PROTOBUF_FORCE_COPY_IN_MOVE
+    ) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(::google::protobuf::UnknownFieldSet::default_instance);
+  }
+  inline ::google::protobuf::UnknownFieldSet* mutable_unknown_fields()
+      ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+  }
+
+  static const ::google::protobuf::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::google::protobuf::Descriptor* GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::google::protobuf::Reflection* GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const ScratchpadInfo& default_instance() {
+    return *internal_default_instance();
+  }
+  static inline const ScratchpadInfo* internal_default_instance() {
+    return reinterpret_cast<const ScratchpadInfo*>(
+               &_ScratchpadInfo_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    1;
+
+  friend void swap(ScratchpadInfo& a, ScratchpadInfo& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(ScratchpadInfo* other) {
+    if (other == this) return;
+  #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() != nullptr &&
+        GetArena() == other->GetArena()) {
+   #else  // PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetArena() == other->GetArena()) {
+  #endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+      InternalSwap(other);
+    } else {
+      ::google::protobuf::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(ScratchpadInfo* other) {
+    if (other == this) return;
+    ABSL_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  ScratchpadInfo* New(::google::protobuf::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<ScratchpadInfo>(arena);
+  }
+  using ::google::protobuf::Message::CopyFrom;
+  void CopyFrom(const ScratchpadInfo& from);
+  using ::google::protobuf::Message::MergeFrom;
+  void MergeFrom( const ScratchpadInfo& from) {
+    ScratchpadInfo::MergeImpl(*this, from);
+  }
+  private:
+  static void MergeImpl(::google::protobuf::Message& to_msg, const ::google::protobuf::Message& from_msg);
+  public:
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  ::size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::google::protobuf::internal::ParseContext* ctx) final;
+  ::uint8_t* _InternalSerialize(
+      ::uint8_t* target, ::google::protobuf::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const { return _impl_._cached_size_.Get(); }
+
+  private:
+  ::google::protobuf::internal::CachedSize* AccessCachedSize() const final;
+  void SharedCtor(::google::protobuf::Arena* arena);
+  void SharedDtor();
+  void InternalSwap(ScratchpadInfo* other);
+
+  private:
+  friend class ::google::protobuf::internal::AnyMetadata;
+  static ::absl::string_view FullMessageName() {
+    return "codegen.ScratchpadInfo";
+  }
+  protected:
+  explicit ScratchpadInfo(::google::protobuf::Arena* arena);
+  ScratchpadInfo(::google::protobuf::Arena* arena, const ScratchpadInfo& from);
+  public:
+
+  static const ClassData _class_data_;
+  const ::google::protobuf::Message::ClassData*GetClassData() const final;
+
+  ::google::protobuf::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kOffsetFieldNumber = 2,
+    kBankFieldNumber = 1,
+  };
+  // uint64 offset = 2;
+  void clear_offset() ;
+  ::uint64_t offset() const;
+  void set_offset(::uint64_t value);
+
+  private:
+  ::uint64_t _internal_offset() const;
+  void _internal_set_offset(::uint64_t value);
+
+  public:
+  // int32 bank = 1;
+  void clear_bank() ;
+  ::int32_t bank() const;
+  void set_bank(::int32_t value);
+
+  private:
+  ::int32_t _internal_bank() const;
+  void _internal_set_bank(::int32_t value);
+
+  public:
+  // @@protoc_insertion_point(class_scope:codegen.ScratchpadInfo)
+ private:
+  class _Internal;
+
+  friend class ::google::protobuf::internal::TcParser;
+  static const ::google::protobuf::internal::TcParseTable<
+      1, 2, 0,
+      0, 2>
+      _table_;
+  friend class ::google::protobuf::MessageLite;
+  friend class ::google::protobuf::Arena;
+  template <typename T>
+  friend class ::google::protobuf::Arena::InternalHelper;
+  using InternalArenaConstructable_ = void;
+  using DestructorSkippable_ = void;
+  struct Impl_ {
+
+        inline explicit constexpr Impl_(
+            ::google::protobuf::internal::ConstantInitialized) noexcept;
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena);
+        inline explicit Impl_(::google::protobuf::internal::InternalVisibility visibility,
+                              ::google::protobuf::Arena* arena, const Impl_& from);
+    ::uint64_t offset_;
+    ::int32_t bank_;
+    mutable ::google::protobuf::internal::CachedSize _cached_size_;
+    PROTOBUF_TSAN_DECLARE_MEMBER
+  };
+  union { Impl_ _impl_; };
+  friend struct ::TableStruct_param_2eproto;
+};// -------------------------------------------------------------------
 
 class ScalarList final :
     public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:codegen.ScalarList) */ {
@@ -167,7 +357,7 @@ class ScalarList final :
                &_ScalarList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    5;
+    6;
 
   friend void swap(ScalarList& a, ScalarList& b) {
     a.Swap(&b);
@@ -423,10 +613,10 @@ class Memory final :
   // accessors -------------------------------------------------------
 
   enum : int {
-    kAddressFieldNumber = 2,
-    kPartitionFieldNumber = 1,
+    kAddressFieldNumber = 3,
+    kPartitionFieldNumber = 2,
   };
-  // uint64 address = 2;
+  // uint64 address = 3;
   void clear_address() ;
   ::uint64_t address() const;
   void set_address(::uint64_t value);
@@ -436,7 +626,7 @@ class Memory final :
   void _internal_set_address(::uint64_t value);
 
   public:
-  // int32 partition = 1;
+  // int32 partition = 2;
   void clear_partition() ;
   ::int32_t partition() const;
   void set_partition(::int32_t value);
@@ -537,7 +727,7 @@ class IntList final :
                &_IntList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    3;
+    4;
 
   friend void swap(IntList& a, IntList& b) {
     a.Swap(&b);
@@ -721,7 +911,7 @@ class BoolList final :
                &_BoolList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    4;
+    5;
 
   friend void swap(BoolList& a, BoolList& b) {
     a.Swap(&b);
@@ -917,7 +1107,7 @@ class Argument final :
                &_Argument_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    6;
+    7;
 
   friend void swap(Argument& a, Argument& b) {
     a.Swap(&b);
@@ -1263,7 +1453,7 @@ class OpOverload final :
                &_OpOverload_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    8;
+    9;
 
   friend void swap(OpOverload& a, OpOverload& b) {
     a.Swap(&b);
@@ -1549,7 +1739,7 @@ class Tensor final :
                &_Tensor_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    1;
+    2;
 
   friend void swap(Tensor& a, Tensor& b) {
     a.Swap(&b);
@@ -1626,9 +1816,10 @@ class Tensor final :
     kNodeFieldNumber = 1,
     kDtypeFieldNumber = 3,
     kMemoryFieldNumber = 4,
-    kReshapeFieldNumber = 6,
-    kScaleFieldNumber = 5,
-    kIsNoneFieldNumber = 7,
+    kScratchpadFieldNumber = 5,
+    kReshapeFieldNumber = 7,
+    kScaleFieldNumber = 6,
+    kIsNoneFieldNumber = 8,
   };
   // repeated int32 shape = 2;
   int shape_size() const;
@@ -1695,7 +1886,22 @@ class Tensor final :
   ::codegen::Memory* _internal_mutable_memory();
 
   public:
-  // optional .codegen.OpOverload reshape = 6;
+  // optional .codegen.ScratchpadInfo scratchpad = 5;
+  bool has_scratchpad() const;
+  void clear_scratchpad() ;
+  const ::codegen::ScratchpadInfo& scratchpad() const;
+  PROTOBUF_NODISCARD ::codegen::ScratchpadInfo* release_scratchpad();
+  ::codegen::ScratchpadInfo* mutable_scratchpad();
+  void set_allocated_scratchpad(::codegen::ScratchpadInfo* value);
+  void unsafe_arena_set_allocated_scratchpad(::codegen::ScratchpadInfo* value);
+  ::codegen::ScratchpadInfo* unsafe_arena_release_scratchpad();
+
+  private:
+  const ::codegen::ScratchpadInfo& _internal_scratchpad() const;
+  ::codegen::ScratchpadInfo* _internal_mutable_scratchpad();
+
+  public:
+  // optional .codegen.OpOverload reshape = 7;
   bool has_reshape() const;
   void clear_reshape() ;
   const ::codegen::OpOverload& reshape() const;
@@ -1710,7 +1916,7 @@ class Tensor final :
   ::codegen::OpOverload* _internal_mutable_reshape();
 
   public:
-  // optional double scale = 5;
+  // optional double scale = 6;
   bool has_scale() const;
   void clear_scale() ;
   double scale() const;
@@ -1721,7 +1927,7 @@ class Tensor final :
   void _internal_set_scale(double value);
 
   public:
-  // bool is_none = 7;
+  // bool is_none = 8;
   void clear_is_none() ;
   bool is_none() const;
   void set_is_none(bool value);
@@ -1737,8 +1943,8 @@ class Tensor final :
 
   friend class ::google::protobuf::internal::TcParser;
   static const ::google::protobuf::internal::TcParseTable<
-      3, 7, 2,
-      32, 2>
+      3, 8, 3,
+      40, 2>
       _table_;
   friend class ::google::protobuf::MessageLite;
   friend class ::google::protobuf::Arena;
@@ -1761,6 +1967,7 @@ class Tensor final :
     ::google::protobuf::internal::ArenaStringPtr node_;
     ::google::protobuf::internal::ArenaStringPtr dtype_;
     ::codegen::Memory* memory_;
+    ::codegen::ScratchpadInfo* scratchpad_;
     ::codegen::OpOverload* reshape_;
     double scale_;
     bool is_none_;
@@ -1829,7 +2036,7 @@ class TensorList final :
                &_TensorList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    2;
+    3;
 
   friend void swap(TensorList& a, TensorList& b) {
     a.Swap(&b);
@@ -2012,7 +2219,7 @@ class OpOverloadList final :
                &_OpOverloadList_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    9;
+    10;
 
   friend void swap(OpOverloadList& a, OpOverloadList& b) {
     a.Swap(&b);
@@ -2225,7 +2432,7 @@ class Operation final :
                &_Operation_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    10;
+    11;
 
   friend void swap(Operation& a, Operation& b) {
     a.Swap(&b);
@@ -2496,7 +2703,7 @@ class Model final :
                &_Model_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    11;
+    12;
 
   friend void swap(Model& a, Model& b) {
     a.Swap(&b);
@@ -2676,7 +2883,7 @@ class Model final :
 
 // Memory
 
-// int32 partition = 1;
+// int32 partition = 2;
 inline void Memory::clear_partition() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_.partition_ = 0;
@@ -2699,7 +2906,7 @@ inline void Memory::_internal_set_partition(::int32_t value) {
   _impl_.partition_ = value;
 }
 
-// uint64 address = 2;
+// uint64 address = 3;
 inline void Memory::clear_address() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_.address_ = ::uint64_t{0u};
@@ -2720,6 +2927,56 @@ inline void Memory::_internal_set_address(::uint64_t value) {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   ;
   _impl_.address_ = value;
+}
+
+// -------------------------------------------------------------------
+
+// ScratchpadInfo
+
+// int32 bank = 1;
+inline void ScratchpadInfo::clear_bank() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.bank_ = 0;
+}
+inline ::int32_t ScratchpadInfo::bank() const {
+  // @@protoc_insertion_point(field_get:codegen.ScratchpadInfo.bank)
+  return _internal_bank();
+}
+inline void ScratchpadInfo::set_bank(::int32_t value) {
+  _internal_set_bank(value);
+  // @@protoc_insertion_point(field_set:codegen.ScratchpadInfo.bank)
+}
+inline ::int32_t ScratchpadInfo::_internal_bank() const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.bank_;
+}
+inline void ScratchpadInfo::_internal_set_bank(::int32_t value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ;
+  _impl_.bank_ = value;
+}
+
+// uint64 offset = 2;
+inline void ScratchpadInfo::clear_offset() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.offset_ = ::uint64_t{0u};
+}
+inline ::uint64_t ScratchpadInfo::offset() const {
+  // @@protoc_insertion_point(field_get:codegen.ScratchpadInfo.offset)
+  return _internal_offset();
+}
+inline void ScratchpadInfo::set_offset(::uint64_t value) {
+  _internal_set_offset(value);
+  // @@protoc_insertion_point(field_set:codegen.ScratchpadInfo.offset)
+}
+inline ::uint64_t ScratchpadInfo::_internal_offset() const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.offset_;
+}
+inline void ScratchpadInfo::_internal_set_offset(::uint64_t value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  ;
+  _impl_.offset_ = value;
 }
 
 // -------------------------------------------------------------------
@@ -2973,15 +3230,111 @@ inline void Tensor::set_allocated_memory(::codegen::Memory* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.memory)
 }
 
-// optional double scale = 5;
+// optional .codegen.ScratchpadInfo scratchpad = 5;
+inline bool Tensor::has_scratchpad() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000002u) != 0;
+  PROTOBUF_ASSUME(!value || _impl_.scratchpad_ != nullptr);
+  return value;
+}
+inline void Tensor::clear_scratchpad() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (_impl_.scratchpad_ != nullptr) _impl_.scratchpad_->Clear();
+  _impl_._has_bits_[0] &= ~0x00000002u;
+}
+inline const ::codegen::ScratchpadInfo& Tensor::_internal_scratchpad() const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  const ::codegen::ScratchpadInfo* p = _impl_.scratchpad_;
+  return p != nullptr ? *p : reinterpret_cast<const ::codegen::ScratchpadInfo&>(::codegen::_ScratchpadInfo_default_instance_);
+}
+inline const ::codegen::ScratchpadInfo& Tensor::scratchpad() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:codegen.Tensor.scratchpad)
+  return _internal_scratchpad();
+}
+inline void Tensor::unsafe_arena_set_allocated_scratchpad(::codegen::ScratchpadInfo* value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (GetArena() == nullptr) {
+    delete reinterpret_cast<::google::protobuf::MessageLite*>(_impl_.scratchpad_);
+  }
+  _impl_.scratchpad_ = reinterpret_cast<::codegen::ScratchpadInfo*>(value);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000002u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000002u;
+  }
+  // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Tensor.scratchpad)
+}
+inline ::codegen::ScratchpadInfo* Tensor::release_scratchpad() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+
+  _impl_._has_bits_[0] &= ~0x00000002u;
+  ::codegen::ScratchpadInfo* released = _impl_.scratchpad_;
+  _impl_.scratchpad_ = nullptr;
+#ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
+  auto* old = reinterpret_cast<::google::protobuf::MessageLite*>(released);
+  released = ::google::protobuf::internal::DuplicateIfNonNull(released);
+  if (GetArena() == nullptr) {
+    delete old;
+  }
+#else   // PROTOBUF_FORCE_COPY_IN_RELEASE
+  if (GetArena() != nullptr) {
+    released = ::google::protobuf::internal::DuplicateIfNonNull(released);
+  }
+#endif  // !PROTOBUF_FORCE_COPY_IN_RELEASE
+  return released;
+}
+inline ::codegen::ScratchpadInfo* Tensor::unsafe_arena_release_scratchpad() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  // @@protoc_insertion_point(field_release:codegen.Tensor.scratchpad)
+
+  _impl_._has_bits_[0] &= ~0x00000002u;
+  ::codegen::ScratchpadInfo* temp = _impl_.scratchpad_;
+  _impl_.scratchpad_ = nullptr;
+  return temp;
+}
+inline ::codegen::ScratchpadInfo* Tensor::_internal_mutable_scratchpad() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  if (_impl_.scratchpad_ == nullptr) {
+    auto* p = CreateMaybeMessage<::codegen::ScratchpadInfo>(GetArena());
+    _impl_.scratchpad_ = reinterpret_cast<::codegen::ScratchpadInfo*>(p);
+  }
+  return _impl_.scratchpad_;
+}
+inline ::codegen::ScratchpadInfo* Tensor::mutable_scratchpad() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::codegen::ScratchpadInfo* _msg = _internal_mutable_scratchpad();
+  // @@protoc_insertion_point(field_mutable:codegen.Tensor.scratchpad)
+  return _msg;
+}
+inline void Tensor::set_allocated_scratchpad(::codegen::ScratchpadInfo* value) {
+  ::google::protobuf::Arena* message_arena = GetArena();
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (message_arena == nullptr) {
+    delete reinterpret_cast<::codegen::ScratchpadInfo*>(_impl_.scratchpad_);
+  }
+
+  if (value != nullptr) {
+    ::google::protobuf::Arena* submessage_arena = reinterpret_cast<::codegen::ScratchpadInfo*>(value)->GetArena();
+    if (message_arena != submessage_arena) {
+      value = ::google::protobuf::internal::GetOwnedMessage(message_arena, value, submessage_arena);
+    }
+    _impl_._has_bits_[0] |= 0x00000002u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000002u;
+  }
+
+  _impl_.scratchpad_ = reinterpret_cast<::codegen::ScratchpadInfo*>(value);
+  // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.scratchpad)
+}
+
+// optional double scale = 6;
 inline bool Tensor::has_scale() const {
-  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
+  bool value = (_impl_._has_bits_[0] & 0x00000008u) != 0;
   return value;
 }
 inline void Tensor::clear_scale() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_.scale_ = 0;
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000008u;
 }
 inline double Tensor::scale() const {
   // @@protoc_insertion_point(field_get:codegen.Tensor.scale)
@@ -2997,20 +3350,20 @@ inline double Tensor::_internal_scale() const {
 }
 inline void Tensor::_internal_set_scale(double value) {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
-  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_._has_bits_[0] |= 0x00000008u;
   _impl_.scale_ = value;
 }
 
-// optional .codegen.OpOverload reshape = 6;
+// optional .codegen.OpOverload reshape = 7;
 inline bool Tensor::has_reshape() const {
-  bool value = (_impl_._has_bits_[0] & 0x00000002u) != 0;
+  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.reshape_ != nullptr);
   return value;
 }
 inline void Tensor::clear_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   if (_impl_.reshape_ != nullptr) _impl_.reshape_->Clear();
-  _impl_._has_bits_[0] &= ~0x00000002u;
+  _impl_._has_bits_[0] &= ~0x00000004u;
 }
 inline const ::codegen::OpOverload& Tensor::_internal_reshape() const {
   PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
@@ -3028,16 +3381,16 @@ inline void Tensor::unsafe_arena_set_allocated_reshape(::codegen::OpOverload* va
   }
   _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(value);
   if (value != nullptr) {
-    _impl_._has_bits_[0] |= 0x00000002u;
+    _impl_._has_bits_[0] |= 0x00000004u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000002u;
+    _impl_._has_bits_[0] &= ~0x00000004u;
   }
   // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Tensor.reshape)
 }
 inline ::codegen::OpOverload* Tensor::release_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
 
-  _impl_._has_bits_[0] &= ~0x00000002u;
+  _impl_._has_bits_[0] &= ~0x00000004u;
   ::codegen::OpOverload* released = _impl_.reshape_;
   _impl_.reshape_ = nullptr;
 #ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
@@ -3057,14 +3410,14 @@ inline ::codegen::OpOverload* Tensor::unsafe_arena_release_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   // @@protoc_insertion_point(field_release:codegen.Tensor.reshape)
 
-  _impl_._has_bits_[0] &= ~0x00000002u;
+  _impl_._has_bits_[0] &= ~0x00000004u;
   ::codegen::OpOverload* temp = _impl_.reshape_;
   _impl_.reshape_ = nullptr;
   return temp;
 }
 inline ::codegen::OpOverload* Tensor::_internal_mutable_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
-  _impl_._has_bits_[0] |= 0x00000002u;
+  _impl_._has_bits_[0] |= 0x00000004u;
   if (_impl_.reshape_ == nullptr) {
     auto* p = CreateMaybeMessage<::codegen::OpOverload>(GetArena());
     _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(p);
@@ -3088,16 +3441,16 @@ inline void Tensor::set_allocated_reshape(::codegen::OpOverload* value) {
     if (message_arena != submessage_arena) {
       value = ::google::protobuf::internal::GetOwnedMessage(message_arena, value, submessage_arena);
     }
-    _impl_._has_bits_[0] |= 0x00000002u;
+    _impl_._has_bits_[0] |= 0x00000004u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000002u;
+    _impl_._has_bits_[0] &= ~0x00000004u;
   }
 
   _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(value);
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.reshape)
 }
 
-// bool is_none = 7;
+// bool is_none = 8;
 inline void Tensor::clear_is_none() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_.is_none_ = false;
