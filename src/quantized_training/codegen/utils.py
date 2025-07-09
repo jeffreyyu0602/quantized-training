@@ -709,6 +709,7 @@ def linear_transposed(input: torch.Tensor, weight: torch.Tensor, bias: torch.Ten
 def is_conv2d(node: Node) -> bool:
     return node.op == "call_function" and node.target in [
         torch.ops.aten.conv2d.default,
+        torch.ops.quantized_ops.conv2d.default,
         torch.ops.quantized_ops.conv2d_mx.default
     ]
 
@@ -766,6 +767,11 @@ def transpose_conv2d_weights(model: GraphModule):
             torch.ops.aten.adaptive_avg_pool2d.default,
             torch.ops.aten.max_pool2d.default,
         ]:
+            continue
+        
+        groups = node.args[6] if len(node.args) > 6 else 1
+        if groups > 1:
+            print(f"Skipping {node} with groups > 1: {groups}")
             continue
 
         if node in visited:
