@@ -1,6 +1,7 @@
 import collections
 import itertools
 import logging
+import math
 import operator
 from itertools import repeat
 from typing import Callable, List, Set, Tuple, Union
@@ -43,7 +44,7 @@ __all__ = [
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
     "rewrite_fx_graph",
-    "run_tiling",
+    "run_l2_tiling",
     "transpose_linear_weights",
     "strip_softmax_dtype",
 ]
@@ -76,10 +77,10 @@ def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
             len(node.args[0].users) == 1 and
             node.args[5] == False  # inference mode
         ):
-            conv_node = node.args[0]
+            n = node.args[0]
 
-            conv_w = model.get_parameter(conv_node.args[1])
-            conv_b = model.get_parameter(conv_node.args[2])
+            conv_w = model.get_parameter(n.args[1])
+            conv_b = model.get_parameter(n.args[2])
 
             bn_w = model.get_parameter(node.args[1])
             bn_b = model.get_parameter(node.args[2])
@@ -91,10 +92,10 @@ def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
                 conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b
             )
 
-            model.register_parameter(conv_node.args[1].target, fused_conv_w)
-            model.register_parameter(conv_node.args[2].target, fused_conv_b)
+            model.register_parameter(n.args[1].target, fused_conv_w)
+            model.register_parameter(n.args[2].target, fused_conv_b)
 
-            node.replace_all_uses_with(conv_node)
+            node.replace_all_uses_with(n)
             model.graph.erase_node(node)
 
     model.graph.lint()
@@ -691,7 +692,7 @@ def conv2d_transposed(
     dilation: Union[int, Tuple[int]] = 1,
     groups: int = 1,
 ) -> torch.Tensor:
-    return torch.ops.aten.conv2d.default(
+    output = torch.ops.aten.conv2d.default(
         input.permute(0, 3, 1, 2),
         weight.permute(3, 2, 0, 1),
         bias,
@@ -699,11 +700,8 @@ def conv2d_transposed(
         _pair(padding),
         _pair(dilation),
         groups,
-    ).permute(0, 2, 3, 1)
-
-
-def linear_transposed(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
-    return torch.ops.aten.linear.default(input, weight.T, bias)
+    )
+    return output.permute(0, 2, 3, 1)
 
 
 def is_conv2d(node: Node) -> bool:
@@ -773,13 +771,12 @@ def transpose_conv2d_weights(model: GraphModule):
 
         conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
 
-        # Insert pre-permute before each input point
-        pre_permute_nodes = {}
-        post_permute_nodes = {}
-        node_map = {}
+        permute_nodes = {}
+        swapped_nodes = []
+
         for n in conv_chain:
             for arg in n.all_input_nodes:
-                if arg in conv_chain or arg.op == "get_attr" or arg in node_map:
+                if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
                     continue
 
                 # Handle the special case where weight is not a get_attr node
@@ -797,15 +794,15 @@ def transpose_conv2d_weights(model: GraphModule):
 
                 logger.debug(f"Insert permute before {arg} with dims {dims}")
 
-                if arg not in pre_permute_nodes:
+                if arg not in permute_nodes:
                     with graph.inserting_after(arg):
-                        pre_permute_nodes[arg] = graph.call_function(
+                        permute_nodes[arg] = graph.call_function(
                             torch.ops.aten.permute.default, (arg, dims),
                         )
-                n.replace_input_with(arg, pre_permute_nodes[arg])
+                n.replace_input_with(arg, permute_nodes[arg])
 
             for user in list(n.users.keys()):
-                if user in conv_chain or user in node_map:
+                if user in conv_chain or user in swapped_nodes:
                     continue
                 logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
@@ -820,10 +817,13 @@ def transpose_conv2d_weights(model: GraphModule):
             if not is_conv2d(n):
                 continue
 
-            logger.debug(f"Permuting weights for {n}")
             weight_node = n.args[1]
             if weight_node.op == "get_attr":
                 param = get_parameter_or_buffer(model, weight_node.target)
+                logger.debug(
+                    f"Permuting weights for {n}: {tuple(param.data.shape)}"
+                    f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
+                )
                 param.data = param.data.permute(2, 3, 1, 0)
 
             if n.target == torch.ops.quantized_ops.conv2d_mx.default:
@@ -843,7 +843,7 @@ def transpose_conv2d_weights(model: GraphModule):
             n.replace_all_uses_with(conv_node)
             graph.erase_node(n)
 
-            node_map[conv_node] = n
+            swapped_nodes.append(conv_node)
 
     graph.lint()
     model.recompile()
@@ -895,6 +895,24 @@ def eliminate_reshape_with_no_effect(model: GraphModule):
     return model
 
 
+def linear_transposed(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None
+) -> torch.Tensor:
+    return torch.ops.aten.linear.default(input, weight.T, bias)
+
+
+def linear_transposed_without_fc(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None
+) -> torch.Tensor:
+    if math.prod(input.shape[:-1]) == 1:
+        return torch.ops.aten.linear.default(input, weight, bias)
+    return torch.ops.aten.linear.default(input, weight.T, bias)
+
+
 def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     """
     Transpose the weights of linear layers in the given FX graph module.
@@ -906,7 +924,9 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     Returns:
         GraphModule: The transformed FX graph module with transposed weights.
     """
-    torch.nn.functional.linear = linear_transposed
+    torch.nn.functional.linear = (
+        linear_transposed if transpose_fc else linear_transposed_without_fc
+    )
 
     for node in model.graph.nodes: 
         if node.target not in [
@@ -917,12 +937,22 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
 
         input_node = node.args[0]
         input_shape = input_node.value.shape
-        if not transpose_fc and sum(input_shape[:-1]) == 1:
+
+        # TODO: handle torch.matmul second operand when not transposing FC
+        if not transpose_fc and math.prod(input_shape[:-1]) == 1:
             continue
 
         weight_node = node.args[1]
         weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
+
+        if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
+            shape = tiled_shapes["weight"]
+            tiled_shapes["weight"] = (shape[1], shape[0])
+
+            if "weight_scale" in tiled_shapes:
+                scale_shape = tiled_shapes["weight_scale"]
+                tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
 
         if node.target == torch.ops.quantized_ops.linear_mx.default:
             scale_node = node.kwargs.get("weight_scale")
@@ -1165,7 +1195,35 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def run_tiling(
+def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, output_byte=2):
+    def snap(x): return int((x // unroll) * unroll)
+
+    X_tile = X
+    C_tile = snap(C)
+    K_tile = snap(K)
+
+    # Shrink K_tile first
+    while True:
+        mem = (
+            X_tile * C_tile * input_byte +
+            C_tile * K_tile * weight_byte +
+            X_tile * K_tile * output_byte
+        )
+        if mem <= max_mem_bytes:
+            break
+        if K_tile > unroll:
+            K_tile = snap(K_tile / 2)
+        elif X_tile > 128:
+            X_tile = int(X_tile / 2)
+        elif C_tile > unroll:
+            C_tile = snap(C_tile / 2)
+        else:
+            raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
+
+    return X_tile, C_tile, K_tile
+
+
+def run_l2_tiling(
     model,
     cache_size=1 * 1024 * 1024,
     num_bank=4,
@@ -1196,19 +1254,13 @@ def run_tiling(
         dtype = n.meta.get("dtype", getattr(n.value, "dtype", None))
         return dtype_byte_size(dtype)
 
-    def get_largest_valid_tile(max_tile, unroll, full_dim):
-        """
-        Get the largest tile size ≤ max_tile that:
-            - is a multiple of `unroll`
-            - divides `full_dim` exactly
-        """
-        for tile in reversed(range(unroll, max_tile + 1, unroll)):
-            if full_dim % tile == 0:
-                return tile
-        return None
-
     for node in list(graph.nodes):
-        if not _is_gemm_op(node):
+        if node.target not in [
+            torch.ops.aten.linear.default,
+            torch.ops.aten.matmul.default,
+            torch.ops.quantized_ops.linear_mx.default,
+            torch.ops.quantized_ops.matmul_mx.default,
+        ]:
             continue
 
         input_node = node.args[0]
@@ -1222,71 +1274,65 @@ def run_tiling(
         input_bytes = get_num_bytes(input_node)
         weight_bytes = get_num_bytes(weight_node)
 
-        if node.target == torch.ops.aten.matmul.default:
+        is_matmul = node.target in [
+            torch.ops.aten.matmul.default, torch.ops.quantized_ops.matmul_mx.default
+        ]
+        if is_matmul:
             C = int(weight_value.shape[0])
             K = int(weight_value.shape[1])
             reduction_dim = -2
+            weight_key = "other"
         else:
             C = int(weight_value.shape[1])
             K = int(weight_value.shape[0])
             reduction_dim = -1
+            weight_key = "weight"
 
         X = int(input_value.numel() / C)
+        total_size = X * C * input_bytes + C * K * weight_bytes + X * K * 2
 
-        total_size = (input_value.numel() * input_bytes +
-                      weight_value.numel() * weight_bytes)
-        if total_size <= cache_size or X == 1:
+        if total_size <= cache_size:
+            logger.info(f"{node}: X={X}, C={C}, K={K}, total_size={total_size} fits in cache, no tiling needed.")
             continue
 
-        cache_per_bank = cache_size / num_bank
-
-        # --- Step 1: Fit inputs (X_tile x C_tile) into bank ---
-
-        # X tile larger than 512 will be handled in the outer loops. Constraining X
-        # to reduce C channel splitting.
-        X_tile = min(X, 512)
-        while (max_c_tile := int(cache_per_bank / (X_tile * input_bytes))) < ic_unroll:
-            if X_tile == 1:
-                raise ValueError(
-                    f"Cannot tile {node} with X={X}, C={C}, K={K} to fit cache size {cache_size}."
-                )
-            X_tile = get_largest_valid_tile(X_tile - 1, 1, X)
-
-        C_tile = get_largest_valid_tile(max_c_tile, ic_unroll, C)
-
-        # --- Step 2: Fit weights (C_tile x K_tile) into bank ---
-        while (max_k_tile := int(cache_per_bank / (C_tile * weight_bytes))) < oc_unroll:
-            if C_tile == ic_unroll:
-                raise ValueError(
-                    f"Cannot tile {node} with X={X}, C={C}, K={K} to fit cache size {cache_size}."
-                )
-            C_tile = get_largest_valid_tile(C_tile - 1, ic_unroll, C)
-
-        K_tile = get_largest_valid_tile(max_k_tile, oc_unroll, K)
+        # TODO here we assume the input tensors are 2-D. We should handle N-d tensor.
+        X_tile, C_tile, K_tile = choose_tile(
+            X, C, K,
+            cache_size,
+            ic_unroll,
+            input_byte=input_bytes,
+            weight_byte=weight_bytes,
+            output_byte=2,  # Assuming output is float16 or similar
+        )
 
         num_x_tiles = X // X_tile
         num_k_tiles = K // K_tile
         num_c_tiles = C // C_tile
 
-        # TODO there is a chance we can increase X_tile here
-
         logger.info(f"{node}: X={X}, C={C}, K={K} -> X_tile={X_tile}, C_tile={C_tile}, K_tile={K_tile}")
 
         if num_c_tiles == 1:
-            input_node.meta["tiled_shape"] = (X_tile, C)
-            weight_node.meta["tiled_shape"] = (K_tile, C)
-            if input_scale_node is not None:
-                input_scale_node.meta["tiled_shape"] = (X_tile, C // block_size)
-            if weight_scale_node is not None:
-                weight_scale_node.meta["tiled_shape"] = (K_tile, C // block_size)
-            node.meta["tiling"] = (num_x_tiles, num_k_tiles)
+            node.meta["tiled_shapes"] = {
+                "input": (X_tile, C),
+                weight_key: (C, K_tile) if is_matmul else (K_tile, C),
+                "bias": (K_tile,),
+                "input_scale": (X_tile, C // block_size),
+                "weight_scale": (C // block_size, K_tile) if is_matmul else (K_tile, C // block_size),
+                "output": (X_tile, K_tile),
+            }
+            node.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
             continue
 
+        if (source_fn_st := node.meta.get("source_fn_stack")) is not None:
+            source_fn = source_fn_st[-1][1]
+        else:
+            source_fn = node.target
+
         tiled_outputs = []
+        last_output = None
         for c in range(0, C, C_tile):
             c_end = min(c + C_tile, C)
-            scale_c = int(c / block_size)
-            scale_c_end = int(c_end / block_size)
+            scale_c, scale_c_end = int(c / block_size), int(c_end / block_size)
 
             with graph.inserting_before(node):
                 tiled_input = graph.call_function(
@@ -1363,26 +1409,38 @@ def run_tiling(
                     )
                 propagate_shape(tiled_gemm)
                 tiled_gemm.meta["dtype"] = node.meta.get("dtype")
+                tiled_gemm.meta["source_fn_stack"] = [(tiled_gemm.name, source_fn)]
 
-            tiled_input.meta["tiled_shape"] = (X_tile, C_tile)
-            tiled_weight.meta["tiled_shape"] = (K_tile, C_tile)
-            if tiled_input_scale is not None:
-                tiled_input_scale.meta["tiled_shape"] = (X_tile, C_tile // block_size)
-            if tiled_weight_scale is not None:
-                tiled_weight_scale.meta["tiled_shape"] = (K_tile, C_tile // block_size)
-            tiled_gemm.meta["tiling"] = (num_x_tiles, num_k_tiles)
+                if last_output is not None:
+                    last_output = graph.call_function(
+                        torch.ops.aten.add.Tensor, (last_output, tiled_gemm),
+                    )
+                    last_output.meta["source_fn_stack"] = [(last_output.name, last_output.target)]
+                    propagate_shape(last_output)
+                else:
+                    last_output = tiled_gemm
+
+            tiled_gemm.meta["tiled_shapes"] = {
+                "input": (X_tile, C_tile),
+                weight_key: (C_tile, K_tile) if is_matmul else (K_tile, C_tile),
+                "bias": (K_tile,),
+                "input_scale": (X_tile, C_tile // block_size),
+                "weight_scale": (C_tile // block_size, K_tile) if is_matmul else (K_tile, C_tile // block_size),
+                "output": (X_tile, K_tile),
+            }
+            tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
 
             tiled_outputs.append(tiled_gemm)
 
-        with graph.inserting_before(node):
-            stack_node = graph.call_function(
-                torch.ops.aten.stack.default, (tiled_outputs, 0)
-            )
-            sum_node = graph.call_function(
-                torch.ops.aten.sum.dim_IntList, (stack_node, 0),
-            )
+        # with graph.inserting_before(node):
+        #     stack_node = graph.call_function(
+        #         torch.ops.aten.stack.default, (tiled_outputs, 0)
+        #     )
+        #     sum_node = graph.call_function(
+        #         torch.ops.aten.sum.dim_IntList, (stack_node, 0),
+        #     )
 
-        node.replace_all_uses_with(sum_node)
+        node.replace_all_uses_with(last_output)
         graph.erase_node(node)
 
     graph.lint()
