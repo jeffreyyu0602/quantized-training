@@ -706,7 +706,15 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             mx_op_node = user
             mx_op_node.kwargs = kwargs
         elif user.target == torch.ops.quantized_ops.spmm_csr.default:
+            assert input_node.op == "get_attr", (
+                f"Expect input node to be a get_attr, but found {input_node.op}"
+            )
             user.args = user.args[:-1] + (quantized_node,)
+            user.kwargs = {
+                "B_scale": kwargs.get("weight_scale"),
+                "B_code": kwargs.get("weight_code"),
+                "block_size": activation_post_process.block_size,
+            }
         else:
             raise RuntimeError(
                 f"Unsupported user node {user.target} for quantization, "
@@ -724,17 +732,18 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
             weight_node = mx_op_node.args[1]
 
-            with graph.inserting_before(user):
+            with graph.inserting_after(mx_op_node):
                 spmm_node = graph.call_function(
                     torch.ops.quantized_ops.spmm_csr.default,
                     (csr_data_node, indices_node, indptr_node, weight_node),
                     {
-                        "B_scale": scale_node,
-                        "B_code": dequant_code,
+                        "B_scale": kwargs.get("weight_scale"),
+                        "B_code": kwargs.get("weight_code"),
                         "block_size": activation_post_process.block_size,
                     },
                 )
 
+            with graph.inserting_after(spmm_node):
                 add_node = graph.call_function(
                     torch.ops.aten.add.Tensor,
                     (spmm_node, mx_op_node),

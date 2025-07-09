@@ -379,7 +379,11 @@ def to_csr(tensor: torch.Tensor):
                 nnz += 1
         indptr.append(nnz)
 
-    return torch.tensor(data), torch.tensor(indices, dtype=torch.int32), torch.tensor(indptr, dtype=torch.int32)
+    data = torch.tensor(data, dtype=tensor.dtype)
+    indices = torch.tensor(indices, dtype=torch.int32)
+    indptr = torch.tensor(indptr, dtype=torch.int32)
+
+    return data, indices, indptr
 
 
 quantized_decomposed_lib.define(
@@ -407,7 +411,7 @@ def filter_outlier(input: torch.Tensor, threshold: float = 6.0) -> Tuple[torch.T
 
 quantized_decomposed_lib.define(
     "spmm_csr(Tensor data, Tensor indices, Tensor indptr, Tensor B, Tensor? B_scale=None, "
-    "Tensor? B_code=None, int? block_size=None) -> Tensor"
+    "Tensor? B_code=None, int? block_size=None, bool weight_transposed=False) -> Tensor"
 )
 
 
@@ -420,6 +424,7 @@ def spmm_csr(
     B_scale: Optional[torch.Tensor] = None,
     B_code: Optional[torch.Tensor] = None,
     block_size: Optional[int] = None,
+    weight_transposed=False
 ) -> torch.Tensor:
     """
     Performs SpMM: Y = A @ B where A is in CSR format.
@@ -431,22 +436,25 @@ def spmm_csr(
         B       : Dense matrix of shape [K, N]
 
     Returns:
-        Y       : Dense matrix of shape [M, N]
+        Y       : Dense matrix of shape [M, K]
     """
     M = indptr.numel() - 1
-    N = B.shape[1]
-    Y = torch.zeros((M, N), dtype=data.dtype, device=data.device)
+    K = B.shape[1] if weight_transposed else B.shape[0]
+    Y = torch.zeros((M, K), dtype=data.dtype, device=data.device)
 
     if B_code is not None:
         B = B_code[B.to(torch.long)]
     if B_scale is not None:
         B = B * expand(B_scale, B.shape, block_size)
 
+    if weight_transposed:
+        B = B.T
+
     for row in range(M):
         start = indptr[row].item()
         end = indptr[row + 1].item()
         for i in range(start, end):
             col = indices[i].item()
-            Y[row] += data[i] * B[col]
+            Y[row] += data[i] * B[:,col]
 
     return Y

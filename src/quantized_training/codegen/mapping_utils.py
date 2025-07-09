@@ -89,9 +89,6 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if (memory := node.meta.get("memory")) is not None:
         field.memory.partition = memory.partition_id
         field.memory.address = memory.start
-    elif is_output:
-        print(f"Warning: Node {node.name} has no memory allocation.")
-        print(node)
 
     if (scratchpad := original_node.meta.get("scratchpad")) is not None:
         field.scratchpad.offset = scratchpad.start
@@ -131,11 +128,13 @@ def set_output_field(param, node, output_dir):
         if (tiled_shape := node.meta.get("tiled_shapes")) is not None:
             shapes = tiled_shape[node]
 
+        dtypes = node.meta.get("dtype", [None] * len(node.value))
+
         for i, t in enumerate(node.value):
             tensor = Tensor(
                 node=f"{node.name}_{i}_tiled" if tiled_shape else f"{node.name}_{i}",
                 shape=shapes[i] if tiled_shape else list(t.shape),
-                dtype=node.meta["dtype"][i] or str(t.dtype).split(".")[1],
+                dtype=dtypes[i] or str(t.dtype).split(".")[1],
             )
 
             if memory is not None:

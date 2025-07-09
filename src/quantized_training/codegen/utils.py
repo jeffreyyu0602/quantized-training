@@ -946,6 +946,13 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
         weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
 
+        for user in list(weight_node.users):
+            if user.target == torch.ops.quantized_ops.spmm_csr.default:
+                user.kwargs = {
+                    **user.kwargs,
+                    "weight_transposed": True
+                }
+
         if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
             shape = tiled_shapes["weight"]
             tiled_shapes["weight"] = (shape[1], shape[0])
