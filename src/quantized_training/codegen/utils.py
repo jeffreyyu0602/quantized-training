@@ -705,6 +705,14 @@ def conv2d_transposed(
 
 
 def is_conv2d(node: Node) -> bool:
+    # Exclude depthwise convolution
+    if (
+        node.target == torch.ops.aten.conv2d.default and
+        len(node.args) == 7 and
+        node.args[6] != 1
+    ):
+        return False
+
     return node.op == "call_function" and node.target in [
         torch.ops.aten.conv2d.default,
         torch.ops.quantized_ops.conv2d_mx.default
