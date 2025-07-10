@@ -93,24 +93,32 @@ vector_stages = [
 def get_mp_qscheme(bs=64):
     return {
         r"self_attn\.q_proj$": [
-            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,outlier=2.0",
             f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         r"self_attn\.k_proj$": [
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-        ],
-        r"self_attn\.v_proj$": [
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,outlier=2.0",
             f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
+        r"self_attn\.v_proj$": [
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,outlier=2.0",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
         r"self_attn\.o_proj$": [
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
             f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+        ],
+        torch.nn.Linear: [
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,outlier=2.0",
             f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         torch.ops.aten.matmul.default: [
             f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
             f"int6,qs=microscaling,bs={bs},ax=-2,scale=fp8_e5m3",
+        ],
+        (r"lm_head", torch.ops.aten.linear.default, 0): [
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
     }
 

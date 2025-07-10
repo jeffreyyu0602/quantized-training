@@ -705,6 +705,14 @@ def conv2d_transposed(
 
 
 def is_conv2d(node: Node) -> bool:
+    # Exclude depthwise convolution
+    if (
+        node.target == torch.ops.aten.conv2d.default and
+        len(node.args) == 7 and
+        node.args[6] != 1
+    ):
+        return False
+
     return node.op == "call_function" and node.target in [
         torch.ops.aten.conv2d.default,
         # torch.ops.quantized_ops.conv2d.default,
@@ -951,6 +959,13 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
         weight_node = node.args[1]
         weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
+
+        for user in list(weight_node.users):
+            if user.target == torch.ops.quantized_ops.spmm_csr.default:
+                user.kwargs = {
+                    **user.kwargs,
+                    "weight_transposed": True
+                }
 
         if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
             shape = tiled_shapes["weight"]
