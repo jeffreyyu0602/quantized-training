@@ -692,6 +692,17 @@ def conv2d_transposed(
     dilation: Union[int, Tuple[int]] = 1,
     groups: int = 1,
 ) -> torch.Tensor:
+    if groups != 1:
+        return torch.ops.aten.conv2d.default(
+            input.permute(0, 3, 1, 2),
+            weight,
+            bias,
+            _pair(stride),
+            _pair(padding),
+            _pair(dilation),
+            groups,
+        )
+
     output = torch.ops.aten.conv2d.default(
         input.permute(0, 3, 1, 2),
         weight.permute(3, 2, 0, 1),
@@ -705,18 +716,18 @@ def conv2d_transposed(
 
 
 def is_conv2d(node: Node) -> bool:
-    # Exclude depthwise convolution
-    if (
-        node.target == torch.ops.aten.conv2d.default and
-        len(node.args) == 7 and
-        node.args[6] != 1
-    ):
-        return False
-
     return node.op == "call_function" and node.target in [
         torch.ops.aten.conv2d.default,
         torch.ops.quantized_ops.conv2d_mx.default
     ]
+
+
+def is_depthwise_conv(node: Node) -> bool:
+    return (
+        node.target == torch.ops.aten.conv2d.default and
+        len(node.args) == 7 and
+        node.args[6] != 1
+    )
 
 
 def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[Node]:
@@ -795,19 +806,21 @@ def transpose_conv2d_weights(model: GraphModule):
                 ])
 
                 # Permute input and weight in different ways
-                if path is not None and id(path[-2]) == id(path[-1].args[1]):
+                is_weight_node = id(path[-2]) == id(path[-1].args[1])
+                if path is not None and is_weight_node:
                     dims = (2, 3, 1, 0)
                 else:
                     dims = (0, 2, 3, 1)
 
-                logger.debug(f"Insert permute before {arg} with dims {dims}")
+                if not (is_weight_node and is_depthwise_conv(path[-1])):
+                    logger.debug(f"Insert permute before {arg} with dims {dims}")
 
-                if arg not in permute_nodes:
-                    with graph.inserting_after(arg):
-                        permute_nodes[arg] = graph.call_function(
-                            torch.ops.aten.permute.default, (arg, dims),
-                        )
-                n.replace_input_with(arg, permute_nodes[arg])
+                    if arg not in permute_nodes:
+                        with graph.inserting_after(arg):
+                            permute_nodes[arg] = graph.call_function(
+                                torch.ops.aten.permute.default, (arg, dims),
+                            )
+                    n.replace_input_with(arg, permute_nodes[arg])
 
             for user in list(n.users.keys()):
                 if user in conv_chain or user in swapped_nodes:
@@ -825,20 +838,21 @@ def transpose_conv2d_weights(model: GraphModule):
             if not is_conv2d(n):
                 continue
 
-            weight_node = n.args[1]
-            if weight_node.op == "get_attr":
-                param = get_parameter_or_buffer(model, weight_node.target)
-                logger.debug(
-                    f"Permuting weights for {n}: {tuple(param.data.shape)}"
-                    f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
-                )
-                param.data = param.data.permute(2, 3, 1, 0)
+            if not is_depthwise_conv(n):
+                weight_node = n.args[1]
+                if weight_node.op == "get_attr":
+                    param = get_parameter_or_buffer(model, weight_node.target)
+                    logger.debug(
+                        f"Permuting weights for {n}: {tuple(param.data.shape)}"
+                        f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
+                    )
+                    param.data = param.data.permute(2, 3, 1, 0)
 
-            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
-                scale_node = n.kwargs.get("weight_scale")
-                scale = get_parameter_or_buffer(model, scale_node.target)
-                scale.data = scale.data.permute(2, 3, 1, 0)
-                continue
+                if n.target == torch.ops.quantized_ops.conv2d_mx.default:
+                    scale_node = n.kwargs.get("weight_scale")
+                    scale = get_parameter_or_buffer(model, scale_node.target)
+                    scale.data = scale.data.permute(2, 3, 1, 0)
+                    continue
 
             with graph.inserting_before(n):
                 conv_node = graph.call_function(
