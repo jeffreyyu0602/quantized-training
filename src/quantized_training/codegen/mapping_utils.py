@@ -33,7 +33,7 @@ def _save_tensor(tensor, filename):
     packed_data = struct.pack(f'{t.numel()}f', *t.tolist())
     with open(filename, 'wb') as f:
         f.write(packed_data)
-    print(f"Writing tensor to {filename}")
+    print(f"Writing tensor with shape {tuple(tensor.shape)} to {filename}")
 
 
 def save_tensor(tensor, filename):
@@ -93,7 +93,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if (scratchpad := original_node.meta.get("scratchpad")) is not None:
         field.scratchpad.offset = scratchpad.start
 
-    if tiled_shape is not None and output_dir is not None:
+    if tiled_shape is not None and not is_output and output_dir is not None:
         n = len(tiled_shape)
         slices = tuple(
             [slice(None)] * (node.value.ndim - n) + [slice(0, s) for s in tiled_shape]
