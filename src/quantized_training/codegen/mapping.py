@@ -717,8 +717,9 @@ def fuse_reshape_with_input(
         logger.info(f"Cannot fuse {reshape_node} with {current_node}")
         return []
 
-    # If there's a branching point, perform fusion on each branch
-    # TODO is it worth performing fusion if there are more than one user?
+    if len(current_node.users) != 1:
+        return []
+
     all_reshape_nodes = []
     for user in list(current_node.users):
         nodes = fuse_reshape_with_input(
@@ -732,14 +733,14 @@ def move_transpose_after_select(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
     nodes_map: Dict[Node, Node],
-    node: Node,
+    transpose_node: Node,
 ):
-    ndim = node.args[0].value.ndim
-    dims = [x if x >= 0 else x + ndim for x in node.args[1:]]
+    ndim = transpose_node.args[0].value.ndim
+    dims = [x if x >= 0 else x + ndim for x in transpose_node.args[1:]]
 
     select_nodes = []
 
-    curr_user = next(iter(node.users))
+    curr_user = next(iter(transpose_node.users))
     while curr_user.target == torch.ops.aten.select.int and curr_user.args[1] == 0:
         select_nodes.append(curr_user)
         curr_user = next(iter(curr_user.users))
@@ -752,20 +753,20 @@ def move_transpose_after_select(
             )
 
         curr_user.replace_input_with(select_nodes[-1], new_node)
-        select_nodes[0].replace_input_with(node, node.args[0])
-        graph.erase_node(node)
+        select_nodes[0].replace_input_with(transpose_node, transpose_node.args[0])
+        graph.erase_node(transpose_node)
 
-        group = search_group(node, candidates)
-        group.remove(node)
-        group.append(new_node)
+        group = search_group(transpose_node, candidates)
+        group.remove(transpose_node)
 
         for n in select_nodes:
             group.remove(n)
             propagate_shape(n)
 
+        group.append(new_node)
         propagate_shape(new_node)
 
-        mapped_node = nodes_map.pop(node, None)
+        mapped_node = nodes_map.pop(transpose_node, None)
         nodes_map[new_node] = (
             new_node if mapped_node == select_nodes[-1] else mapped_node
         )
@@ -792,11 +793,14 @@ def fuse_op_with_input(
 
     if id(current_node) != id(node_to_fuse) and _is_elementwise_op(current_node):
         # Only address generator 0 support slicing op
-        if node_to_fuse.target == torch.ops.aten.slice.Tensor:
-            group = search_group(current_node, candidates)
-            if group is not None and current_node.prev in group:
-                logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
-                return
+        group = search_group(current_node, candidates)
+        if (
+            node_to_fuse.target == torch.ops.aten.slice.Tensor and
+            group is not None and
+            current_node.prev in group
+        ):
+            logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
+            return
 
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
         if (group := search_group(current_node, candidates)) is not None:
@@ -1331,8 +1335,8 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        # if node.op == "get_attr" or not hasattr(node, "value"):
-        #     continue
+        if node.op == "get_attr" and node.name.startswith("code_"):
+            continue
 
         header = node.name
 
