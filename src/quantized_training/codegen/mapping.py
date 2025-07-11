@@ -1096,6 +1096,9 @@ def run_memory_mapping(
             else:
                 tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
 
+        if tiled_shapes:
+            node.meta["tiled_shapes"] = tiled_shapes
+
         sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size)
 
         tensor_sizes = {
@@ -1114,27 +1117,21 @@ def run_memory_mapping(
         bytes_to_allocate = sum(tensor_sizes.values())
         remaining_cache_size = cache_size
 
-        if bytes_to_allocate <= remaining_cache_size:
-            scratchpad_mem = {}
+        scratchpad_mem = {}
 
-            # Allocate large tensors first for better cache utilization
-            for n, size in tensor_sizes.items():
-                aligned_size = sp_allocator.align_size(size, True)
+        # Allocate large tensors first for better cache utilization
+        for n, size in tensor_sizes.items():
+            aligned_size = sp_allocator.align_size(size, True)
 
-                bytes_to_allocate -= size
-                align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
-                remaining_cache_size -= aligned_size if align_bank else size
+            bytes_to_allocate -= size
+            align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
+            remaining_cache_size -= aligned_size if align_bank else size
 
-                scratchpad_mem[n] = sp_allocator.allocate_memory(
-                    n, shape=tiled_shapes.get(n), align_bank=align_bank
-                )
+            scratchpad_mem[n] = sp_allocator.allocate_memory(
+                n, shape=tiled_shapes.get(n), align_bank=align_bank, expand_on_failure=True
+            )
 
-            node.meta["scratchpad_mem"] = scratchpad_mem
-
-            if tiled_shapes:
-                node.meta["tiled_shapes"] = tiled_shapes
-        else:
-            logger.warning(f"Failed to allocate scratchpad memory for {node}")
+        node.meta["scratchpad_mem"] = scratchpad_mem
 
     def allocate_for_stack_op(node: Node):
         """
