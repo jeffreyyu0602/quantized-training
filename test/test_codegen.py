@@ -91,18 +91,18 @@ vector_stages = [
 
 
 def get_llm_qscheme(bs=64, threshold=None):
-    outlier = f"outlier={threshold}" if threshold is not None else ""
+    outlier = f",outlier={threshold}" if threshold is not None else ""
     return {
         r"self_attn\.q_proj$": [
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,{outlier}",
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
             f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         r"self_attn\.k_proj$": [
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,{outlier}",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
             f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         r"self_attn\.v_proj$": [
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,{outlier}",
+            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
             f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         r"self_attn\.o_proj$": [
@@ -110,7 +110,7 @@ def get_llm_qscheme(bs=64, threshold=None):
             f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         torch.nn.Linear: [
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3,{outlier}",
+            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
             f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
         ],
         torch.ops.aten.matmul.default: [
