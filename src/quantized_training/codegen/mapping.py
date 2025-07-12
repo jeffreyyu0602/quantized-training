@@ -1,12 +1,11 @@
 import copy
 import itertools
 import logging
-import math
 import operator
 import os
 import re
 from collections import defaultdict
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Union
 
 import graphviz
 import torch
@@ -657,27 +656,33 @@ def fuse_reshape_with_input(
     graph: torch.fx.Graph,
     candidates: List[List[Node]],
     nodes_map: Dict[Node, Node],
+    reshape_node: Node
+):
+    # First pass: simulate fusion to ensure all users can be fused
+    can_fuse_all = _fuse_reshape_with_input_impl(
+        graph, reshape_node, simulate=True
+    )
+
+    if can_fuse_all:
+        # Second pass: perform actual fusion
+        return _fuse_reshape_with_input_impl(
+            graph, reshape_node, simulate=False,
+            candidates=candidates, nodes_map=nodes_map
+        )
+    else:
+        logger.info(f"Skipping fusion for {reshape_node} due to unfusable path")
+        return []
+
+
+def _fuse_reshape_with_input_impl(
+    graph: torch.fx.Graph,
     reshape_node: Node,
     current_node: Node = None,
-    fused_nodes: Dict[Node, Node] = None,
-):
-    """
-    Recursively fuses a reshape node with its immediate user that is not a NOP.
-    
-    This function traverses the graph downward from the reshape node, collecting nodes along the path.
-    If the path ends in a GEMM or elementwise operation, the nodes are added to a fusion group.
-    
-    Args:
-        graph (torch.fx.Graph): The FX graph being processed.
-        candidates (List[List[Node]]): List of fusion groups.
-        nodes_map (Dict[Node, Node]): A mapping from nodes to be fused to their immediate user.
-        reshape_node (Node): The reshape node to be fused.
-        node (Node, optional): The current node being processed. Defaults to `reshape_node`.
-        fused_nodes (List[Node], optional): List of nodes being fused in the current path. Defaults to an empty list.
-    
-    Returns:
-        List[Node]: List of reshape nodes that were successfully fused.
-    """
+    fused_nodes: List[Node] = None,
+    candidates: List[List[Node]] = None,
+    nodes_map: Dict[Node, Node] = None,
+    simulate: bool = True
+) -> Union[bool, List[Node]]:
     if current_node is None:
         current_node = reshape_node
 
@@ -686,14 +691,16 @@ def fuse_reshape_with_input(
 
     fused_nodes.append(current_node)
 
-    # Base case: Stop if the node is a GEMM or an elementwise operation
+    # Base case: check if fusion is valid
     if (
         _is_gemm_op(current_node) and
         (is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)) and
-        not "tiled_shapes" in current_node.meta
+        "tiled_shapes" not in current_node.meta
     ) or (
         _is_elementwise_op(current_node) and not is_tranpose(reshape_node)
     ):
+        if simulate:
+            return True
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
         if (group := search_group(current_node, candidates)) is not None:
             group.extend(n for n in fused_nodes if n not in group)
@@ -708,25 +715,32 @@ def fuse_reshape_with_input(
         and current_node.args[1] == 0
     )
 
-    # Reshape can be fused with aten.select.int only if the select index is 0
     if (
         id(current_node) != id(reshape_node)
         and not _is_nop(current_node)
         and not is_select_after_tranpose
     ):
         logger.info(f"Cannot fuse {reshape_node} with {current_node}")
-        return []
+        return False if simulate else []
 
-    if len(current_node.users) != 1:
-        return []
-
-    all_reshape_nodes = []
+    all_results = []
     for user in list(current_node.users):
-        nodes = fuse_reshape_with_input(
-            graph, candidates, nodes_map, reshape_node, user, fused_nodes.copy()
+        result = _fuse_reshape_with_input_impl(
+            graph,
+            reshape_node,
+            current_node=user,
+            fused_nodes=fused_nodes.copy(),
+            candidates=candidates,
+            nodes_map=nodes_map,
+            simulate=simulate
         )
-        all_reshape_nodes.extend(nodes)
-    return all_reshape_nodes
+        if simulate:
+            if not result:
+                return False
+        else:
+            all_results.extend(result)
+
+    return True if simulate else all_results
 
 
 def move_transpose_after_select(
