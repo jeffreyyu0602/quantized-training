@@ -22,7 +22,35 @@ QUANTIZATION_CONFIGS = {
             "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
             "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
         ],
-    }
+    },
+    "Q4_2": {
+        torch.nn.Linear: [
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        ],
+        torch.ops.aten.matmul.default: [
+            "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
+        ],
+        (r"lm_head", torch.ops.aten.linear.default, 0): [
+            "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        ],
+    },
+    "Q4_3": {
+        torch.nn.Linear: [
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3,outlier=2.0",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        ],
+        torch.ops.aten.matmul.default: [
+            "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
+        ],
+        (r"lm_head", torch.ops.aten.linear.default, 0): [
+            "int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
+        ],
+    },
 }
 
 def set_qscheme(quantizer, qscheme):
@@ -47,7 +75,7 @@ def set_qscheme(quantizer, qscheme):
         if isinstance(module_name_or_op_type, tuple):
             print("Setting qconfig for module name or object type: ", module_name_or_op_type)
             quantizer.set_module_name_object_type_order(*module_name_or_op_type, qconfig)
-        if isinstance(module_name_or_op_type, str):
+        elif isinstance(module_name_or_op_type, str):
             print("Setting qconfig for module name:", module_name_or_op_type)
             quantizer.set_module_name(module_name_or_op_type, qconfig)
         elif isinstance(module_name_or_op_type, torch._ops.OpOverload):

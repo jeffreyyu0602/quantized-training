@@ -123,7 +123,14 @@ class MemoryAllocator:
         logger.warning(f"Node {node} has a non-tensor output")
         return None
 
-    def allocate_memory(self, node, size=None, shape=None, align_bank=False):
+    def allocate_memory(
+        self,
+        node,
+        size=None,
+        shape=None,
+        align_bank=False,
+        expand_on_failure=False,
+    ):
         if not hasattr(node, 'value'):
             print(f"Node {node} does not have a value attribute")
             return None
@@ -153,16 +160,50 @@ class MemoryAllocator:
         for index, segment in enumerate(self.segments):
             if segment.node is None and (segment.end - segment.start) >= tensor_size:
                 if (segment.end - segment.start) > tensor_size:
-                    new_partition = Segment(
+                    new_segment = Segment(
                         start=segment.start + tensor_size,
                         end=segment.end,
                         partition_id=self.partition_id,
                     )
                     segment.end = segment.start + tensor_size
-                    self.segments.insert(index + 1, new_partition)
+                    self.segments.insert(index + 1, new_segment)
                 self.memory_map[node] = segment
                 segment.node = node
                 return Segment(start=segment.start, end=segment.end, partition_id=self.partition_id)
+
+        if expand_on_failure:
+            last_segment = self.segments[-1]
+            start = last_segment.start if last_segment.node is None else last_segment.end
+            end = start + tensor_size
+
+            new_segment = Segment(
+                start=start,
+                end=end,
+                partition_id=self.partition_id,
+                node=node,
+            )
+            self.memory_map[node] = new_segment
+
+            if last_segment.node is None:
+                self.segments.insert(-1, new_segment)
+                last_segment.start = end
+                last_segment.end = self.total_memory * 2
+            else:
+                self.segments.append(new_segment)
+                self.segments.append(Segment(
+                    start=end, end=self.total_memory * 2, partition_id=self.partition_id
+                ))
+
+            logger.warning(
+                f"Memory allocation failed for tensor {node.name}. "
+                f"Expanding memory from {self.total_memory} to {self.total_memory * 2}."
+            )
+
+            self.total_memory *= 2
+
+            return Segment(
+                start=new_segment.start, end=new_segment.end, partition_id=self.partition_id
+            )
 
         raise RuntimeError(f"Memory allocation failed for tensor {node.name}")
 

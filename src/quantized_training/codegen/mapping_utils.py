@@ -33,7 +33,7 @@ def _save_tensor(tensor, filename):
     packed_data = struct.pack(f'{t.numel()}f', *t.tolist())
     with open(filename, 'wb') as f:
         f.write(packed_data)
-    print(f"Writing tensor to {filename}")
+    print(f"Writing tensor with shape {tuple(tensor.shape)} to {filename}")
 
 
 def save_tensor(tensor, filename):
@@ -45,6 +45,25 @@ def save_tensor(tensor, filename):
         _custom_save_function(tensor, filename)
     else:
         _save_tensor(tensor, filename)
+
+
+def get_new_node_name_with_prefix(prefix, directory):
+    """
+    Generate a new attribute name with a given prefix that is not already used in the module's graph.
+    """
+    prefix = prefix.replace(".", "_")
+    if directory is None or not os.path.isdir(directory):
+        return prefix
+
+    def get_node_name(i: int):
+        return f"{prefix}_{i}" if i > 0 else prefix
+    i = 0
+    node_name = get_node_name(i)
+    while os.path.isfile(os.path.join(directory, node_name + ".bin")):
+        i += 1
+        node_name = get_node_name(i)
+        logger.debug(f"Node name {node_name} already exists, trying a new one...")
+    return node_name
 
 
 def set_tensor_field(field, node, output_dir=None, is_output=False):
@@ -75,7 +94,10 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         node = source_node
 
     if (tiled_shape := original_node.meta.get("shape")) is not None:
-        field.node = node.name + "_tiled"
+        field.node = (
+            node.name + "_tiled" if is_output else
+            get_new_node_name_with_prefix(node.name + "_tiled", output_dir)
+        )
         field.shape.extend(list(tiled_shape))
     else:
         field.node = node.name
@@ -93,13 +115,13 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if (scratchpad := original_node.meta.get("scratchpad")) is not None:
         field.scratchpad.offset = scratchpad.start
 
-    if tiled_shape is not None and output_dir is not None:
+    if tiled_shape is not None and not is_output and output_dir is not None:
         n = len(tiled_shape)
         slices = tuple(
             [slice(None)] * (node.value.ndim - n) + [slice(0, s) for s in tiled_shape]
         )
         save_tensor(
-            node.value[slices], os.path.join(output_dir, f"{node.name}_tiled.bin")
+            node.value[slices], os.path.join(output_dir, f"{field.node}.bin")
         )
     elif output_dir is not None:
         save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
