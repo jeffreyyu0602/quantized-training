@@ -114,11 +114,12 @@ class MemoryAllocator:
                 numel = [math.prod(s) for s in shape]
             else:
                 numel = [t.numel() for t in node.value]
-            node.meta["output_sizes"] = [
+            key = "tiled_output_sizes" if shape is not None else "output_sizes"
+            node.meta[key] = [
                 self.align_size(numel[i] * dtype_byte_size(dtypes[i] or t.dtype))
                 for i, t in enumerate(node.value)
             ]
-            return self.align_size(sum(node.meta["output_sizes"]), align_bank=align_bank)
+            return self.align_size(sum(node.meta[key]), align_bank=align_bank)
 
         logger.warning(f"Node {node} has a non-tensor output")
         return None

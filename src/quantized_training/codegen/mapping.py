@@ -1195,8 +1195,9 @@ def run_memory_mapping(
 
         # Propagate memory metadata for nop nodes
         if _is_nop(node):
-            if "memory" not in node.args[0].meta:
-                raise RuntimeError(f"Cannot propagate memory for {node}")
+            assert "memory" in node.args[0].meta, (
+                f"Node {node} does not have memory metadata, "
+            )
             node.meta["memory"] = copy.deepcopy(node.args[0].meta["memory"])
             skip_allocation = True
 
