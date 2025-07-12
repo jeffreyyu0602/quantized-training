@@ -806,8 +806,8 @@ def transpose_conv2d_weights(model: GraphModule):
                 ])
 
                 # Permute input and weight in different ways
-                is_weight_node = id(path[-2]) == id(path[-1].args[1])
-                if path is not None and is_weight_node:
+                is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
+                if is_weight_node:
                     dims = (2, 3, 1, 0)
                 else:
                     dims = (0, 2, 3, 1)
