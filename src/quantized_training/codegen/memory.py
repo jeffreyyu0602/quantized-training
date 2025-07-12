@@ -90,21 +90,23 @@ class MemoryAllocator:
             tensor_size = numel * dtype_byte_size(dtype)
 
             # This logic is going to be removed in the future
-            conv2d_user = get_user_with_target(node, [
+            conv2d_node = get_user_with_target(node, [
                 torch.ops.aten.conv2d.default,
                 torch.ops.quantized_ops.conv2d.default,
             ])
 
-            if conv2d_user is not None:
-                input_node = conv2d_user.args[0]
+            if conv2d_node is not None:
+                input_node = conv2d_node.args[0]
                 input_node = input_node.meta.get('source_node', input_node)
-                dim = 1 if conv2d_user.target == torch.ops.aten.conv2d.default else -1
+                dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
                     tensor_size *= 2
-                    logger.info(
-                        f"Conv2d {node} has input with shape: {node.value.shape}. "
-                        "Doubling size to perform replication."
-                    )
+                    logger.info(f"Increasing size for conv2d {node} for replication")
+
+            softmax_node = get_user_with_target(node, torch.ops.aten.softmax.int)
+            if softmax_node is not None:
+                tensor_size *= 3
+                logger.info(f"Increasing size for softmax {node} for intermediate outputs")
 
             return self.align_size(tensor_size, align_bank)
 
