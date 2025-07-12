@@ -1162,6 +1162,7 @@ def run_memory_mapping(
             # users, we need to make a copy to avoid overwriting the memory
             for n in reversed(nodes[:-1]):
                 n.meta["memory"] = segment
+                allocate_scratchpad(n)
 
             # If the first node is a param node, we need to copy it to the new location
             input_node = node.all_input_nodes[0]
