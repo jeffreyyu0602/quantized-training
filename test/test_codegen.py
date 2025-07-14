@@ -186,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cache_size",
         type=int,
-        default=1024 * 1024,
+        default=8 * 1024 * 1024,
         help="Total L2 SRAM size in SoC."
     )
     parser.add_argument(

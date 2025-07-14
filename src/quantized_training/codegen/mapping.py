@@ -34,7 +34,7 @@ from ..quantize_pt2e import create_getattr_from_value, export_model
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
-DEFAULT_CACHE_SIZE = 2 * 1024 * 1024  # 2 MiB
+DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def eliminate_dead_code(self):
@@ -1029,6 +1029,14 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
     ):
         return tiled_shapes
 
+    # TODO conv2d tiling is not supported rn
+    if first_node.target in [
+        torch.ops.aten.conv2d.default,
+        torch.ops.quantized_ops.conv2d.default,
+        torch.ops.quantized_ops.conv2d_mx.default,
+    ]:
+        return tiled_shapes
+
     def get_reduce_factor(full_shape, tile_shape):
         return tuple(f // t for f, t in zip(full_shape, tile_shape))
 
@@ -1109,11 +1117,11 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
             bytes_to_allocate += allocator.get_tensor_size(node, output_shapes)
 
         if bytes_to_allocate <= allocator.total_memory:
-            l2_tiling = first_node.meta.get("l2_tiling")
+            l2_tiling = first_node.meta.get("l2_tiling", [1] * len(reduce_factor))
             first_node.meta["l2_tiling"] = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
             return new_shapes
 
-    print(f"Failed to adjust tiling for {node}")
+    logger.warning(f"Failed to adjust tiling for {node}")
     return tiled_shapes
 
 

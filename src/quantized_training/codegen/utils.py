@@ -701,20 +701,9 @@ def conv2d_transposed(
     dilation: Union[int, Tuple[int]] = 1,
     groups: int = 1,
 ) -> torch.Tensor:
-    if groups != 1:
-        return torch.ops.aten.conv2d.default(
-            input.permute(0, 3, 1, 2),
-            weight,
-            bias,
-            _pair(stride),
-            _pair(padding),
-            _pair(dilation),
-            groups,
-        )
-
     output = torch.ops.aten.conv2d.default(
         input.permute(0, 3, 1, 2),
-        weight.permute(3, 2, 0, 1),
+        weight.permute(3, 2, 0, 1) if groups == 1 else weight,
         bias,
         _pair(stride),
         _pair(padding),
