@@ -186,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cache_size",
         type=int,
-        default=1024 * 1024,
+        default=8 * 1024 * 1024,
         help="Total L2 SRAM size in SoC."
     )
     parser.add_argument(
@@ -252,6 +252,9 @@ if __name__ == "__main__":
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
         "conv2d_padding": args.padding,
+        "cache_size": args.cache_size,
+        "block_size": args.block_size,
+        "perform_tiling": args.perform_tiling,
     }
 
     compile_args = {

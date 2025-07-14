@@ -162,11 +162,11 @@ def set_output_field(param, node, output_dir):
             if memory is not None:
                 tensor.memory.partition = partition
                 tensor.memory.address = int(address)
-                address += node.meta.get("output_sizes")[i]
+                address += node.meta["output_sizes"][i]
 
             if scratchpad_mem is not None:
                 tensor.scratchpad.offset = int(offset)
-                offset += node.meta.get("output_sizes")[i]
+                offset += node.meta["tiled_output_sizes"][i]
 
             if output_dir is not None:
                 save_tensor(t, os.path.join(output_dir, f"{node.name}_{i}.bin"))
@@ -294,6 +294,13 @@ def _is_gemm_op(node: Node) -> bool:
         torch.ops.quantized_ops.linear.default,
         torch.ops.quantized_ops.conv2d_mx.default,
         torch.ops.quantized_ops.linear_mx.default,
+        torch.ops.quantized_ops.matmul_mx.default,
+    ]
+
+
+def _is_matmul(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.matmul.default,
         torch.ops.quantized_ops.matmul_mx.default,
     ]
 

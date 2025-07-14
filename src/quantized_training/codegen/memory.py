@@ -89,22 +89,23 @@ class MemoryAllocator:
             numel = math.prod(shape) if shape is not None else node.value.numel()
             tensor_size = numel * dtype_byte_size(dtype)
 
-            # This logic is going to be removed in the future
-            conv2d_user = get_user_with_target(node, [
+            conv2d_node = get_user_with_target(node, [
                 torch.ops.aten.conv2d.default,
                 torch.ops.quantized_ops.conv2d.default,
             ])
 
-            if conv2d_user is not None:
-                input_node = conv2d_user.args[0]
+            if conv2d_node is not None:
+                input_node = conv2d_node.args[0]
                 input_node = input_node.meta.get('source_node', input_node)
-                dim = 1 if conv2d_user.target == torch.ops.aten.conv2d.default else -1
+                dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
                     tensor_size *= 2
-                    logger.info(
-                        f"Conv2d {node} has input with shape: {node.value.shape}. "
-                        "Doubling size to perform replication."
-                    )
+                    logger.info(f"Increasing size for conv2d {node} for replication")
+
+            softmax_node = get_user_with_target(node, torch.ops.aten.softmax.int)
+            if softmax_node is not None:
+                tensor_size *= 3
+                logger.info(f"Increasing size for softmax {node} for intermediate outputs")
 
             return self.align_size(tensor_size, align_bank)
 
@@ -114,11 +115,12 @@ class MemoryAllocator:
                 numel = [math.prod(s) for s in shape]
             else:
                 numel = [t.numel() for t in node.value]
-            node.meta["output_sizes"] = [
+            key = "tiled_output_sizes" if shape is not None else "output_sizes"
+            node.meta[key] = [
                 self.align_size(numel[i] * dtype_byte_size(dtypes[i] or t.dtype))
                 for i, t in enumerate(node.value)
             ]
-            return self.align_size(sum(node.meta["output_sizes"]), align_bank=align_bank)
+            return self.align_size(sum(node.meta[key]), align_bank=align_bank)
 
         logger.warning(f"Node {node} has a non-tensor output")
         return None
@@ -136,7 +138,7 @@ class MemoryAllocator:
             return None
 
         # Skip allocation for quantization scaling factors
-        quantize_user = get_user_with_target(node, [
+        quantize_dequantize_node = get_user_with_target(node, [
             torch.ops.quantized_ops.quantize.default,
             torch.ops.quantized_ops.dequantize.default,
         ])
@@ -144,7 +146,7 @@ class MemoryAllocator:
         if (
             isinstance(node.value, torch.Tensor)
             and node.value.numel() == 1
-            and quantize_user is not None
+            and quantize_dequantize_node is not None
         ):
             logger.info(f"Skipping allocation for scalar scale tensor: {node.name}")
             return None
