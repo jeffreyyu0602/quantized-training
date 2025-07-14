@@ -111,7 +111,6 @@ def transform(
     fuse_operator=True,
     perform_tiling=False,
     cache_size=None,
-    num_banks=None,
     block_size=None,
 ):
     if example_kwargs is None:
@@ -131,11 +130,15 @@ def transform(
     convert_cat_and_stack_as_stack_on_dim0(model)
     convert_cat_with_mismatched_shapes_to_stack(model)
 
-    if perform_tiling:
-        run_l2_tiling(model, cache_size, num_banks, block_size)
+    # Move quantize and dequantize ops to the end of last compute op
+    fuse_quantize_dequantize_with_previous_op(model)
 
     if conv2d_padding is not None:
         pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+
+    if perform_tiling:
+        run_l2_tiling(model, cache_size, block_size)
+        run_vector_op_tiling(model, cache_size, block_size)
 
     if transpose_weight:
         transpose_conv2d_weights(model)
@@ -153,9 +156,6 @@ def transform(
         ShapeProp(model).propagate(*flatten_args)
 
         eliminate_reshape_with_no_effect(model)
-
-    # Move quantize and dequantize ops to the end of last compute op
-    fuse_quantize_dequantize_with_previous_op(model)
 
     if fuse_operator:
         fuse(model, patterns, flatten_args)

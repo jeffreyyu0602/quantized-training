@@ -298,6 +298,13 @@ def _is_gemm_op(node: Node) -> bool:
     ]
 
 
+def _is_matmul(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.matmul.default,
+        torch.ops.quantized_ops.matmul_mx.default,
+    ]
+
+
 def _is_elementwise_op(node: Node) -> bool:
     return node.target in [
         # Core aten ops

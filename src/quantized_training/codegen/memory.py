@@ -89,7 +89,6 @@ class MemoryAllocator:
             numel = math.prod(shape) if shape is not None else node.value.numel()
             tensor_size = numel * dtype_byte_size(dtype)
 
-            # This logic is going to be removed in the future
             conv2d_node = get_user_with_target(node, [
                 torch.ops.aten.conv2d.default,
                 torch.ops.quantized_ops.conv2d.default,
@@ -139,7 +138,7 @@ class MemoryAllocator:
             return None
 
         # Skip allocation for quantization scaling factors
-        quantize_user = get_user_with_target(node, [
+        quantize_dequantize_node = get_user_with_target(node, [
             torch.ops.quantized_ops.quantize.default,
             torch.ops.quantized_ops.dequantize.default,
         ])
@@ -147,7 +146,7 @@ class MemoryAllocator:
         if (
             isinstance(node.value, torch.Tensor)
             and node.value.numel() == 1
-            and quantize_user is not None
+            and quantize_dequantize_node is not None
         ):
             logger.info(f"Skipping allocation for scalar scale tensor: {node.name}")
             return None

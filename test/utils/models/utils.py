@@ -5,7 +5,6 @@ def get_transform_args(args, vector_stages):
         "transpose_fc": args.transpose_fc,
         "conv2d_padding": args.padding,
         "cache_size": args.cache_size,
-        "num_banks": args.num_banks,
         "block_size": args.block_size,
         "perform_tiling": args.perform_tiling,
     }

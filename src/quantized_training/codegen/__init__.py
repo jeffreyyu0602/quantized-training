@@ -26,6 +26,7 @@ __all__ = [
     "rewrite_fx_graph",
     "run_memory_mapping",
     "run_l2_tiling",
+    "run_vector_op_tiling",
     "split_multi_head_attention",
     "transpose_conv2d_weights",
     "transpose_linear_weights",

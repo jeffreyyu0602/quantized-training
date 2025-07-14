@@ -13,7 +13,12 @@ from torch.fx.node import map_arg
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from .mapping import get_parameter_or_buffer, propagate_shape, replace_node_with_graph_module
+from .mapping import (
+    get_parameter_or_buffer,
+    propagate_shape,
+    replace_node_with_graph_module,
+    get_node_bytes,
+)
 from .mapping_utils import (
     _is_gemm_op,
     _is_elementwise_op,
@@ -45,6 +50,7 @@ __all__ = [
     "replace_target",
     "rewrite_fx_graph",
     "run_l2_tiling",
+    "run_vector_op_tiling",
     "transpose_linear_weights",
     "strip_softmax_dtype",
 ]
@@ -119,11 +125,11 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
     """
     graph = model.graph
     for node in list(graph.nodes):
-        cat_node = node
-        if cat_node.target not in [
+        if node.target not in [
             torch.ops.aten.cat.default, torch.ops.aten.stack.default
         ]:
             continue
+        cat_node = node
 
         if not all(hasattr(n, "shape") for n in cat_node.args[0]):
             logger.warning(f"Node {cat_node} does not have shape attributes for all inputs.")
@@ -155,6 +161,7 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
                 stack_node = graph.call_function(
                     torch.ops.aten.stack.default, (cat_node.args[0], 0)
                 )
+        propagate_shape(stack_node)
 
         # Permute the concatenated tensor to match the original order
         dims = list(range(len(input_shape) + 1))[1:]
@@ -166,10 +173,11 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
             permute_node = graph.call_function(
                 torch.ops.aten.permute.default, (stack_node, dims),
             )
-            # get_source_partitions expects 'permute' as the source function. This is
-            # hacky but there is no other way to set this meta field properly.
-            permute_node.meta['source_fn_stack'] = [(permute_node.name, 'permute')]
-            output_node = permute_node
+        propagate_shape(permute_node)
+        # get_source_partitions expects 'permute' as the source function. This is
+        # hacky but there is no other way to set this meta field properly.
+        permute_node.meta['source_fn_stack'] = [(permute_node.name, 'permute')]
+        output_node = permute_node
 
         # Flatten the permuted tensor if it is a cat operation
         if cat_node.target == torch.ops.aten.cat.default:
@@ -178,6 +186,7 @@ def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
                     torch.ops.aten.flatten.using_ints,
                     (permute_node, concat_dim, concat_dim + 1),
                 )
+            propagate_shape(output_node)
 
         # Replace all use of the cat node with the new node
         for node in list(cat_node.users):
@@ -964,6 +973,8 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
         if not transpose_fc and math.prod(input_shape[:-1]) == 1:
             continue
 
+        node.meta["transposed"] = True
+
         weight_node = node.args[1]
         weight = get_parameter_or_buffer(model, weight_node.target)
         weight.data = weight.data.T
@@ -995,6 +1006,7 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
             )
 
         linear_node.meta = node.meta
+        linear_node.meta["transposed"] = True
 
         node.replace_all_uses_with(linear_node)
         model.graph.erase_node(node)
@@ -1252,13 +1264,7 @@ def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, 
     return X_tile, C_tile, K_tile
 
 
-def run_l2_tiling(
-    model,
-    cache_size=1 * 1024 * 1024,
-    num_bank=4,
-    ic_unroll=64,
-    oc_unroll=64,
-):
+def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
     """
     Perform tiling on GEMM operations in a model to fit intermediate data into cache.
 
@@ -1272,16 +1278,9 @@ def run_l2_tiling(
     Args:
         model: A model object with a FX Graph containing GEMM nodes.
         cache_size (int): Total cache size in bytes.
-        num_bank (int): Number of cache banks to divide memory across.
-        ic_unroll (int): Systolic array input channel dimension unroll size. 
-        oc_unroll (int): Systolic array output channel dimension unroll size.
+        unroll (int): Systolic array input channel dimension unroll size. 
     """
-    from ..pt2e_utils import dtype_byte_size
     graph = model.graph
-
-    def get_num_bytes(n: Node):
-        dtype = n.meta.get("dtype", getattr(n.value, "dtype", None))
-        return dtype_byte_size(dtype)
 
     for node in list(graph.nodes):
         if node.target not in [
@@ -1300,8 +1299,8 @@ def run_l2_tiling(
 
         input_value, weight_value = input_node.value, weight_node.value
 
-        input_bytes = get_num_bytes(input_node)
-        weight_bytes = get_num_bytes(weight_node)
+        input_bytes = get_node_bytes(input_node)
+        weight_bytes = get_node_bytes(weight_node)
 
         is_matmul = node.target in [
             torch.ops.aten.matmul.default, torch.ops.quantized_ops.matmul_mx.default
@@ -1328,7 +1327,7 @@ def run_l2_tiling(
         X_tile, C_tile, K_tile = choose_tile(
             X, C, K,
             cache_size,
-            ic_unroll,
+            unroll,
             input_byte=input_bytes,
             weight_byte=weight_bytes,
             output_byte=2,  # Assuming output is float16 or similar
@@ -1461,14 +1460,6 @@ def run_l2_tiling(
 
             tiled_outputs.append(tiled_gemm)
 
-        # with graph.inserting_before(node):
-        #     stack_node = graph.call_function(
-        #         torch.ops.aten.stack.default, (tiled_outputs, 0)
-        #     )
-        #     sum_node = graph.call_function(
-        #         torch.ops.aten.sum.dim_IntList, (stack_node, 0),
-        #     )
-
         node.replace_all_uses_with(last_output)
         graph.erase_node(node)
 
@@ -1476,3 +1467,110 @@ def run_l2_tiling(
     graph.eliminate_dead_code()
     model.recompile()
     return model
+
+
+def get_tiled_shapes(input_shape, fix_last_dim=False, last_dim=-1):
+    """
+    Yields tile shapes by progressively reducing from outermost to innermost dimension.
+    Once a dimension is reduced to 1, it stays fixed. Last dim can be fixed optionally.
+    """
+    def get_factors(n):
+        return [i for i in range(n, 0, -1) if n % i == 0]
+
+    dims = len(input_shape)
+    last_dim = dims + last_dim if last_dim < 0 else last_dim
+    stop = last_dim if fix_last_dim else dims
+
+    # Start from the full shape
+    current = list(input_shape)
+    yield tuple(current)
+
+    for dim in range(stop):
+        for f in get_factors(input_shape[dim])[1:]:  # skip the full-size factor
+            current[dim] = f
+            yield tuple(current)
+        current[dim] = 1  # lock dim at 1 after all factors tried
+
+
+def get_node_to_key(node):
+    from torch.fx.operator_schemas import normalize_function
+
+    args_and_kwargs = normalize_function(
+        node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
+    )
+    node_to_key = {
+        n.meta.get('source_node', n): k
+        for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
+    }
+    return node_to_key
+
+
+def run_vector_op_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
+    def get_reduce_factor(full_shape, tile_shape):
+        return tuple(f // t for f, t in zip(full_shape, tile_shape))
+
+    def get_reduced_shape(shape, reduce_factor):
+        assert len(shape) == len(reduce_factor)
+        return tuple(
+            s // r if s > 1 else s for s, r in zip(shape, reduce_factor)
+        )
+
+    for node in list(model.graph.nodes):
+        if not _is_elementwise_op(node) and node.target not in [
+            torch.ops.aten.softmax.int,
+            torch.ops.aten.layer_norm.default,
+            torch.ops.quantized_ops.calculate_mx_qparam.default,
+            torch.ops.quantized_ops.quantize_mx.default,
+        ]:
+            continue
+
+        output_shape = (
+            node.value.shape if isinstance(node.value, torch.Tensor)
+            else node.value[1].shape
+        )
+
+        if node.target in [
+            torch.ops.quantized_ops.calculate_mx_qparam.default,
+            torch.ops.quantized_ops.quantize_mx.default,
+        ]:
+            last_dim = node.args[1]
+        else:
+            last_dim = -1
+
+        for tiled_output_shape in get_tiled_shapes(output_shape, True, last_dim):
+            reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
+            tile_numel = math.prod(tiled_output_shape)
+            total_tile_size = get_node_bytes(node) * tile_numel
+
+            if node.target == torch.ops.aten.softmax.int:
+                total_tile_size *= 3
+
+            if isinstance(node.value, (tuple, list)):
+                tiled_shapes = {
+                    "output": [get_reduced_shape(t.shape, reduce_factor) for t in node.value]
+                }
+            else:
+                tiled_shapes = {"output": tiled_output_shape}
+
+            node_to_key = get_node_to_key(node)
+
+            for n in node.all_input_nodes:
+                if n.name.startswith("code"):
+                    continue
+
+                input_shape = list(n.value.shape)
+                aligned_shape = [1] * (len(output_shape) - len(input_shape)) + input_shape
+                tiled_shape = tuple(
+                    s // r if s > 1 else s for s, r in zip(aligned_shape, reduce_factor)
+                )
+                total_tile_size += get_node_bytes(n) * math.prod(tiled_shape)
+
+                tiled_shapes[node_to_key.get(n)] = tiled_shape[-len(input_shape):]
+
+            if total_tile_size <= cache_size:
+                logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
+                node.meta["tiled_shapes"] = tiled_shapes
+                node.meta["l2_tiling"] = reduce_factor
+                break
+        else:
+            logger.warning(f"Warning: No tile shape found to fit {node} into cache.")
