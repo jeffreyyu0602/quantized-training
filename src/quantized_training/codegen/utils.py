@@ -815,9 +815,11 @@ def transpose_conv2d_weights(model: GraphModule):
 
                     if arg not in permute_nodes:
                         with graph.inserting_after(arg):
-                            permute_nodes[arg] = graph.call_function(
+                            permute_node = graph.call_function(
                                 torch.ops.aten.permute.default, (arg, dims),
                             )
+                        permute_node.meta["dtype"] = arg.meta.get("dtype")
+                        permute_nodes[arg] = permute_node
                     n.replace_input_with(arg, permute_nodes[arg])
 
             for user in list(n.users.keys()):
@@ -828,6 +830,7 @@ def transpose_conv2d_weights(model: GraphModule):
                     permute_node = graph.call_function(
                         torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
                     )
+                permute_node.meta["dtype"] = n.meta.get("dtype")
                 user.replace_input_with(n, permute_node)
 
             if n.target == torch.ops.quantized_ops.quantize_mx.default:
