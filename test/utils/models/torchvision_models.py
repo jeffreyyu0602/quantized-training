@@ -135,14 +135,11 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
     node_out1 = run_and_record_nodes(gm, *example_args)
 
     def match_and_rewrite(source_fn, args, kwargs):
-        print(f"match_and_rewrite called with source_fn: {source_fn}")
         if source_fn not in [torch.nn.Conv2d, torch.nn.functional.conv2d]:
-            print("Not matching Conv2d, returning None")
             return None
         
         weight = args[1]
         if weight.shape[1] != 3 or weight.shape[2] != 3 or weight.shape[3] != 3:
-            print("Not matching non 3x3x3 weight, returning None")
             return None
 
         print(weight.shape)
@@ -221,7 +218,6 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
         return "\n".join(report)
 
     diff_report = generate_diff_report(node_out1, node_out2)
-    print(diff_report)
 
     gm = prepare_pt2e(gm, quantizer, example_args)
 
