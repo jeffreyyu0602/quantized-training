@@ -1,6 +1,7 @@
 import copy
 import itertools
 import logging
+import math
 import operator
 import os
 import re
@@ -1129,7 +1130,10 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
 
         if bytes_to_allocate <= allocator.total_memory:
             l2_tiling = first_node.meta.get("l2_tiling", [1] * len(reduce_factor))
-            first_node.meta["l2_tiling"] = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
+            l2_tiling = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
+            if math.prod(l2_tiling) == 1:
+                return {}
+            first_node.meta["l2_tiling"] = l2_tiling
             return new_shapes
 
     logger.warning(f"Failed to adjust tiling for {node}")
