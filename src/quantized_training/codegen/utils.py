@@ -1467,27 +1467,45 @@ def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
     return model
 
 
-def get_tiled_shapes(input_shape, fix_last_dim=False, last_dim=-1):
+def get_tiled_shapes(input_shape, fix_last_dim=False, last_dim=-1, reverse=False, min_sizes=None):
     """
-    Yields tile shapes by progressively reducing from outermost to innermost dimension.
+    Yields tile shapes by progressively reducing from outermost to innermost (or reverse).
     Once a dimension is reduced to 1, it stays fixed. Last dim can be fixed optionally.
+    
+    Args:
+        input_shape (tuple): The original shape.
+        fix_last_dim (bool): Whether to keep the last_dim fixed.
+        last_dim (int): Index of the last dim to fix (can be negative).
+        reverse (bool): If True, traverse dimensions from innermost to outermost.
+        min_sizes (tuple or list): Minimum size allowed for each dimension (default is 1).
     """
-    def get_factors(n):
-        return [i for i in range(n, 0, -1) if n % i == 0]
+    def get_factors(n, min_size):
+        return [i for i in range(n, min_size - 1, -1) if n % i == 0]
 
     dims = len(input_shape)
     last_dim = dims + last_dim if last_dim < 0 else last_dim
     stop = last_dim if fix_last_dim else dims
 
-    # Start from the full shape
+    # Directional order
+    dim_order = list(range(stop))
+    if reverse:
+        dim_order = dim_order[::-1]
+
+    # Apply default min sizes
+    if min_sizes is None:
+        min_sizes = [1] * dims
+    else:
+        min_sizes = list(min_sizes) + [1] * (dims - len(min_sizes))
+
     current = list(input_shape)
     yield tuple(current)
 
-    for dim in range(stop):
-        for f in get_factors(input_shape[dim])[1:]:  # skip the full-size factor
+    for dim in dim_order:
+        factors = get_factors(input_shape[dim], min_sizes[dim])
+        for f in factors[1:]:  # skip full-size factor
             current[dim] = f
             yield tuple(current)
-        current[dim] = 1  # lock dim at 1 after all factors tried
+        current[dim] = max(min_sizes[dim], 1)  # lock at min size
 
 
 def get_node_to_key(node):

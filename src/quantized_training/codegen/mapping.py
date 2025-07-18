@@ -1,6 +1,7 @@
 import copy
 import itertools
 import logging
+import math
 import operator
 import os
 import re
@@ -1041,10 +1042,19 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
         return tuple(f // t for f, t in zip(full_shape, tile_shape))
 
     def get_reduced_shape(shape, reduce_factor):
-        reduce_factor = [1] * (len(shape) - len(reduce_factor)) + list(reduce_factor)
-        return tuple(
-            s // r if s > 1 else s for s, r in zip(shape, reduce_factor)
-        )
+        if not shape:
+            return shape
+
+        max_len = max(len(shape), len(reduce_factor))
+        padded_shape = [1] * (max_len - len(shape)) + list(shape)
+        padded_reduce = [1] * (max_len - len(reduce_factor)) + list(reduce_factor)
+
+        reduced = [
+            dim // factor if dim > 1 else dim
+            for dim, factor in zip(padded_shape, padded_reduce)
+        ]
+
+        return tuple(reduced[-len(shape):])
 
     if not tiled_shapes:
         tiled_shapes = {n: n.value.shape for n in node.all_input_nodes}
@@ -1058,7 +1068,10 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
         else tiled_shapes[node][1]
     )
 
-    for tiled_output_shape in get_tiled_shapes(output_shape):
+    is_gemm = _is_gemm_op(first_node)
+    min_sizes = (1, 64) if is_gemm else None
+
+    for tiled_output_shape in get_tiled_shapes(output_shape, reverse=is_gemm, min_sizes=min_sizes):
         reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
 
         if isinstance(node.value, (tuple, list)):
@@ -1068,42 +1081,41 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
         else:
             new_shapes = {node: tiled_output_shape}
 
-        if _is_gemm_op(first_node):
+        if is_gemm:
             input_node = first_node.args[0].meta.get('source_node')
-            new_shapes[input_node] = get_reduced_shape(tiled_shapes[input_node], (reduce_factor[0], 1))
+            input_factor = (*reduce_factor[:-1], 1)
+            new_shapes[input_node] = get_reduced_shape(tiled_shapes[input_node], input_factor)
 
             transposed = first_node.meta.get("transposed", False)
-            weight_rf = (
-                (1, reduce_factor[1]) if transposed or _is_matmul(first_node)
-                else (reduce_factor[1], 1)
+            weight_factor = (
+                (1, reduce_factor[-1]) if transposed or _is_matmul(first_node)
+                else (reduce_factor[-1], 1)
             )
             weight_node = first_node.args[1].meta.get('source_node')
-            new_shapes[weight_node] = get_reduced_shape(tiled_shapes[weight_node], weight_rf)
+            new_shapes[weight_node] = get_reduced_shape(tiled_shapes[weight_node], weight_factor)
 
             if not _is_matmul(first_node) and len(first_node.args) > 2:
                 bias_node = first_node.args[2].meta.get('source_node')
                 new_shapes[bias_node] = get_reduced_shape(
-                    tiled_shapes[bias_node], (reduce_factor[1],)
+                    tiled_shapes[bias_node], (reduce_factor[-1],)
                 )
 
             if (input_scale_node := first_node.kwargs.get("input_scale")) is not None:
                 input_scale_node = input_scale_node.meta.get('source_node')
                 new_shapes[input_scale_node] = get_reduced_shape(
-                    tiled_shapes[input_scale_node], (reduce_factor[0], 1)
+                    tiled_shapes[input_scale_node], input_factor
                 )
 
             if (weight_scale_node := first_node.kwargs.get("weight_scale")) is not None:
                 weight_scale_node = weight_scale_node.meta.get('source_node')
                 new_shapes[weight_scale_node] = get_reduced_shape(
-                    tiled_shapes[weight_scale_node], weight_rf
+                    tiled_shapes[weight_scale_node], weight_factor
                 )
 
         for n in node.all_input_nodes:
             if n not in new_shapes and not n.name.startswith("code"):
                 input_shape = list(tiled_shapes[n])
-                aligned_shape = [1] * (len(output_shape) - len(input_shape)) + input_shape
-                tiled_shape = get_reduced_shape(tiled_shapes[n], reduce_factor)
-                new_shapes[n] = tiled_shape[-len(input_shape):]
+                new_shapes[n] = get_reduced_shape(input_shape, reduce_factor)
 
         bytes_to_allocate = sum(
             allocator.get_tensor_size(n, new_shapes.get(n))
@@ -1118,7 +1130,10 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
 
         if bytes_to_allocate <= allocator.total_memory:
             l2_tiling = first_node.meta.get("l2_tiling", [1] * len(reduce_factor))
-            first_node.meta["l2_tiling"] = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
+            l2_tiling = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
+            if math.prod(l2_tiling) == 1:
+                return {}
+            first_node.meta["l2_tiling"] = l2_tiling
             return new_shapes
 
     logger.warning(f"Failed to adjust tiling for {node}")
@@ -1266,6 +1281,9 @@ def run_memory_mapping(
             bytes_to_allocate -= size
             align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
             remaining_cache_size -= aligned_size if align_bank else size
+
+            if not align_bank:
+                logger.warning(f"{node}'s input node {n} cannot be put into an individual bank")
 
             scratchpad_mem[n] = sp_allocator.allocate_memory(
                 n, shape=tiled_shapes.get(n), align_bank=align_bank, expand_on_failure=True
