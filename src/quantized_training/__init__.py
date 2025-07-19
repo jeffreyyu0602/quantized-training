@@ -79,14 +79,17 @@ OPERATOR_MAPPINGS = {
     "dequantize": [quantized_ops.dequantize.default],
 }
 
+TRANSPOSED_OPERATORS = {
+    aten.max_pool2d.default: quantized_ops.max_pool2d.default,
+    aten.adaptive_avg_pool2d.default: quantized_ops.adaptive_avg_pool2d.default
+}
+
 
 def fuse(model, patterns, example_args, example_kwargs=None):
     if example_kwargs is None:
         example_kwargs = {}
 
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
-
-    ShapeProp(model).propagate(*flatten_args)
 
     for pattern in patterns:
         # If there is no corresponding mapping, we directly append the op itself
@@ -107,7 +110,7 @@ def transform(
     patterns=None,
     transpose_weight=False,
     transpose_fc=False,
-    conv2d_padding=None,
+    unroll_dimension=None,
     fuse_operator=True,
     perform_tiling=False,
     cache_size=None,
@@ -132,9 +135,10 @@ def transform(
 
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
+    ShapeProp(model).propagate(*flatten_args)
 
-    if conv2d_padding is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+    if unroll_dimension is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dimension)
 
     if perform_tiling:
         run_l2_tiling(model, cache_size, block_size)
@@ -143,15 +147,7 @@ def transform(
     if transpose_weight:
         transpose_conv2d_weights(model)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
-
-        replace_target(
-            model, aten.max_pool2d.default, quantized_ops.max_pool2d.default
-        )
-        replace_target(
-            model,
-            aten.adaptive_avg_pool2d.default,
-            quantized_ops.adaptive_avg_pool2d.default
-        )
+        replace_target(model, TRANSPOSED_OPERATORS)
 
         ShapeProp(model).propagate(*flatten_args)
 

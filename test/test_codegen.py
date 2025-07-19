@@ -31,7 +31,6 @@ from quantized_training import (
     compile,
     derive_bias_qparams_fn,
     extract_input_preprocessor,
-    fuse,
 )
 from quantized_training.codegen.utils import (
     get_conv_bn_layers,
@@ -251,7 +250,7 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
-        "conv2d_padding": args.padding,
+        "unroll_dimension": args.padding,
         "cache_size": args.cache_size,
         "block_size": args.block_size,
         "perform_tiling": args.perform_tiling,

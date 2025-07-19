@@ -388,6 +388,8 @@ def get_unique_node_name(node: Node):
     """
     if (pos := OP_TO_WEIGHT_POS_MAPPINGS.get(node.target)) is not None:
         weight_node = node.args[pos]
+        # TODO there are cases weights are sliced, we should trace up to find
+        # the get_attr node and use the name
         return weight_node.name.split("_weight")[0]
 
     return node.name

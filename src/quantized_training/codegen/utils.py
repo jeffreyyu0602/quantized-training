@@ -474,8 +474,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                     (input1, [0, pad_C]),
                 )
             node.replace_input_with(input1, padded_input1)
-            if (dtype := input1.meta.get("dtype")) is not None:
-                padded_input1.meta["dtype"] = dtype
+            padded_input1.meta["dtype"] = input1.meta.get("dtype")
 
         # Pad input2 (shape: [..., C, K]) along C and K dimensions if needed.
         if pad_C > 0 or pad_K > 0:
@@ -485,8 +484,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                     (input2, [0, pad_K, 0, pad_C]),
                 )
             node.replace_input_with(input2, padded_input2)
-            if (dtype := input2.meta.get("dtype")) is not None:
-                padded_input2.meta["dtype"] = dtype
+            padded_input2.meta["dtype"] = input2.meta.get("dtype")
 
         # After GEMM, slice the output to remove the extra padded columns in the K dimension.
         user_node = next(iter(node.users))
@@ -501,8 +499,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             for user in list(output_node.users):
                 if id(user) != id(sliced_output):
                     user.replace_input_with(output_node, sliced_output)
-            if (dtype := output_node.meta.get("dtype")) is not None:
-                sliced_output.meta["dtype"] = dtype
+            sliced_output.meta["dtype"] = output_node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
@@ -1008,13 +1005,14 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     return model
 
 
-def replace_target(model, target_to_replace, new_target):
+def replace_target(model, decomposition_table):
     graph = model.graph
     for node in graph.nodes:
-        if node.target != target_to_replace:
+        if (target := decomposition_table.get(node.target)) is None:
             continue
+
         with graph.inserting_after(node):
-            new_node = graph.call_function(new_target, node.args)
+            new_node = graph.call_function(target, node.args)
         propagate_shape(new_node)
         new_node.meta = node.meta
         node.replace_all_uses_with(new_node)
