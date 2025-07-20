@@ -91,6 +91,8 @@ def fuse(model, patterns, example_args, example_kwargs=None):
 
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
+    ShapeProp(model).propagate(*flatten_args)
+
     for pattern in patterns:
         # If there is no corresponding mapping, we directly append the op itself
         vector_stages = [
@@ -135,7 +137,6 @@ def transform(
 
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
-    ShapeProp(model).propagate(*flatten_args)
 
     if unroll_dimension is not None:
         pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dimension)

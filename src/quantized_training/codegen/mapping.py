@@ -63,13 +63,39 @@ def eliminate_dead_code(self):
     return changed
 
 
-def propagate_shape(node: Node):
-    fn = lambda n: n.value if hasattr(n, 'value') else n.meta.get('val')
-    args = map_arg(node.args, fn)
-    kwargs = map_arg(node.kwargs, fn)
-    node.value = node.target(*args, **kwargs)
-    if isinstance(node.value, torch.Tensor):
-        node.shape = node.value.shape
+def propagate_shape(node: Node, module: GraphModule = None):
+    def load_arg(a):
+        return torch.fx.graph.map_arg(a, lambda n: n.value)
+
+    def fetch_attr(target : str):
+        target_atoms = target.split('.')
+        attr_itr = module
+        for i, atom in enumerate(target_atoms):
+            if not hasattr(attr_itr, atom):
+                raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
+            attr_itr = getattr(attr_itr, atom)
+        return attr_itr
+
+    if node.op == 'get_attr':
+        result = fetch_attr(node.target)
+    elif node.op == 'call_function':
+        result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'call_method':
+        self_obj, *args = load_arg(node.args)
+        kwargs = load_arg(node.kwargs)
+        result = getattr(self_obj, node.target)(*args, **kwargs)
+    elif node.op == 'call_module':
+        result = module(*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'output':
+        result = load_arg(node.args[0])
+
+    if isinstance(result, torch.Tensor):
+        node.shape = result.shape
+        node.value = result.cpu().clone()
+    elif isinstance(result, (tuple, list)):
+        node.value = [x.cpu().clone() if isinstance(x, torch.Tensor) else x for x in result]
+    else:
+        node.value = result
 
 
 def get_parameter_or_buffer(model: torch.nn.Module, name: str):

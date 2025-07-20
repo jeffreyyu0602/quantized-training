@@ -785,6 +785,8 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     previous operation (e.g. matmul, conv2d, etc.), so that the quantize and
     dequantize can be fused with the previous operation.
     """
+    from .codegen.mapping import propagate_shape
+
     graph = model.graph
 
     def find_prev_op_and_move_node(node, prev_node=None):
@@ -830,6 +832,10 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             get_attr_node = graph.node_copy(node.args[3])
             quantize_op_inputs = [prev_node, qparam_node, node.args[2], get_attr_node]
             new_node = graph.call_function(node.target, tuple(quantize_op_inputs), {})
+
+        propagate_shape(qparam_node, model)
+        propagate_shape(get_attr_node, model)
+        propagate_shape(new_node, model)
 
         user.replace_input_with(prev_node, new_node)
 
