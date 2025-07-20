@@ -1576,9 +1576,10 @@ def run_vector_op_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
                 tiled_shapes[node_to_key.get(n)] = tiled_shape[-len(input_shape):]
 
             if total_tile_size <= cache_size:
-                logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
-                node.meta["tiled_shapes"] = tiled_shapes
-                node.meta["l2_tiling"] = reduce_factor
+                if math.prod(reduce_factor) > 1:
+                    logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
+                    node.meta["tiled_shapes"] = tiled_shapes
+                    node.meta["l2_tiling"] = reduce_factor
                 break
         else:
             logger.warning(f"Warning: No tile shape found to fit {node} into cache.")

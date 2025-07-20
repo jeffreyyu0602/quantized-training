@@ -910,10 +910,19 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                             nodes_map[node] = input_node
                             group.extend(n for n in fused_nodes if n not in group)
                             continue
+                        else:
+                            tiled_node = next(n for n in group if "tiled_shapes" in n.meta)
+                            logger.info(f"Cannot fuse {node} with {input_node} becuase {tiled_node} is a tiled op")
                     else:
                         nodes_map[node] = input_node
                         fused_nodes_list.append([input_node, *fused_nodes])
                         continue
+                else:
+                    reason = (
+                        f"{input_node} is a tiled op" if "tiled_shapes" in input_node.meta else
+                        f"{input_node} has more than one user ({len(input_node.users)})"
+                    )
+                    logger.info(f"Cannot fuse {node} with {input_node} because {reason}.")
 
         # If the reshape op cannot be fused with its predecesor, attempt to fuse it
         # with its immediate user
