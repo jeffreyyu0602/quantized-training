@@ -239,7 +239,7 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
-        "unroll_dimension": args.hardware_unrolling,
+        "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
     }
 

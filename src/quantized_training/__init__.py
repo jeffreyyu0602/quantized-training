@@ -114,7 +114,7 @@ def transform(
     transpose_weight=False,
     transpose_fc=False,
     cache_size=None,
-    unroll_dimension=None,
+    unroll_dims=None,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -136,12 +136,12 @@ def transform(
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
 
-    if unroll_dimension is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dimension)
+    if unroll_dims is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dims)
 
     if cache_size is not None:
-        run_matrix_op_l2_tiling(model, unroll_dimension, cache_size)
-        run_vector_op_l2_tiling(model, unroll_dimension, cache_size)
+        run_matrix_op_l2_tiling(model, unroll_dims, cache_size)
+        run_vector_op_l2_tiling(model, unroll_dims, cache_size)
 
     if transpose_weight:
         transpose_conv2d_weights(model)

@@ -1229,15 +1229,15 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def choose_tile(X, C, K, max_mem_bytes, unroll, input_byte=1, weight_byte=1, output_byte=2):
-    def snap(x): return int((x // unroll) * unroll)
+def choose_tile(X, C, K, max_mem_bytes, unroll_dims, input_byte=1, weight_byte=1, output_byte=2):
+    if isinstance(unroll_dims, int):
+        unroll_dims = (unroll_dims, unroll_dims)
+
+    def snap(x, unroll): return int((x // unroll) * unroll)
 
     X_tile = X
-    C_tile = snap(C)
-    K_tile = snap(K)
-
-    if isinstance(unroll, int):
-        unroll = (unroll, unroll)
+    C_tile = snap(C, unroll_dims[0])
+    K_tile = snap(K, unroll_dims[1])
 
     # Shrink K_tile first
     while True:
@@ -1248,12 +1248,12 @@ def choose_tile(X, C, K, max_mem_bytes, unroll, input_byte=1, weight_byte=1, out
         )
         if mem <= max_mem_bytes:
             break
-        if K_tile > unroll[1]:
-            K_tile = snap(K_tile / 2)
+        if K_tile > unroll_dims[1]:
+            K_tile = snap(K_tile / 2, unroll_dims[1])
         elif X_tile > 128:
             X_tile = int(X_tile / 2)
-        elif C_tile > unroll[0]:
-            C_tile = snap(C_tile / 2)
+        elif C_tile > unroll_dims[0]:
+            C_tile = snap(C_tile / 2, unroll_dims[0])
         else:
             raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
 
