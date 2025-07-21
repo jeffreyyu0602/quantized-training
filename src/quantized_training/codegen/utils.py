@@ -49,11 +49,14 @@ __all__ = [
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
     "rewrite_fx_graph",
-    "run_l2_tiling",
-    "run_vector_op_tiling",
+    "run_matrix_op_l2_tiling",
+    "run_vector_op_l2_tiling",
     "transpose_linear_weights",
     "strip_softmax_dtype",
 ]
+
+
+DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def get_conv_bn_layers(model):
@@ -1226,12 +1229,15 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, output_byte=2):
+def choose_tile(X, C, K, max_mem_bytes, unroll, input_byte=1, weight_byte=1, output_byte=2):
     def snap(x): return int((x // unroll) * unroll)
 
     X_tile = X
     C_tile = snap(C)
     K_tile = snap(K)
+
+    if isinstance(unroll, int):
+        unroll = (unroll, unroll)
 
     # Shrink K_tile first
     while True:
@@ -1242,11 +1248,11 @@ def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, 
         )
         if mem <= max_mem_bytes:
             break
-        if K_tile > unroll:
+        if K_tile > unroll[1]:
             K_tile = snap(K_tile / 2)
         elif X_tile > 128:
             X_tile = int(X_tile / 2)
-        elif C_tile > unroll:
+        elif C_tile > unroll[0]:
             C_tile = snap(C_tile / 2)
         else:
             raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
@@ -1254,7 +1260,7 @@ def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, 
     return X_tile, C_tile, K_tile
 
 
-def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
+def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     """
     Perform tiling on GEMM operations in a model to fit intermediate data into cache.
 
@@ -1268,7 +1274,7 @@ def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
     Args:
         model: A model object with a FX Graph containing GEMM nodes.
         cache_size (int): Total cache size in bytes.
-        unroll (int): Systolic array input channel dimension unroll size. 
+        unroll (int): Systolic array input and output channel unrolling dimension. 
     """
     graph = model.graph
 
@@ -1513,7 +1519,7 @@ def get_node_to_key(node):
     return node_to_key
 
 
-def run_vector_op_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
+def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     def get_reduce_factor(full_shape, tile_shape):
         return tuple(f // t for f, t in zip(full_shape, tile_shape))
 

@@ -35,7 +35,6 @@ from ..quantize_pt2e import create_getattr_from_value, export_model
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
-DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def eliminate_dead_code(self):
@@ -1180,7 +1179,7 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
 def run_memory_mapping(
     model: GraphModule,
     allocator: MemoryAllocator = None,
-    cache_size: int = DEFAULT_CACHE_SIZE,
+    cache_size: int = None,
     bank_size: int = None,
     bank_width: int = None,
 ):
@@ -1247,6 +1246,9 @@ def run_memory_mapping(
         return None
 
     def allocate_scratchpad(node: Node):
+        if cache_size is None:
+            return
+
         if node.op == "call_module":
             mod = named_modules[node.target]
             first_node = next(iter(n for n in mod.graph.nodes if n.op == "call_function"))
