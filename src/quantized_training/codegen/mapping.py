@@ -65,7 +65,7 @@ def eliminate_dead_code(self):
 
 def propagate_shape(node: Node, module: GraphModule = None):
     def load_arg(a):
-        return torch.fx.graph.map_arg(a, lambda n: n.value)
+        return torch.fx.graph.map_arg(a, lambda n: getattr(n, "value", n.meta.get("val")))
 
     def fetch_attr(target : str):
         target_atoms = target.split('.')
