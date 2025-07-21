@@ -425,7 +425,7 @@ if __name__ == "__main__":
                 return logits
 
         if args.mixed_precision:
-            set_qscheme(quantizer, get_llm_qscheme(args.block_size, args.outlier_threshold))
+            set_qscheme(quantizer, get_llm_qscheme(args.hardware_unrolling[0], args.outlier_threshold))
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 
