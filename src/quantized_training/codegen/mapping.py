@@ -35,7 +35,6 @@ from ..quantize_pt2e import create_getattr_from_value, export_model
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_SIZE = torch.finfo(torch.float32).max
-DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def eliminate_dead_code(self):
@@ -63,13 +62,39 @@ def eliminate_dead_code(self):
     return changed
 
 
-def propagate_shape(node: Node):
-    fn = lambda n: n.value if hasattr(n, 'value') else n.meta.get('val')
-    args = map_arg(node.args, fn)
-    kwargs = map_arg(node.kwargs, fn)
-    node.value = node.target(*args, **kwargs)
-    if isinstance(node.value, torch.Tensor):
-        node.shape = node.value.shape
+def propagate_shape(node: Node, module: GraphModule = None):
+    def load_arg(a):
+        return torch.fx.graph.map_arg(a, lambda n: getattr(n, "value", n.meta.get("val")))
+
+    def fetch_attr(target : str):
+        target_atoms = target.split('.')
+        attr_itr = module
+        for i, atom in enumerate(target_atoms):
+            if not hasattr(attr_itr, atom):
+                raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
+            attr_itr = getattr(attr_itr, atom)
+        return attr_itr
+
+    if node.op == 'get_attr':
+        result = fetch_attr(node.target)
+    elif node.op == 'call_function':
+        result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'call_method':
+        self_obj, *args = load_arg(node.args)
+        kwargs = load_arg(node.kwargs)
+        result = getattr(self_obj, node.target)(*args, **kwargs)
+    elif node.op == 'call_module':
+        result = module(*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'output':
+        result = load_arg(node.args[0])
+
+    if isinstance(result, torch.Tensor):
+        node.shape = result.shape
+        node.value = result.cpu().clone()
+    elif isinstance(result, (tuple, list)):
+        node.value = [x.cpu().clone() if isinstance(x, torch.Tensor) else x for x in result]
+    else:
+        node.value = result
 
 
 def get_parameter_or_buffer(model: torch.nn.Module, name: str):
@@ -388,6 +413,8 @@ def get_unique_node_name(node: Node):
     """
     if (pos := OP_TO_WEIGHT_POS_MAPPINGS.get(node.target)) is not None:
         weight_node = node.args[pos]
+        # TODO there are cases weights are sliced, we should trace up to find
+        # the get_attr node and use the name
         return weight_node.name.split("_weight")[0]
 
     return node.name
@@ -882,10 +909,19 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                             nodes_map[node] = input_node
                             group.extend(n for n in fused_nodes if n not in group)
                             continue
+                        else:
+                            tiled_node = next(n for n in group if "tiled_shapes" in n.meta)
+                            logger.info(f"Cannot fuse {node} with {input_node} becuase {tiled_node} is a tiled op")
                     else:
                         nodes_map[node] = input_node
                         fused_nodes_list.append([input_node, *fused_nodes])
                         continue
+                else:
+                    reason = (
+                        f"{input_node} is a tiled op" if "tiled_shapes" in input_node.meta else
+                        f"{input_node} has more than one user ({len(input_node.users)})"
+                    )
+                    logger.info(f"Cannot fuse {node} with {input_node} because {reason}.")
 
         # If the reshape op cannot be fused with its predecesor, attempt to fuse it
         # with its immediate user
@@ -1143,7 +1179,7 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
 def run_memory_mapping(
     model: GraphModule,
     allocator: MemoryAllocator = None,
-    cache_size: int = DEFAULT_CACHE_SIZE,
+    cache_size: int = None,
     bank_size: int = None,
     bank_width: int = None,
 ):
@@ -1210,6 +1246,9 @@ def run_memory_mapping(
         return None
 
     def allocate_scratchpad(node: Node):
+        if cache_size is None:
+            return
+
         if node.op == "call_module":
             mod = named_modules[node.target]
             first_node = next(iter(n for n in mod.graph.nodes if n.op == "call_function"))

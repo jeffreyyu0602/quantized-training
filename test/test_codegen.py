@@ -31,7 +31,6 @@ from quantized_training import (
     compile,
     derive_bias_qparams_fn,
     extract_input_preprocessor,
-    fuse,
 )
 from quantized_training.codegen.utils import (
     get_conv_bn_layers,
@@ -172,12 +171,6 @@ if __name__ == "__main__":
         help="Quantization scheme to use for LLMs."
     )
     parser.add_argument(
-        "--block_size",
-        type=int,
-        default=64,
-        help="Block size for quantization."
-    )
-    parser.add_argument(
         "--outlier_threshold",
         type=float,
         default=None,
@@ -186,19 +179,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cache_size",
         type=int,
-        default=8 * 1024 * 1024,
+        default=None,
         help="Total L2 SRAM size in SoC."
     )
     parser.add_argument(
         "--num_banks",
         type=int,
-        default=8,
+        default=None,
         help="Number of banks in the accelerator."
-    )
-    parser.add_argument(
-        "--perform_tiling",
-        action="store_true",
-        help="Whether to perform tiling for GEMM and Conv2D operations."
     )
     parser.add_argument(
         "--transpose_weight",
@@ -216,7 +204,7 @@ if __name__ == "__main__":
         help="Whether to use 2x2 maxpool for resnet18 and resnet50."
     )
     parser.add_argument(
-        "--padding",
+        "--hardware_unrolling",
         type=lambda x: tuple(map(int, x.split(','))),
         default=None,
         help="Hardware unroll dimensions for the accelerator."
@@ -251,15 +239,16 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
-        "conv2d_padding": args.padding,
+        "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
-        "block_size": args.block_size,
-        "perform_tiling": args.perform_tiling,
     }
 
     compile_args = {
         "cache_size": args.cache_size,
-        "bank_size": None if args.cache_size is None else args.cache_size // args.num_banks,
+        "bank_size": (
+            args.cache_size // args.num_banks
+            if args.cache_size is not None and args.num_banks is not None else None
+        ),
         "bank_width": args.bank_width,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
@@ -436,7 +425,7 @@ if __name__ == "__main__":
                 return logits
 
         if args.mixed_precision:
-            set_qscheme(quantizer, get_llm_qscheme(args.block_size, args.outlier_threshold))
+            set_qscheme(quantizer, get_llm_qscheme(args.hardware_unrolling[0], args.outlier_threshold))
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 

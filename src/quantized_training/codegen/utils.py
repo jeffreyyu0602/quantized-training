@@ -49,11 +49,14 @@ __all__ = [
     "replace_rmsnorm_with_layer_norm",
     "replace_target",
     "rewrite_fx_graph",
-    "run_l2_tiling",
-    "run_vector_op_tiling",
+    "run_matrix_op_l2_tiling",
+    "run_vector_op_l2_tiling",
     "transpose_linear_weights",
     "strip_softmax_dtype",
 ]
+
+
+DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def get_conv_bn_layers(model):
@@ -474,8 +477,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                     (input1, [0, pad_C]),
                 )
             node.replace_input_with(input1, padded_input1)
-            if (dtype := input1.meta.get("dtype")) is not None:
-                padded_input1.meta["dtype"] = dtype
+            padded_input1.meta["dtype"] = input1.meta.get("dtype")
 
         # Pad input2 (shape: [..., C, K]) along C and K dimensions if needed.
         if pad_C > 0 or pad_K > 0:
@@ -485,8 +487,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                     (input2, [0, pad_K, 0, pad_C]),
                 )
             node.replace_input_with(input2, padded_input2)
-            if (dtype := input2.meta.get("dtype")) is not None:
-                padded_input2.meta["dtype"] = dtype
+            padded_input2.meta["dtype"] = input2.meta.get("dtype")
 
         # After GEMM, slice the output to remove the extra padded columns in the K dimension.
         user_node = next(iter(node.users))
@@ -501,8 +502,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             for user in list(output_node.users):
                 if id(user) != id(sliced_output):
                     user.replace_input_with(output_node, sliced_output)
-            if (dtype := output_node.meta.get("dtype")) is not None:
-                sliced_output.meta["dtype"] = dtype
+            sliced_output.meta["dtype"] = output_node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
@@ -575,6 +575,13 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                 bias_param = get_parameter_or_buffer(model, bias.target)
                 bias_param.data = F.pad(bias_param.data, [0, pad_K])
                 bias.value, bias.shape = bias_param.data, bias_param.data.shape
+
+            if node.target == torch.ops.quantized_ops.conv2d_mx.default:
+                scale_node = node.kwargs.get("weight_scale")
+                bs = node.kwargs.get("block_size", 1)
+                scale_param = get_parameter_or_buffer(model, scale_node.target)
+                scale_param.data = F.pad(scale_param.data, [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K])
+                scale_node.value, scale_node.shape = scale_param.data, scale_param.data.shape
 
         propagate_shape(node)
 
@@ -723,7 +730,10 @@ def is_conv2d(node: Node) -> bool:
 
 def is_depthwise_conv(node: Node) -> bool:
     return (
-        node.target == torch.ops.aten.conv2d.default and
+        node.target in [
+            torch.ops.aten.conv2d.default,
+            torch.ops.quantized_ops.conv2d_mx.default
+        ] and
         len(node.args) == 7 and
         node.args[6] != 1
     )
@@ -792,46 +802,39 @@ def transpose_conv2d_weights(model: GraphModule):
         if node in visited:
             continue
 
-        conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
-
-        permute_nodes = {}
         swapped_nodes = []
 
+        conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
         for n in conv_chain:
             for arg in n.all_input_nodes:
                 if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
                     continue
 
-                # Handle the special case where weight is not a get_attr node
                 path = get_path_to_target(arg, [
                     torch.ops.aten.conv2d.default,
                     torch.ops.quantized_ops.conv2d_mx.default,
                     torch.ops.quantized_ops.conv2d.default,
                 ])
 
-                # Permute input and weight in different ways
                 is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
-                if is_weight_node:
-                    dims = (2, 3, 1, 0)
-                else:
-                    dims = (0, 2, 3, 1)
 
-                if not (is_weight_node and is_depthwise_conv(path[-1])):
-                    logger.debug(f"Insert permute before {arg} with dims {dims}")
+                if is_weight_node and is_depthwise_conv(path[-1]):
+                    continue
 
-                    if arg not in permute_nodes:
-                        with graph.inserting_after(arg):
-                            permute_node = graph.call_function(
-                                torch.ops.aten.permute.default, (arg, dims),
-                            )
-                        permute_node.meta["dtype"] = arg.meta.get("dtype")
-                        permute_nodes[arg] = permute_node
-                    n.replace_input_with(arg, permute_nodes[arg])
+                dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
+
+                logger.debug(f"Insert permute before {arg} with dims {dims}")
+                with graph.inserting_after(arg):
+                    permute_node = graph.call_function(
+                        torch.ops.aten.permute.default, (arg, dims),
+                    )
+                permute_node.meta["dtype"] = arg.meta.get("dtype")
+                n.replace_input_with(arg, permute_node)
 
             for user in list(n.users.keys()):
                 if user in conv_chain or user in swapped_nodes:
                     continue
-                logger.debug(f"Insert permute after {n} with dims (0, 3, 1, 2)")
+                logger.debug(f"Insert permute after {user} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
                         torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
@@ -859,7 +862,9 @@ def transpose_conv2d_weights(model: GraphModule):
                     scale_node = n.kwargs.get("weight_scale")
                     scale = get_parameter_or_buffer(model, scale_node.target)
                     scale.data = scale.data.permute(2, 3, 1, 0)
-                    continue
+
+            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
+                continue
 
             with graph.inserting_before(n):
                 conv_node = graph.call_function(
@@ -1014,13 +1019,14 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     return model
 
 
-def replace_target(model, target_to_replace, new_target):
+def replace_target(model, decomposition_table):
     graph = model.graph
     for node in graph.nodes:
-        if node.target != target_to_replace:
+        if (target := decomposition_table.get(node.target)) is None:
             continue
+
         with graph.inserting_after(node):
-            new_node = graph.call_function(new_target, node.args)
+            new_node = graph.call_function(target, node.args)
         propagate_shape(new_node)
         new_node.meta = node.meta
         node.replace_all_uses_with(new_node)
@@ -1234,12 +1240,15 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, output_byte=2):
-    def snap(x): return int((x // unroll) * unroll)
+def choose_tile(X, C, K, max_mem_bytes, unroll_dims, input_byte=1, weight_byte=1, output_byte=2):
+    if isinstance(unroll_dims, int):
+        unroll_dims = (unroll_dims, unroll_dims)
+
+    def snap(x, unroll): return int((x // unroll) * unroll)
 
     X_tile = X
-    C_tile = snap(C)
-    K_tile = snap(K)
+    C_tile = snap(C, unroll_dims[0])
+    K_tile = snap(K, unroll_dims[1])
 
     # Shrink K_tile first
     while True:
@@ -1250,19 +1259,19 @@ def choose_tile(X, C, K, max_mem_bytes, unroll=64, input_byte=1, weight_byte=1, 
         )
         if mem <= max_mem_bytes:
             break
-        if K_tile > unroll:
-            K_tile = snap(K_tile / 2)
+        if K_tile > unroll_dims[1]:
+            K_tile = snap(K_tile / 2, unroll_dims[1])
         elif X_tile > 128:
             X_tile = int(X_tile / 2)
-        elif C_tile > unroll:
-            C_tile = snap(C_tile / 2)
+        elif C_tile > unroll_dims[0]:
+            C_tile = snap(C_tile / 2, unroll_dims[0])
         else:
             raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
 
     return X_tile, C_tile, K_tile
 
 
-def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
+def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     """
     Perform tiling on GEMM operations in a model to fit intermediate data into cache.
 
@@ -1276,7 +1285,7 @@ def run_l2_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
     Args:
         model: A model object with a FX Graph containing GEMM nodes.
         cache_size (int): Total cache size in bytes.
-        unroll (int): Systolic array input channel dimension unroll size. 
+        unroll (int): Systolic array input and output channel unrolling dimension. 
     """
     graph = model.graph
 
@@ -1521,7 +1530,7 @@ def get_node_to_key(node):
     return node_to_key
 
 
-def run_vector_op_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
+def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     def get_reduce_factor(full_shape, tile_shape):
         return tuple(f // t for f, t in zip(full_shape, tile_shape))
 
@@ -1584,9 +1593,10 @@ def run_vector_op_tiling(model, cache_size=1 * 1024 * 1024, unroll=64):
                 tiled_shapes[node_to_key.get(n)] = tiled_shape[-len(input_shape):]
 
             if total_tile_size <= cache_size:
-                logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
-                node.meta["tiled_shapes"] = tiled_shapes
-                node.meta["l2_tiling"] = reduce_factor
+                if math.prod(reduce_factor) > 1:
+                    logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
+                    node.meta["tiled_shapes"] = tiled_shapes
+                    node.meta["l2_tiling"] = reduce_factor
                 break
         else:
             logger.warning(f"Warning: No tile shape found to fit {node} into cache.")

@@ -79,6 +79,11 @@ OPERATOR_MAPPINGS = {
     "dequantize": [quantized_ops.dequantize.default],
 }
 
+TRANSPOSED_OPERATORS = {
+    aten.max_pool2d.default: quantized_ops.max_pool2d.default,
+    aten.adaptive_avg_pool2d.default: quantized_ops.adaptive_avg_pool2d.default
+}
+
 
 def fuse(model, patterns, example_args, example_kwargs=None):
     if example_kwargs is None:
@@ -105,13 +110,11 @@ def transform(
     example_args,
     example_kwargs=None,
     patterns=None,
+    fuse_operator=True,
     transpose_weight=False,
     transpose_fc=False,
-    conv2d_padding=None,
-    fuse_operator=True,
-    perform_tiling=False,
     cache_size=None,
-    block_size=None,
+    unroll_dims=None,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -133,25 +136,17 @@ def transform(
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
 
-    if conv2d_padding is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *conv2d_padding)
+    if unroll_dims is not None:
+        pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dims)
 
-    if perform_tiling:
-        run_l2_tiling(model, cache_size, block_size)
-        run_vector_op_tiling(model, cache_size, block_size)
+    if cache_size is not None:
+        run_matrix_op_l2_tiling(model, unroll_dims, cache_size)
+        run_vector_op_l2_tiling(model, unroll_dims, cache_size)
 
     if transpose_weight:
         transpose_conv2d_weights(model)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
-
-        replace_target(
-            model, aten.max_pool2d.default, quantized_ops.max_pool2d.default
-        )
-        replace_target(
-            model,
-            aten.adaptive_avg_pool2d.default,
-            quantized_ops.adaptive_avg_pool2d.default
-        )
+        replace_target(model, TRANSPOSED_OPERATORS)
 
         ShapeProp(model).propagate(*flatten_args)
 
@@ -179,7 +174,7 @@ def compile(
 
     ShapeProp(model).propagate(*flatten_args)
 
-    allocator = MemoryAllocator(total_memory, bank_width, bank_size)
+    allocator = MemoryAllocator(total_memory)
     run_memory_mapping(model, allocator, cache_size, bank_size, bank_width)
 
     if dump_snapshop:
