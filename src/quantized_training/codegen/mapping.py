@@ -533,17 +533,17 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
 
     nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
     nodes_fused: Dict[Node, None] = {}
-
     fused_nodes_list = []
     for wanted_sources in pattern:
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
+        output_nodes = [p.output_nodes[0] for p in partitions]
 
-        if len(fused_nodes_list) == 0:
-            fused_nodes_list = [[p.output_nodes[0]] for p in partitions]
+        if len(output_nodes) == 0:
             continue
 
-        if len(partitions) == 0:
+        if len(fused_nodes_list) == 0:
+            fused_nodes_list = [[n] for n in output_nodes]
             continue
 
         fusion_candidates = []
@@ -562,29 +562,27 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
                 next_node = next(iter(next_node.users))
 
             matched = False
-            for p in partitions:
-                output_node = p.output_nodes[0]
-                if output_node in nodes_fused:
+            for node in output_nodes:
+                if node in nodes_fused:
                     continue
 
-                candidate = nodes + nop_nodes + [output_node]
+                candidate = nodes + nop_nodes + [node]
                 if _nodes_sequential(candidate, nodes_order):
                     matched = True
                     fusion_candidates.append(candidate)
                     for n in candidate:
                         nodes_fused[n] = None
-                    if [output_node] in fused_nodes_list:
-                        fused_nodes_list.remove([output_node])
-                    if [output_node] in fusion_candidates:
-                        fusion_candidates.remove([output_node])
+                    if [node] in fused_nodes_list:
+                        fused_nodes_list.remove([node])
+                    if [node] in fusion_candidates:
+                        fusion_candidates.remove([node])
+                    output_nodes.remove(node)
                     break
 
-            if matched:
-                partitions.remove(p)
-            else:
+            if not matched:
                 fusion_candidates.append(nodes)
 
-        fused_nodes_list = fusion_candidates + [[p.output_nodes[0]] for p in partitions]
+        fused_nodes_list = fusion_candidates + [[n] for n in output_nodes]
 
     return [fn for fn in fused_nodes_list if len(fn) > 1]
 

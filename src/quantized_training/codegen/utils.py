@@ -529,7 +529,10 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
         torch.fx.GraphModule: The transformed FX graph module.
     """
     for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.conv2d.default:
+        if node.target not in [
+            torch.ops.aten.conv2d.default,
+            torch.ops.quantized_ops.conv2d_mx.default,
+        ]:
             continue
 
         if len(node.args) == 7 and node.args[6] != 1:
@@ -1030,7 +1033,7 @@ def replace_target(model, decomposition_table):
     model.recompile()
 
 
-def replace_conv2d_with_im2col(model: GraphModule):
+def replace_conv2d_with_im2col(model: GraphModule, unroll=16):
     """
     Replace Conv2d operations with In2col operations in the given FX graph module.
 
@@ -1047,7 +1050,7 @@ def replace_conv2d_with_im2col(model: GraphModule):
         input_node = node.args[0]
         weight_node = node.args[1]
 
-        if input_node.value.shape[1] != 3:
+        if input_node.value.shape[1] >= unroll:
             continue
 
         N, C_in, H_in, W_in = input_node.value.shape
@@ -1065,11 +1068,13 @@ def replace_conv2d_with_im2col(model: GraphModule):
 
         param = model.get_parameter(weight_node.target)
         param.data = param.data.reshape(C_out, -1)
+        weight_node.value = param.data
 
         bias_node = args[2]
         if bias_node is not None:
             param = model.get_parameter(bias_node.target)
             param.data = param.data.reshape(C_out, 1)
+            bias_node.value = param.data
 
         with model.graph.inserting_before(node):
             in2col_node = model.graph.call_function(
@@ -1088,6 +1093,16 @@ def replace_conv2d_with_im2col(model: GraphModule):
                 torch.ops.aten.reshape.default,
                 (add_node, (N, C_out, H_out, W_out)),
             )
+
+        propagate_shape(in2col_node)
+        propagate_shape(matmul_node)
+        propagate_shape(add_node)
+        propagate_shape(reshape_node)
+
+        in2col_node.meta = input_node.meta
+        matmul_node.meta = node.meta
+        add_node.meta["source_fn_stack"] = [(add_node.name, "add")]
+        reshape_node.meta["source_fn_stack"] = [(reshape_node.name, "reshape")]
 
         node.replace_all_uses_with(reshape_node)
         model.graph.erase_node(node)
@@ -1114,6 +1129,8 @@ def extract_input_preprocessor(model: GraphModule):
 
     while _is_nop(user) or user.target in [
         torch.ops.aten.permute.default,
+        torch.ops.aten.transpose.int,
+        torch.ops.aten.im2col.default,
         torch.ops.quantized_ops.quantize.default,
     ]:
         preprocess_nodes.extend(

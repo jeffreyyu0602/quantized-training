@@ -204,6 +204,14 @@ if __name__ == "__main__":
         help="Whether to use 2x2 maxpool for resnet18 and resnet50."
     )
     parser.add_argument(
+        "--conv2d_im2col",
+        action="store_true",
+        help=(
+            "Whether to use transform conv2d operation with input channel "
+            "dimension smaller than unroll to linear operation through im2col."
+        )
+    )
+    parser.add_argument(
         "--hardware_unrolling",
         type=lambda x: tuple(map(int, x.split(','))),
         default=None,
@@ -241,6 +249,7 @@ if __name__ == "__main__":
         "transpose_fc": args.transpose_fc,
         "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
+        "conv2d_im2col": args.conv2d_im2col,
     }
 
     compile_args = {
