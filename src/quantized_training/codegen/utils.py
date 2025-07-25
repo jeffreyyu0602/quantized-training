@@ -21,6 +21,7 @@ from .mapping import (
 )
 from .mapping_utils import (
     _is_gemm_op,
+    _is_matmul,
     _is_elementwise_op,
     _is_nop,
     _is_reshape_op,
@@ -41,7 +42,6 @@ __all__ = [
     "get_conv_bn_layers",
     "transpose_conv2d_inputs_and_weights",
     "pad_gemm_inputs_to_hardware_unroll_size",
-    "pad_conv2d_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
@@ -428,89 +428,25 @@ def strip_softmax_dtype(model: torch.fx.GraphModule):
     return model
 
 
+def slicing_and_padding_cancel_out(shape, slice_dim, start, end, pad):
+    ndim = len(shape)
+    k = len(pad) // 2
+
+    pad_pairs = list(reversed(list(zip(pad[0::2], pad[1::2]))))
+    full_pad_pairs = [(0, 0)] * (ndim - k) + pad_pairs
+
+    for dim, (left, right) in enumerate(full_pad_pairs):
+        if dim != slice_dim:
+            if left != 0 or right != 0:
+                return False
+        else:
+            if left != start or right != shape[slice_dim] - end:
+                return False
+
+    return True
+
+
 def pad_gemm_inputs_to_hardware_unroll_size(
-    model: torch.fx.GraphModule,
-    C_unroll: int = 32,
-    K_unroll: int = 32,
-) -> torch.fx.GraphModule:
-    """
-    Pad inputs to GEMM (matrix multiplication) nodes in a torch.fx.GraphModule so that
-    the dimensions C and K are multiples of the provided unroll factors. After the GEMM,
-    the output is sliced to remove the extra padded columns in the K dimension.
-
-    Parameters:
-        model (torch.fx.GraphModule): The FX graph module to transform.
-        C_unroll (int): Unroll factor for the C (shared inner) dimension.
-        K_unroll (int): Unroll factor for the K dimension.
-
-    Returns:
-        torch.fx.GraphModule: The transformed FX graph module.
-    """
-    for node in list(model.graph.nodes):
-        if node.target != torch.ops.aten.matmul.default:
-            continue
-
-        # Get the two input nodes and their shapes.
-        input1, input2 = node.args[0], node.args[1]
-        shape1 = input1.meta["val"].shape  # Expected: [..., X, C]
-        shape2 = input2.meta["val"].shape  # Expected: [..., C, K]
-
-        # Process only if the inputs are at least 3D (batched or higher-dimensional).
-        input1_ndim = sum(1 for d in shape1 if d > 1)
-        input2_ndim = sum(1 for d in shape2 if d > 1)
-        if input1_ndim < 3 and input2_ndim < 3:
-            continue
-
-        # Interpret dimensions as: input1 is [..., X, C] and input2 is [..., C, K]
-        C = shape1[-1]
-        K = shape2[-1]
-
-        # Compute required padding.
-        pad_C = (C_unroll - (C % C_unroll)) % C_unroll
-        pad_K = (K_unroll - (K % K_unroll)) % K_unroll
-
-        # Pad input1 (shape: [..., X, C]) along C dimension if needed.
-        if pad_C > 0:
-            with model.graph.inserting_before(node):
-                padded_input1 = model.graph.call_function(
-                    torch.ops.aten.pad.default,
-                    (input1, [0, pad_C]),
-                )
-            node.replace_input_with(input1, padded_input1)
-            padded_input1.meta["dtype"] = input1.meta.get("dtype")
-
-        # Pad input2 (shape: [..., C, K]) along C and K dimensions if needed.
-        if pad_C > 0 or pad_K > 0:
-            with model.graph.inserting_before(node):
-                padded_input2 = model.graph.call_function(
-                    torch.ops.aten.pad.default,
-                    (input2, [0, pad_K, 0, pad_C]),
-                )
-            node.replace_input_with(input2, padded_input2)
-            padded_input2.meta["dtype"] = input2.meta.get("dtype")
-
-        # After GEMM, slice the output to remove the extra padded columns in the K dimension.
-        user_node = next(iter(node.users))
-        output_node = node
-
-        if pad_K:
-            with model.graph.inserting_before(user_node):
-                sliced_output = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor,
-                    (output_node, -1, 0, K),
-                )
-            for user in list(output_node.users):
-                if id(user) != id(sliced_output):
-                    user.replace_input_with(output_node, sliced_output)
-            sliced_output.meta["dtype"] = output_node.meta.get("dtype")
-
-    model.graph.lint()
-    model.graph.eliminate_dead_code()
-    model.recompile()
-    return model
-
-
-def pad_conv2d_inputs_to_hardware_unroll_size(
     model: torch.fx.GraphModule,
     C_unroll: int = 32,
     K_unroll: int = 32,
@@ -528,117 +464,126 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
     Returns:
         torch.fx.GraphModule: The transformed FX graph module.
     """
-    for node in list(model.graph.nodes):
-        if node.target not in [
-            torch.ops.aten.conv2d.default,
-            torch.ops.quantized_ops.conv2d_mx.default,
-        ]:
-            continue
 
-        if len(node.args) == 7 and node.args[6] != 1:
+    def pad_input_node(input, pad, scale, scale_pad):
+        pad_quantize_mx_input = (
+            scale is not None and
+            input.target == operator.getitem and
+            scale.target == operator.getitem and
+            input.args[0] == scale.args[0] and
+            input.args[0].target == torch.ops.quantized_ops.quantize_mx.default
+        )
+
+        node_to_pad = input.args[0].args[0] if pad_quantize_mx_input else input
+
+        skip_padding = False
+        if node_to_pad.target == torch.ops.aten.slice.Tensor:
+            arg = node_to_pad.args[0]
+            skip_padding = slicing_and_padding_cancel_out(
+                arg.value.shape, *node_to_pad.args[1:], pad
+            )
+
+        if skip_padding:
+            new_input = node_to_pad.args[0]
+        else:
+            with model.graph.inserting_after(node_to_pad):
+                new_input = model.graph.call_function(
+                    torch.ops.aten.pad.default, (node_to_pad, pad),
+                )
+
+            propagate_shape(new_input)
+            new_input.meta["dtype"] = node_to_pad.meta.get("dtype")
+
+        if pad_quantize_mx_input:
+            input.args[0].replace_input_with(node_to_pad, new_input)
+            propagate_shape(input.args[0])
+            propagate_shape(input)
+            propagate_shape(scale)
+        else:
+            node.replace_input_with(node_to_pad, new_input)
+
+            if scale is not None and any(x for x in scale_pad):
+                with model.graph.inserting_before(node):
+                    padded_scale = model.graph.call_function(
+                        torch.ops.aten.pad.default, (scale, scale_pad),
+                    )
+
+                node.replace_input_with(scale, padded_scale)
+
+                propagate_shape(padded_scale)
+                padded_scale.meta["dtype"] = scale.meta.get("dtype")
+
+    for node in list(model.graph.nodes):
+        if not _is_gemm_op(node) or is_depthwise_conv(node):
             continue
 
         input, weight = node.args[:2]
-        C_in = input.shape[1]
-        C_out = weight.shape[0]
+        C_in = input.shape[1] if is_conv2d(node) else input.shape[-1]
+        C_out = weight.shape[0] if not _is_matmul(node) else weight.shape[1]
 
-        # First layer is handled separately
-        if C_in == 3:
+        # CNN first layer is handled separately
+        if is_conv2d(node) and C_in == 3:
             continue
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
         # Pad input along C dimension
-        if pad_C > 0:
-            logger.debug(f"Pad input {input} to {node} with {pad_C} along C dimension")
-            pad_dims_input = [0, 0, 0, 0, 0, pad_C]
-            with model.graph.inserting_before(node):
-                padded_input = model.graph.call_function(
-                    torch.ops.aten.pad.default, (input, pad_dims_input),
-                )
-
-            node.replace_input_with(input, padded_input)
-
-            propagate_shape(padded_input)
-            padded_input.meta["dtype"] = input.meta.get("dtype")
-
-            if node.target == torch.ops.quantized_ops.conv2d_mx.default:
-                input_scale = node.kwargs.get("input_scale")
-                bs = node.kwargs.get("block_size", 1)
-                input_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs)]
-
-                with model.graph.inserting_before(node):
-                    padded_input_scale = model.graph.call_function(
-                        torch.ops.aten.pad.default, (input_scale, input_scale_pad),
-                    )
-
-                node.replace_input_with(input_scale, padded_input_scale)
-
-                propagate_shape(padded_input_scale)
-                padded_input_scale.meta["dtype"] = input_scale.meta.get("dtype")
+        if pad_C:
+            input_pad = [0, 0, 0, 0, 0, pad_C] if is_conv2d(node) else [0, pad_C]
+            bs = node.kwargs.get("block_size", 1)
+            input_scale = node.kwargs.get("input_scale")
+            input_scale_pad = (
+                [0, 0, 0, 0, 0, int(pad_C / bs)] if is_conv2d(node) else [0, int(pad_C / bs)]
+            )
+            pad_input_node(input, input_pad, input_scale, input_scale_pad)
 
         # Pad weight along K and C
-        if pad_C > 0 or pad_K > 0:
-            logger.debug(f"Pad weight {weight} with {pad_C} and {pad_K} along C and K dimensions")
-            param = get_parameter_or_buffer(model, weight.target)
-            pad_dims_weight = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-            param.data = F.pad(param.data, pad_dims_weight)
-            weight.value, weight.shape = param.data, param.data.shape
+        if pad_C or pad_K:
+            bs = node.kwargs.get("block_size", 1)
+            weight_scale = node.kwargs.get("weight_scale")
 
-            if len(node.args) > 2 and node.args[2] is not None:
+            if is_conv2d(node):
+                weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+                weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
+            elif _is_matmul(node):
+                weight_pad = [0, pad_K, 0, pad_C]
+                weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
+            else:
+                weight_pad = [0, pad_C, 0, pad_K]
+                weight_scale_pad = [0, int(pad_C / bs), 0, pad_K]
+
+            if weight.op == "get_attr":
+                param = get_parameter_or_buffer(model, weight.target)
+                param.data = F.pad(param.data, weight_pad)
+                weight.value = param.data
+
+                if weight_scale is not None:
+                    scale_param = get_parameter_or_buffer(model, weight_scale.target)
+                    scale_param.data = F.pad(scale_param.data, weight_scale_pad)
+                    weight_scale.value = scale_param.data
+            else:
+                pad_input_node(weight, weight_pad, weight_scale, weight_scale_pad)
+
+            if len(node.args) > 2 and node.args[2] is not None and pad_K:
                 bias = node.args[2]
                 bias_param = get_parameter_or_buffer(model, bias.target)
                 bias_param.data = F.pad(bias_param.data, [0, pad_K])
-                bias.value, bias.shape = bias_param.data, bias_param.data.shape
-
-            if node.target == torch.ops.quantized_ops.conv2d_mx.default:
-                scale_node = node.kwargs.get("weight_scale")
-                bs = node.kwargs.get("block_size", 1)
-                scale_param = get_parameter_or_buffer(model, scale_node.target)
-                scale_param.data = F.pad(scale_param.data, [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K])
-                scale_node.value, scale_node.shape = scale_param.data, scale_param.data.shape
+                bias.value = bias_param.data
 
         propagate_shape(node)
 
-        if pad_K == 0:
-            continue
-
-        # Slice output along channel dimension to remove padding in C_out
-        visited = set()
-        for user in list(node.users):
-            if user in visited:
-                continue
-
-            next_user = user
-            while _is_elementwise_op(next_user) and len(next_user.users) == 1:
-                visited.add(next_user)
-                for n in next_user.all_input_nodes:
-                    if n in visited or n.value.ndim != 4 or n.shape[1] % K_unroll == 0:
-                        continue
-                    dims = [0, 0, 0, 0, 0, pad_K]
-                    with model.graph.inserting_before(next_user):
-                        arg_pad = model.graph.call_function(
-                            torch.ops.aten.pad.default, (n, dims),
-                        )
-                    next_user.replace_input_with(n, arg_pad)
-
-                    logger.debug(f"Inserted {arg_pad} to pad {n} with {pad_K} along K dimension")
-                    propagate_shape(arg_pad)
-                    arg_pad.meta["dtype"] = n.meta.get("dtype")
-
-                next_user = next(iter(next_user.users))
-
-            input_node = next_user.all_input_nodes[0]
-            with model.graph.inserting_before(next_user):
+        if pad_K:
+            with model.graph.inserting_after(node):
                 slice_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor,
-                    (input_node, 1, 0, C_out),
+                    torch.ops.aten.slice.Tensor, (node, 1, 0, C_out),
                 )
-            next_user.replace_input_with(input_node, slice_node)
+
+            node.replace_all_uses_with(slice_node)
+            slice_node.replace_input_with(slice_node, node)
 
             propagate_shape(slice_node)
-            slice_node.meta["dtype"] = input_node.meta.get("dtype")
+            slice_node.meta["dtype"] = node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
