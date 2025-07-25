@@ -138,7 +138,7 @@ def transform(
     fuse_quantize_dequantize_with_previous_op(model)
 
     if unroll_dims is not None:
-        pad_conv2d_inputs_to_hardware_unroll_size(model, *unroll_dims)
+        pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
 
     if conv2d_im2col:
         replace_conv2d_with_im2col(model)
