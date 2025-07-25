@@ -148,9 +148,9 @@ def transform(
         run_vector_op_l2_tiling(model, unroll_dims, cache_size)
 
     if transpose_weight:
-        transpose_conv2d_weights(model)
-        transpose_linear_weights(model, transpose_fc=transpose_fc)
+        transpose_conv2d_inputs_and_weights(model)
         replace_target(model, TRANSPOSED_OPERATORS)
+        transpose_linear_weights(model, transpose_fc=transpose_fc)
 
         ShapeProp(model).propagate(*flatten_args)
 

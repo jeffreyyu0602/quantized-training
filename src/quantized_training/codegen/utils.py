@@ -39,7 +39,7 @@ __all__ = [
     "eliminate_reshape_with_no_effect",
     "extract_input_preprocessor",
     "get_conv_bn_layers",
-    "transpose_conv2d_weights",
+    "transpose_conv2d_inputs_and_weights",
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_conv2d_inputs_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
@@ -561,9 +561,22 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
             node.replace_input_with(input, padded_input)
 
             propagate_shape(padded_input)
+            padded_input.meta["dtype"] = input.meta.get("dtype")
 
-            if (dtype := input.meta.get("dtype")) is not None:
-                padded_input.meta["dtype"] = dtype
+            if node.target == torch.ops.quantized_ops.conv2d_mx.default:
+                input_scale = node.kwargs.get("input_scale")
+                bs = node.kwargs.get("block_size", 1)
+                input_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs)]
+
+                with model.graph.inserting_before(node):
+                    padded_input_scale = model.graph.call_function(
+                        torch.ops.aten.pad.default, (input_scale, input_scale_pad),
+                    )
+
+                node.replace_input_with(input_scale, padded_input_scale)
+
+                propagate_shape(padded_input_scale)
+                padded_input_scale.meta["dtype"] = input_scale.meta.get("dtype")
 
         # Pad weight along K and C
         if pad_C > 0 or pad_K > 0:
@@ -608,11 +621,12 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
                         arg_pad = model.graph.call_function(
                             torch.ops.aten.pad.default, (n, dims),
                         )
+                    next_user.replace_input_with(n, arg_pad)
+
                     logger.debug(f"Inserted {arg_pad} to pad {n} with {pad_K} along K dimension")
                     propagate_shape(arg_pad)
-                    if (dtype := n.meta.get("dtype")) is not None:
-                        arg_pad.meta["dtype"] = dtype
-                    next_user.replace_input_with(n, arg_pad)
+                    arg_pad.meta["dtype"] = n.meta.get("dtype")
+
                 next_user = next(iter(next_user.users))
 
             input_node = next_user.all_input_nodes[0]
@@ -624,8 +638,7 @@ def pad_conv2d_inputs_to_hardware_unroll_size(
             next_user.replace_input_with(input_node, slice_node)
 
             propagate_shape(slice_node)
-            if (dtype := input_node.meta.get("dtype")) is not None:
-                slice_node.meta["dtype"] = dtype
+            slice_node.meta["dtype"] = input_node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
@@ -741,7 +754,7 @@ def is_depthwise_conv(node: Node) -> bool:
     )
 
 
-def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[Node]:
+def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited: Set[Node]) -> Set[Node]:
     """DFS downstream traversal to find conv2d nodes connected through elementwise ops."""
     stack = [start]
     chain = set()
@@ -758,15 +771,57 @@ def dfs_collect_connected_conv2d_chain(start: Node, visited: Set[Node]) -> Set[N
             if is_conv2d(user) or _is_elementwise_op(user) or user.target in [
                 torch.ops.aten.adaptive_avg_pool2d.default,
                 torch.ops.aten.max_pool2d.default,
+                torch.ops.aten.slice.Tensor,
+                torch.ops.aten.pad.default,
                 torch.ops.quantized_ops.quantize_mx.default,
                 operator.getitem,
             ]:
                 stack.append(user)
 
+    order = {n: i for i, n in enumerate(model.graph.nodes)}
+    chain = sorted(chain, key=lambda n: order[n])
     return chain
 
 
-def transpose_conv2d_weights(model: GraphModule):
+def remap_pad_after_permute(pad: Tuple[int, ...], order: Tuple[int, ...], ndim: int) -> Tuple[int, ...]:
+    """
+    Remap padding after permuting a tensor.
+
+    Args:
+        pad: Original pad tuple as in torch.nn.functional.pad (starts from last dim).
+        order: Permutation order of dimensions.
+        ndim: Number of dimensions in the original tensor.
+
+    Returns:
+        Tuple[int, ...]: New pad tuple corresponding to permuted tensor.
+    """
+    # number of padded dimensions
+    k = len(pad) // 2
+    assert k <= ndim, "Pad dimensions exceed tensor dimensions"
+
+    # original padded dims (from last to first)
+    original_padded_dims = list(range(ndim - k, ndim))
+
+    dim_to_new_index = {d: order.index(d) for d in range(ndim)}
+
+    # build list of (new_dim_index, (pad_left, pad_right))
+    pad_pairs = []
+    for i, orig_dim in enumerate(reversed(original_padded_dims)):
+        left = pad[2 * i]
+        right = pad[2 * i + 1]
+        pad_pairs.append((dim_to_new_index[orig_dim], (left, right)))
+
+    # sort by new_dim_index descending because pad expects last-first order
+    pad_pairs_sorted = sorted(pad_pairs, key=lambda x: x[0], reverse=True)
+
+    new_pad = []
+    for _, (left, right) in pad_pairs_sorted:
+        new_pad.extend([left, right])
+
+    return tuple(new_pad)
+
+
+def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
 
@@ -790,21 +845,23 @@ def transpose_conv2d_weights(model: GraphModule):
         return None
 
     for node in graph.nodes:
-        if not is_conv2d(node) and node.target not in [
+        is_pool = node.target in [
             torch.ops.aten.adaptive_avg_pool2d.default,
             torch.ops.aten.max_pool2d.default,
-        ]:
-            continue
+        ]
 
-        if node in visited:
+        if node in visited or (not is_conv2d(node) and not is_pool):
             continue
 
         swapped_nodes = []
+        node_dim_order = {}
+        conv_chain = dfs_collect_connected_conv2d_chain(model, node, visited)
 
-        conv_chain = dfs_collect_connected_conv2d_chain(node, visited)
-        for n in conv_chain:
-            for arg in n.all_input_nodes:
+        for node_in_chain in conv_chain:
+            for arg in node_in_chain.all_input_nodes:
                 if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
+                    if arg.all_input_nodes:
+                        node_dim_order[arg] = node_dim_order.get(arg.all_input_nodes[0])
                     continue
 
                 path = get_path_to_target(arg, [
@@ -826,55 +883,70 @@ def transpose_conv2d_weights(model: GraphModule):
                         torch.ops.aten.permute.default, (arg, dims),
                     )
                 permute_node.meta["dtype"] = arg.meta.get("dtype")
-                n.replace_input_with(arg, permute_node)
+                node_in_chain.replace_input_with(arg, permute_node)
 
-            for user in list(n.users.keys()):
+                node_dim_order[permute_node] = dims
+
+            for user in list(node_in_chain.users.keys()):
                 if user in conv_chain or user in swapped_nodes:
                     continue
                 logger.debug(f"Insert permute after {user} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (n, (0, 3, 1, 2)),
+                        torch.ops.aten.permute.default, (node_in_chain, (0, 3, 1, 2)),
                     )
-                permute_node.meta["dtype"] = n.meta.get("dtype")
-                user.replace_input_with(n, permute_node)
+                permute_node.meta["dtype"] = node_in_chain.meta.get("dtype")
+                user.replace_input_with(node_in_chain, permute_node)
 
-            if n.target == torch.ops.quantized_ops.quantize_mx.default:
-                n.args = n.args[:1] + (-1,) + n.args[2:]
+            node_dim_order[node_in_chain] = node_dim_order[node_in_chain.all_input_nodes[0]]
 
-            if not is_conv2d(n):
-                continue
+            if node_in_chain.target == torch.ops.aten.slice.Tensor:
+                order = node_dim_order[node_in_chain]
+                args = tuple(node_in_chain.args)
+                node_in_chain.args = args[:1] + (order.index(args[1]),) + args[2:]
 
-            if not is_depthwise_conv(n):
-                weight_node = n.args[1]
+            if node_in_chain.target == torch.ops.aten.pad.default:
+                pad = remap_pad_after_permute(
+                    node_in_chain.args[1],
+                    node_dim_order[node_in_chain],
+                    node_in_chain.value.ndim,
+                )
+                node_in_chain.args = (node_in_chain.args[0], pad) + node_in_chain.args[2:]
+
+            if node_in_chain.target == torch.ops.quantized_ops.quantize_mx.default:
+                node_in_chain.args = node_in_chain.args[:1] + (-1,) + node_in_chain.args[2:]
+
+            if is_conv2d(node_in_chain) and not is_depthwise_conv(node_in_chain):
+                weight_node = node_in_chain.args[1]
                 if weight_node.op == "get_attr":
                     param = get_parameter_or_buffer(model, weight_node.target)
                     logger.debug(
-                        f"Permuting weights for {n}: {tuple(param.data.shape)}"
+                        f"Permuting weights for {node_in_chain}: {tuple(param.data.shape)}"
                         f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
                     )
                     param.data = param.data.permute(2, 3, 1, 0)
+                    node_dim_order[weight_node] = (2, 3, 1, 0)
 
-                if n.target == torch.ops.quantized_ops.conv2d_mx.default:
-                    scale_node = n.kwargs.get("weight_scale")
+                if node_in_chain.target == torch.ops.quantized_ops.conv2d_mx.default:
+                    scale_node = node_in_chain.kwargs.get("weight_scale")
                     scale = get_parameter_or_buffer(model, scale_node.target)
                     scale.data = scale.data.permute(2, 3, 1, 0)
+                    node_dim_order[scale_node] = (2, 3, 1, 0)
 
-            if n.target == torch.ops.quantized_ops.conv2d_mx.default:
-                continue
+            if node_in_chain.target == torch.ops.aten.conv2d.default:
+                with graph.inserting_before(node_in_chain):
+                    conv_node = graph.call_function(
+                        torch.ops.quantized_ops.conv2d.default, args=node_in_chain.args
+                    )
 
-            with graph.inserting_before(n):
-                conv_node = graph.call_function(
-                    torch.ops.quantized_ops.conv2d.default, args=n.args
-                )
+                logger.debug(f"Replace conv2d node {node_in_chain} with {conv_node}")
 
-            logger.debug(f"Replace conv2d node {n} with {conv_node}")
+                conv_node.meta = node_in_chain.meta
+                node_in_chain.replace_all_uses_with(conv_node)
+                graph.erase_node(node_in_chain)
 
-            conv_node.meta = n.meta
-            n.replace_all_uses_with(conv_node)
-            graph.erase_node(n)
-
-            swapped_nodes.append(conv_node)
+                swapped_nodes.append(conv_node)
+                node_dim_order[conv_node] = (0, 2, 3, 1)
 
     graph.lint()
     model.recompile()
