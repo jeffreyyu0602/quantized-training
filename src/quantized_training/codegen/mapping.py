@@ -533,17 +533,17 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
 
     nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
     nodes_fused: Dict[Node, None] = {}
-
     fused_nodes_list = []
     for wanted_sources in pattern:
         partitions = get_source_partitions(graph, wanted_sources)
         partitions = list(itertools.chain.from_iterable(partitions.values()))
+        output_nodes = [p.output_nodes[0] for p in partitions]
 
-        if len(fused_nodes_list) == 0:
-            fused_nodes_list = [[p.output_nodes[0]] for p in partitions]
+        if len(output_nodes) == 0:
             continue
 
-        if len(partitions) == 0:
+        if len(fused_nodes_list) == 0:
+            fused_nodes_list = [[n] for n in output_nodes]
             continue
 
         fusion_candidates = []
@@ -562,29 +562,27 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
                 next_node = next(iter(next_node.users))
 
             matched = False
-            for p in partitions:
-                output_node = p.output_nodes[0]
-                if output_node in nodes_fused:
+            for node in output_nodes:
+                if node in nodes_fused:
                     continue
 
-                candidate = nodes + nop_nodes + [output_node]
+                candidate = nodes + nop_nodes + [node]
                 if _nodes_sequential(candidate, nodes_order):
                     matched = True
                     fusion_candidates.append(candidate)
                     for n in candidate:
                         nodes_fused[n] = None
-                    if [output_node] in fused_nodes_list:
-                        fused_nodes_list.remove([output_node])
-                    if [output_node] in fusion_candidates:
-                        fusion_candidates.remove([output_node])
+                    if [node] in fused_nodes_list:
+                        fused_nodes_list.remove([node])
+                    if [node] in fusion_candidates:
+                        fusion_candidates.remove([node])
+                    output_nodes.remove(node)
                     break
 
-            if matched:
-                partitions.remove(p)
-            else:
+            if not matched:
                 fusion_candidates.append(nodes)
 
-        fused_nodes_list = fusion_candidates + [[p.output_nodes[0]] for p in partitions]
+        fused_nodes_list = fusion_candidates + [[n] for n in output_nodes]
 
     return [fn for fn in fused_nodes_list if len(fn) > 1]
 
@@ -1215,6 +1213,14 @@ def run_memory_mapping(
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
 
+            if (
+                _is_nop(n) or
+                _is_indexing_or_concatenation_op(n) or
+                n.target == operator.getitem
+            ):
+                for arg in n.all_input_nodes:
+                    register_last_uses(arg, user)
+
     for node in reversed(model.graph.nodes):
         map_arg(node.args, lambda n: register_last_uses(n, node))
         map_arg(node.kwargs, lambda n: register_last_uses(n, node))
@@ -1226,9 +1232,6 @@ def run_memory_mapping(
         of the code is optimal.
         """
         nodes_to_delete = user_to_last_uses.get(user, [])
-        for n in list(nodes_to_delete):
-            if _is_nop(n) or _is_indexing_or_concatenation_op(n) or n.target == operator.getitem:
-                nodes_to_delete.extend(get_unused_values(n))
         return nodes_to_delete
 
     def get_path_to_target(node: torch.fx.Node, targets):
@@ -1417,8 +1420,9 @@ def run_memory_mapping(
         # We use the partition of the first input tensor since it preallocates
         # memory for all the tensors in the stack operation
         if node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
-            if len(node.args) != 1 and node.args[1] != 0:
-                raise RuntimeError(f"Unsupported stack operation: {node}")
+            assert len(node.args) != 1 and node.args[1] != 0, (
+                f"Only support stacking along the first dimension, got {node.args[1]} for {node}"
+            )
             continue
 
         allocate_for_stack_op(node)
