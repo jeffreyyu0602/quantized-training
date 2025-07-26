@@ -517,16 +517,14 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         if not _is_gemm_op(node) or is_depthwise_conv(node):
             continue
 
-        input, weight = node.args[:2]
+        input = node.args[0]
         C_in = input.shape[1] if is_conv2d(node) else input.shape[-1]
-        C_out = weight.shape[0] if not _is_matmul(node) else weight.shape[1]
 
         # CNN first layer is handled separately
         if is_conv2d(node) and C_in == 3:
             continue
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
-        pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
         # Pad input along C dimension
         if pad_C:
@@ -537,6 +535,13 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 [0, 0, 0, 0, 0, int(pad_C / bs)] if is_conv2d(node) else [0, int(pad_C / bs)]
             )
             pad_input_node(input, input_pad, input_scale, input_scale_pad)
+
+        weight = node.args[1]
+        C_in = weight.shape[0] if _is_matmul(node) else weight.shape[1]
+        C_out = weight.shape[1] if _is_matmul(node) else weight.shape[0]
+
+        pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
+        pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
         # Pad weight along K and C
         if pad_C or pad_K:
@@ -554,6 +559,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 weight_scale_pad = [0, int(pad_C / bs), 0, pad_K]
 
             if weight.op == "get_attr":
+                logger.debug(f"Pad {weight} with {weight_pad}")
                 param = get_parameter_or_buffer(model, weight.target)
                 param.data = F.pad(param.data, weight_pad)
                 weight.value = param.data
