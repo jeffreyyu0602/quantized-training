@@ -749,19 +749,18 @@ def remap_pad_after_permute(pad: Tuple[int, ...], order: Tuple[int, ...], ndim: 
 
     dim_to_new_index = {d: order.index(d) for d in range(ndim)}
 
-    # build list of (new_dim_index, (pad_left, pad_right))
-    pad_pairs = []
+    new_pad_pairs = {i: (0, 0) for i in range(ndim)}
+
+    # Assign padding for dimensions that were originally padded
     for i, orig_dim in enumerate(reversed(original_padded_dims)):
         left = pad[2 * i]
         right = pad[2 * i + 1]
-        pad_pairs.append((dim_to_new_index[orig_dim], (left, right)))
+        new_pad_pairs[dim_to_new_index[orig_dim]] = (left, right)
 
-    # sort by new_dim_index descending because pad expects last-first order
-    pad_pairs_sorted = sorted(pad_pairs, key=lambda x: x[0], reverse=True)
-
+    # Collect pads in reverse order (last-first)
     new_pad = []
-    for _, (left, right) in pad_pairs_sorted:
-        new_pad.extend([left, right])
+    for i in sorted(new_pad_pairs.keys(), reverse=True):
+        new_pad.extend(new_pad_pairs[i])
 
     return tuple(new_pad)
 
@@ -782,7 +781,10 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
 
             if (
                 _is_nop(user) or _is_indexing_or_concatenation_op(user)
-                or user.target == torch.ops.quantized_ops.quantize.default
+                or user.target in [
+                    torch.ops.quantized_ops.quantize.default,
+                    torch.ops.aten.pad.default,
+                ]
             ):
                 path = get_path_to_target(user, targets)
                 if path is not None:
@@ -804,7 +806,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
 
         for node_in_chain in conv_chain:
             for arg in node_in_chain.all_input_nodes:
-                if arg in conv_chain or arg in swapped_nodes or arg.op == "get_attr":
+                if arg in conv_chain or arg in swapped_nodes:
                     if arg.all_input_nodes:
                         node_dim_order[arg] = node_dim_order.get(arg.all_input_nodes[0])
                     continue
@@ -815,11 +817,30 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     torch.ops.quantized_ops.conv2d.default,
                 ])
 
-                is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
+                # Permute weight and weight scale
+                if arg.op == "get_attr" and path is not None:
+                    input_node = path[-2]
+                    conv2d_node = path[-1]
 
-                if is_weight_node and is_depthwise_conv(path[-1]):
+                    if is_depthwise_conv(conv2d_node):
+                        continue
+
+                    if input_node == conv2d_node.args[1]:
+                        logger.debug(f"Permuting weight node {arg}")
+                        param = get_parameter_or_buffer(model, arg.target)
+                        param.data = param.data.permute(2, 3, 1, 0)
+                        node_dim_order[arg] = (2, 3, 1, 0)
+
+                    if input_node == conv2d_node.kwargs.get("weight_scale"):
+                        logger.debug(f"Permuting weight scale node {arg}")
+                        scale = get_parameter_or_buffer(model, arg.target)
+                        scale.data = scale.data.permute(2, 3, 1, 0)
+                        node_dim_order[arg] = (2, 3, 1, 0)
+
+                if arg.op == "get_attr":
                     continue
 
+                is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
                 dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
 
                 logger.debug(f"Insert permute before {arg} with dims {dims}")
@@ -843,40 +864,21 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 permute_node.meta["dtype"] = node_in_chain.meta.get("dtype")
                 user.replace_input_with(node_in_chain, permute_node)
 
-            node_dim_order[node_in_chain] = node_dim_order[node_in_chain.all_input_nodes[0]]
-
             if node_in_chain.target == torch.ops.aten.slice.Tensor:
-                order = node_dim_order[node_in_chain]
+                order = node_dim_order[node_in_chain.args[0]]
                 args = tuple(node_in_chain.args)
                 node_in_chain.args = args[:1] + (order.index(args[1]),) + args[2:]
 
             if node_in_chain.target == torch.ops.aten.pad.default:
                 pad = remap_pad_after_permute(
                     node_in_chain.args[1],
-                    node_dim_order[node_in_chain],
+                    node_dim_order[node_in_chain.args[0]],
                     node_in_chain.value.ndim,
                 )
                 node_in_chain.args = (node_in_chain.args[0], pad) + node_in_chain.args[2:]
 
             if node_in_chain.target == torch.ops.quantized_ops.quantize_mx.default:
                 node_in_chain.args = node_in_chain.args[:1] + (-1,) + node_in_chain.args[2:]
-
-            if is_conv2d(node_in_chain) and not is_depthwise_conv(node_in_chain):
-                weight_node = node_in_chain.args[1]
-                if weight_node.op == "get_attr":
-                    param = get_parameter_or_buffer(model, weight_node.target)
-                    logger.debug(
-                        f"Permuting weights for {node_in_chain}: {tuple(param.data.shape)}"
-                        f" -> {tuple(param.data.permute(2, 3, 1, 0).shape)}"
-                    )
-                    param.data = param.data.permute(2, 3, 1, 0)
-                    node_dim_order[weight_node] = (2, 3, 1, 0)
-
-                if node_in_chain.target == torch.ops.quantized_ops.conv2d_mx.default:
-                    scale_node = node_in_chain.kwargs.get("weight_scale")
-                    scale = get_parameter_or_buffer(model, scale_node.target)
-                    scale.data = scale.data.permute(2, 3, 1, 0)
-                    node_dim_order[scale_node] = (2, 3, 1, 0)
 
             if node_in_chain.target == torch.ops.aten.conv2d.default:
                 with graph.inserting_before(node_in_chain):
@@ -891,7 +893,9 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 graph.erase_node(node_in_chain)
 
                 swapped_nodes.append(conv_node)
-                node_dim_order[conv_node] = (0, 2, 3, 1)
+                node_in_chain = conv_node
+
+            node_dim_order[node_in_chain] = node_dim_order[node_in_chain.all_input_nodes[0]]
 
     graph.lint()
     model.recompile()
