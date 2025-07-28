@@ -448,8 +448,8 @@ def slicing_and_padding_cancel_out(shape, slice_dim, start, end, pad):
 
 def pad_gemm_inputs_to_hardware_unroll_size(
     model: torch.fx.GraphModule,
-    C_unroll: int = 32,
-    K_unroll: int = 32,
+    C_unroll,
+    K_unroll,
 ) -> torch.fx.GraphModule:
     """
     Pad inputs and weights to conv2d nodes in a torch.fx.GraphModule so that
@@ -580,9 +580,10 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         propagate_shape(node)
 
         if pad_K:
+            slice_dim = 1 if is_conv2d(node) else -1
             with model.graph.inserting_after(node):
                 slice_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor, (node, 1, 0, C_out),
+                    torch.ops.aten.slice.Tensor, (node, slice_dim, 0, C_out),
                 )
 
             node.replace_all_uses_with(slice_node)
@@ -591,6 +592,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             propagate_shape(slice_node)
             slice_node.meta["dtype"] = node.meta.get("dtype")
 
+    model.graph.print_tabular()
     model.graph.lint()
     model.graph.eliminate_dead_code()
     model.recompile()
@@ -1309,6 +1311,39 @@ def choose_tile(X, C, K, max_mem_bytes, unroll_dims, input_byte=1, weight_byte=1
     return X_tile, C_tile, K_tile
 
 
+def slice_tensor(node, dim, start, end, model):
+    """
+    Slice a tensor along a specific dimension using the given start and end indices.
+
+    Args:
+        node (Node): The node representing the tensor to be sliced.
+        dim (int): The dimension along which to slice.
+        start (int): The starting index for the slice.
+        end (int): The ending index for the slice.
+        graph (Graph): The computational graph to insert the slice operation.
+
+    Returns:
+        Node: A new node representing the sliced tensor.
+    """
+    graph = model.graph
+    if node.op == "get_attr":
+        param = get_parameter_or_buffer(model, node.target)
+        sliced_data = param.data.narrow(dim, start, end - start)
+
+        tiled_node = create_getattr_from_value(
+            model, graph, node.target + "_", sliced_data
+        )
+        tiled_node.value = sliced_data
+        tiled_node.meta["dtype"] = node.meta.get("dtype")
+    else:
+        tiled_node = graph.call_function(
+            torch.ops.aten.slice.Tensor, (node, dim, start, end),
+        )
+        propagate_shape(tiled_node)
+        tiled_node.meta["dtype"] = node.meta.get("dtype")
+    return tiled_node
+
+
 def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     """
     Perform tiling on GEMM operations in a model to fit intermediate data into cache.
@@ -1401,70 +1436,28 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         else:
             source_fn = node.target
 
-        tiled_outputs = []
         last_output = None
         for c in range(0, C, C_tile):
             c_end = min(c + C_tile, C)
             scale_c, scale_c_end = int(c / block_size), int(c_end / block_size)
 
             with graph.inserting_before(node):
-                tiled_input = graph.call_function(
-                    torch.ops.aten.slice.Tensor, (input_node, -1, c, c_end),
-                )
-                propagate_shape(tiled_input)
-                tiled_input.meta["dtype"] = input_node.meta.get("dtype")
+                tiled_input = slice_tensor(input_node, -1, c, c_end, model)
+                tiled_weight = slice_tensor(weight_node, reduction_dim, c, c_end, model)
 
                 if input_scale_node is not None:
-                    tiled_input_scale = graph.call_function(
-                        torch.ops.aten.slice.Tensor,
-                        (input_scale_node, -1, scale_c, scale_c_end),
+                    tiled_input_scale = slice_tensor(
+                        input_scale_node, -1, scale_c, scale_c_end, model
                     )
-                    propagate_shape(tiled_input_scale)
-                    tiled_input_scale.meta["dtype"] = input_scale_node.meta.get("dtype")
                 else:
                     tiled_input_scale = None
 
-                if weight_node.op == "get_attr":
-                    param_name = weight_node.target
-                    weight = get_parameter_or_buffer(model, param_name)
-                    sliced_weight = weight.data[:, c:c_end]
-
-                    tiled_weight = create_getattr_from_value(
-                        model, graph, param_name + "_", sliced_weight
+                if weight_scale_node is not None:
+                    tiled_weight_scale = slice_tensor(
+                        weight_scale_node, reduction_dim, scale_c, scale_c_end, model
                     )
-                    tiled_weight.value = sliced_weight
-                    tiled_weight.shape = sliced_weight.shape
-                    tiled_weight.meta["dtype"] = weight_node.meta.get("dtype")
-
-                    if weight_scale_node is not None:
-                        weight_scale = get_parameter_or_buffer(model, weight_scale_node.target)
-                        sliced_weight_scale = weight_scale.data[:, scale_c:scale_c_end]
-
-                        tiled_weight_scale = create_getattr_from_value(
-                            model, graph, weight_scale_node.target + "_", sliced_weight_scale
-                        )
-                        tiled_weight_scale.value = sliced_weight_scale
-                        tiled_weight_scale.shape = sliced_weight_scale.shape
-                        tiled_weight_scale.meta["dtype"] = weight_scale_node.meta.get("dtype")
-                    else:
-                        tiled_weight_scale = None
-
                 else:
-                    tiled_weight = graph.call_function(
-                        torch.ops.aten.slice.Tensor, (weight_node, reduction_dim, c, c_end),
-                    )
-                    propagate_shape(tiled_weight)
-                    tiled_weight.meta["dtype"] = weight_node.meta.get("dtype")
-
-                    if weight_scale_node is not None:
-                        tiled_weight_scale = graph.call_function(
-                            torch.ops.aten.slice.Tensor,
-                            (weight_scale_node, reduction_dim, scale_c, scale_c_end),
-                        )
-                        propagate_shape(tiled_weight_scale)
-                        tiled_weight_scale.meta["dtype"] = weight_scale_node.meta.get("dtype")
-                    else:
-                        tiled_weight_scale = None
+                    tiled_weight_scale = None
 
                 if input_scale_node is not None or weight_scale_node is not None:
                     tiled_gemm = graph.call_function(
@@ -1480,6 +1473,7 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                     tiled_gemm = graph.call_function(
                         node.target, (tiled_input, tiled_weight) + node.args[2:],
                     )
+
                 propagate_shape(tiled_gemm)
                 tiled_gemm.meta["dtype"] = node.meta.get("dtype")
                 tiled_gemm.meta["source_fn_stack"] = [(tiled_gemm.name, source_fn)]
@@ -1502,8 +1496,6 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                 "output": (X_tile, K_tile),
             }
             tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
-
-            tiled_outputs.append(tiled_gemm)
 
         node.replace_all_uses_with(last_output)
         graph.erase_node(node)
@@ -1582,6 +1574,8 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         if not _is_elementwise_op(node) and node.target not in [
             torch.ops.aten.softmax.int,
             torch.ops.aten.layer_norm.default,
+            torch.ops.aten.permute.default,
+            torch.ops.aten.transpose.int,
             torch.ops.quantized_ops.calculate_mx_qparam.default,
             torch.ops.quantized_ops.quantize_mx.default,
         ]:
@@ -1597,6 +1591,10 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             torch.ops.quantized_ops.quantize_mx.default,
         ]:
             last_dim = node.args[1]
+        elif node.target == torch.ops.aten.transpose.int:
+            last_dim = min(*node.args[1:])
+        elif node.target == torch.ops.aten.permute.default:
+            last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
         else:
             last_dim = -1
 

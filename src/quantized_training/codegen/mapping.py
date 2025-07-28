@@ -1047,7 +1047,7 @@ def get_node_bytes(n: Node):
     return dtype_byte_size(n.value.dtype)
 
 
-def adjust_l2_tiling(node, module, tiled_shapes, allocator):
+def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
     from .utils import get_tiled_shapes
 
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
@@ -1121,11 +1121,11 @@ def adjust_l2_tiling(node, module, tiled_shapes, allocator):
             new_shapes[input_node] = get_reduced_shape(tiled_shapes[input_node], input_factor)
 
             transposed = first_node.meta.get("transposed", False)
+            weight_node = first_node.args[1].meta.get('source_node')
             weight_factor = (
                 (1, reduce_factor[-1]) if transposed or _is_matmul(first_node)
                 else (reduce_factor[-1], 1)
             )
-            weight_node = first_node.args[1].meta.get('source_node')
             new_shapes[weight_node] = get_reduced_shape(tiled_shapes[weight_node], weight_factor)
 
             if not _is_matmul(first_node) and len(first_node.args) > 2:
@@ -1289,7 +1289,7 @@ def run_memory_mapping(
 
         if node.op == "call_module":
             mod = named_modules[node.target]
-            tiled_shapes = adjust_l2_tiling(node, mod, tiled_shapes, sp_allocator)
+            tiled_shapes = run_fused_op_l2_tiling(node, mod, tiled_shapes, sp_allocator)
 
             for n in list(mod.graph.nodes):
                 if n != first_node:
