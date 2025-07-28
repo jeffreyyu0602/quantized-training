@@ -520,8 +520,8 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         input = node.args[0]
         C_in = input.shape[1] if is_conv2d(node) else input.shape[-1]
 
-        # CNN first layer is handled separately
-        if is_conv2d(node) and C_in == 3:
+        # Skip CNN first layer and fully-connected layer
+        if is_conv2d(node) and C_in == 3 or math.prod(input.shape[:-1]) == 1:
             continue
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
