@@ -137,12 +137,12 @@ def transform(
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
 
+    if conv2d_im2col:
+        replace_conv2d_with_im2col(model)
+
     if unroll_dims is not None:
         pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
         ShapeProp(model).propagate(*flatten_args)
-
-    if conv2d_im2col:
-        replace_conv2d_with_im2col(model)
 
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size)

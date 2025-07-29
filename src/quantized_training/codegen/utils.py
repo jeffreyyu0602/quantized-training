@@ -537,8 +537,8 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             pad_input_node(input, input_pad, input_scale, input_scale_pad)
 
         weight = node.args[1]
-        C_in = weight.shape[0] if _is_matmul(node) else weight.shape[1]
-        C_out = weight.shape[1] if _is_matmul(node) else weight.shape[0]
+        C_in = weight.shape[-2] if _is_matmul(node) else weight.shape[1]
+        C_out = weight.shape[-1] if _is_matmul(node) else weight.shape[0]
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
@@ -592,7 +592,6 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             propagate_shape(slice_node)
             slice_node.meta["dtype"] = node.meta.get("dtype")
 
-    model.graph.print_tabular()
     model.graph.lint()
     model.graph.eliminate_dead_code()
     model.recompile()
@@ -1098,6 +1097,7 @@ def replace_conv2d_with_im2col(model: GraphModule, unroll=16):
         param = model.get_parameter(weight_node.target)
         param.data = param.data.reshape(C_out, -1)
         weight_node.value = param.data
+        weight_node.shape = param.data.shape
 
         bias_node = args[2]
         if bias_node is not None:
@@ -1123,13 +1123,16 @@ def replace_conv2d_with_im2col(model: GraphModule, unroll=16):
                 (add_node, (N, C_out, H_out, W_out)),
             )
 
+        in2col_node.meta = input_node.meta
+        matmul_node.meta = node.meta
+
         propagate_shape(in2col_node)
         propagate_shape(matmul_node)
         propagate_shape(add_node)
         propagate_shape(reshape_node)
 
-        in2col_node.meta = input_node.meta
-        matmul_node.meta = node.meta
+        in2col_node.meta["source_fn_stack"] = [(in2col_node.name, in2col_node.target)]
+        matmul_node.meta["source_fn_stack"] = [(matmul_node.name, torch.matmul)]
         add_node.meta["source_fn_stack"] = [(add_node.name, "add")]
         reshape_node.meta["source_fn_stack"] = [(reshape_node.name, "reshape")]
 
