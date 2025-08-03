@@ -1283,25 +1283,57 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def choose_tile(X, C, K, max_mem_bytes, unroll_dims, input_byte=1, weight_byte=1, output_byte=2):
+def calculate_gemm_node_size(node, x_factor, c_factor, k_factor):
+    def node_mem(n, div_factors):
+        return get_node_bytes(n) * n.value.numel() / div_factors
+
+    total_bytes = 0
+    input_node, weight_node = node.args[0], node.args[1]
+
+    # Input, weight, and output memory
+    total_bytes += node_mem(input_node, x_factor * c_factor)
+    total_bytes += node_mem(weight_node, c_factor * k_factor)
+    total_bytes += node_mem(node, x_factor * k_factor)
+
+    # Bias if present
+    if not _is_matmul(node) and len(node.args) > 2:
+        total_bytes += node_mem(node.args[2], k_factor)
+
+    # Optional scale factors
+    input_scale_node = node.kwargs.get("input_scale")
+    if input_scale_node is not None:
+        total_bytes += node_mem(input_scale_node, x_factor * c_factor)
+
+    weight_scale_node = node.kwargs.get("weight_scale")
+    if weight_scale_node is not None:
+        total_bytes += node_mem(weight_scale_node, c_factor * k_factor)
+
+    return total_bytes
+
+
+def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    def snap(x, unroll): return int((x // unroll) * unroll)
+    def snap(x, unroll):
+        return int((x // unroll) * unroll)
 
     X_tile = X
     C_tile = snap(C, unroll_dims[0])
     K_tile = snap(K, unroll_dims[1])
 
-    # Shrink K_tile first
+    # Shrink output channel dim first, then reduction dim, then input dim
     while True:
-        mem = (
-            X_tile * C_tile * input_byte +
-            C_tile * K_tile * weight_byte +
-            X_tile * K_tile * output_byte
+        total_size = calculate_gemm_node_size(
+            node,
+            X // X_tile,
+            C // C_tile,
+            K // K_tile
         )
-        if mem <= max_mem_bytes:
+
+        if total_size <= max_mem_bytes:
             break
+
         if K_tile > unroll_dims[1]:
             K_tile = snap(K_tile / 2, unroll_dims[1])
         elif X_tile > 128:
@@ -1382,9 +1414,6 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         input_value, weight_value = input_node.value, weight_node.value
 
-        input_bytes = get_node_bytes(input_node)
-        weight_bytes = get_node_bytes(weight_node)
-
         is_matmul = node.target in [
             torch.ops.aten.matmul.default, torch.ops.quantized_ops.matmul_mx.default
         ]
@@ -1400,20 +1429,15 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             weight_key = "weight"
 
         X = int(input_value.numel() / C)
-        total_size = X * C * input_bytes + C * K * weight_bytes + X * K * 2
+
+        total_size = calculate_gemm_node_size(node, 1, 1, 1)
 
         if total_size <= cache_size:
             logger.info(f"{node}: X={X}, C={C}, K={K}, total_size={total_size} fits in cache, no tiling needed.")
             continue
 
-        # TODO here we assume the input tensors are 2-D. We should handle N-d tensor.
         X_tile, C_tile, K_tile = choose_tile(
-            X, C, K,
-            cache_size,
-            unroll,
-            input_byte=input_bytes,
-            weight_byte=weight_bytes,
-            output_byte=2,  # Assuming output is float16 or similar
+            node, X, C, K, cache_size, unroll,
         )
 
         num_x_tiles = X // X_tile

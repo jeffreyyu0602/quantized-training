@@ -358,7 +358,7 @@ if __name__ == "__main__":
         past_key_values = None
 
         if args.model == "llm_decode":
-            max_generated_length = input_ids.shape[1] + 64
+            max_generated_length = input_ids.shape[1] + 128
             past_key_values = StaticCache(
                 config=model.config,
                 max_batch_size=1,
