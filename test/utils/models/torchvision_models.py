@@ -56,42 +56,42 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
                 module.padding = 0
 
     if "mobilenet" in args.model:
-        quantizer.set_module_name("classifier", None)
 
-        mobilenet_int8_layers = [
-            "features.0.0",
-            "features.1.conv.0.0",
-            "features.2.conv.1.0",
-            "features.3.conv.1.0",
-            "features.4.conv.1.0",
-            "features.5.conv.1.0",
-            "features.6.conv.1.0",
-            "features.7.conv.1.0",
-            "features.8.conv.1.0",
-            "features.9.conv.1.0",
-            "features.10.conv.1.0",
-            "features.11.conv.1.0",
-            "features.12.conv.1.0",
-            "features.13.conv.1.0",
-            "features.14.conv.1.0",
-            "features.15.conv.1.0",
-            "features.16.conv.1.0",
-            "features.17.conv.1.0",
-        ]
+        if "microscaling" in args.activation:
+            mobilenet_int8_layers = [
+                "features.0.0",
+                # "features.1.conv.0.0",
+                # "features.2.conv.1.0",
+                # "features.3.conv.1.0",
+                # "features.4.conv.1.0",
+                # "features.5.conv.1.0",
+                # "features.6.conv.1.0",
+                # "features.7.conv.1.0",
+                # "features.8.conv.1.0",
+                # "features.9.conv.1.0",
+                # "features.10.conv.1.0",
+                # "features.11.conv.1.0",
+                # "features.12.conv.1.0",
+                # "features.13.conv.1.0",
+                # "features.14.conv.1.0",
+                # "features.15.conv.1.0",
+                # "features.16.conv.1.0",
+                # "features.17.conv.1.0",
+            ]
 
-        qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
-        qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
+            qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+            qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
 
-        bias_qspec = DerivedQuantizationSpec(
-            derived_from=None,
-            derive_qparams_fn=derive_bias_qparams_fn,
-            dtype=None,
-        )
+            bias_qspec = DerivedQuantizationSpec(
+                derived_from=None,
+                derive_qparams_fn=derive_bias_qparams_fn,
+                dtype=None,
+            )
 
-        qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
+            qconfig = QuantizationConfig(qspec, None, qspec, bias_qspec)
 
-        for layer in mobilenet_int8_layers:
-            quantizer.set_module_name(layer, qconfig)
+            for layer in mobilenet_int8_layers:
+                quantizer.set_module_name(layer, qconfig)
 
         quantizer.set_module_name("fc", None)
 
@@ -141,7 +141,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
 def evaluate(model, dataset):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model = model.to(device, dtype=torch.bfloat16)
 
     correct_predictions = 0
     total_samples = 0
@@ -150,7 +150,7 @@ def evaluate(model, dataset):
         for image_label_pair in tqdm(dataset, desc=f"Evaluating {model.__class__.__name__}"):
             # for running the original model without the preprocessing function 
             # applied to the dataset
-            image = image_label_pair["image"].to(device)
+            image = image_label_pair["image"].to(device, dtype=torch.bfloat16)
             label = image_label_pair["label"]
     
             logits = model(image)
