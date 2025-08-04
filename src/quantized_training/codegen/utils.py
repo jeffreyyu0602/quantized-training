@@ -514,7 +514,9 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 padded_scale.meta["dtype"] = scale.meta.get("dtype")
 
     for node in list(model.graph.nodes):
-        if not _is_gemm_op(node) or is_depthwise_conv(node):
+        # if not _is_gemm_op(node) or is_depthwise_conv(node):
+        #     continue
+        if not _is_gemm_op(node):
             continue
 
         input, weight = node.args[:2]
@@ -527,6 +529,8 @@ def pad_gemm_inputs_to_hardware_unroll_size(
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
+        if is_depthwise_conv(node):
+            pad_K = pad_C
 
         # Pad input along C dimension
         if pad_C:
@@ -537,6 +541,11 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 [0, 0, 0, 0, 0, int(pad_C / bs)] if is_conv2d(node) else [0, int(pad_C / bs)]
             )
             pad_input_node(input, input_pad, input_scale, input_scale_pad)
+            
+            if is_depthwise_conv(node):
+                args = list(node.args)
+                args[-1] += pad_C
+                node.args = tuple(args)
 
         # Pad weight along K and C
         if pad_C or pad_K:
@@ -544,8 +553,14 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             weight_scale = node.kwargs.get("weight_scale")
 
             if is_conv2d(node):
-                weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-                weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
+                if is_depthwise_conv(node):
+                    weight_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+                    weight_scale_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+                else:
+                    weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+                    weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
+                # weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+                # weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
             elif _is_matmul(node):
                 weight_pad = [0, pad_K, 0, pad_C]
                 weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
