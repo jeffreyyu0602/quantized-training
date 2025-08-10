@@ -678,29 +678,6 @@ def duplicate_shared_nodes(graph: torch.fx.Graph, nodes: List[Node]) -> List[Nod
 
     return nodes
 
-
-def fuse_reshape_with_input(
-    graph: torch.fx.Graph,
-    candidates: List[List[Node]],
-    nodes_map: Dict[Node, Node],
-    reshape_node: Node
-):
-    # First pass: simulate fusion to ensure all users can be fused
-    can_fuse_all = _fuse_reshape_with_input_impl(
-        graph, reshape_node, simulate=True
-    )
-
-    if can_fuse_all:
-        # Second pass: perform actual fusion
-        return _fuse_reshape_with_input_impl(
-            graph, reshape_node, simulate=False,
-            candidates=candidates, nodes_map=nodes_map
-        )
-    else:
-        logger.info(f"Skipping fusion for {reshape_node} due to unfusable path")
-        return []
-
-
 def _fuse_reshape_with_input_impl(
     graph: torch.fx.Graph,
     reshape_node: Node,
@@ -768,6 +745,73 @@ def _fuse_reshape_with_input_impl(
             all_results.extend(result)
 
     return True if simulate else all_results
+
+
+def fuse_reshape_with_input(
+    graph: torch.fx.Graph,
+    candidates: List[List[Node]],
+    nodes_map: Dict[Node, Node],
+    reshape_node: Node
+):
+    # First pass: simulate fusion to ensure all users can be fused
+    can_fuse_all = _fuse_reshape_with_input_impl(
+        graph, reshape_node, simulate=True
+    )
+
+    if can_fuse_all:
+        # Second pass: perform actual fusion
+        return _fuse_reshape_with_input_impl(
+            graph, reshape_node, simulate=False,
+            candidates=candidates, nodes_map=nodes_map
+        )
+    else:
+        logger.info(f"Skipping fusion for {reshape_node} due to unfusable path")
+        return []
+
+
+def fuse_reshape_with_output(
+    graph: torch.fx.Graph,
+    candidates: List[List[Node]],
+    nodes_map: Dict[Node, Node],
+    reshape_node: Node
+) -> bool:
+    if not is_mha_qkv_permute(reshape_node):
+        return False
+
+    curr_node = reshape_node.all_input_nodes[0]
+    fused_nodes = [reshape_node]
+
+    while not (_is_gemm_op(curr_node) or _is_elementwise_op(curr_node)):
+        if (
+            len(curr_node.users) > 1
+            or len(curr_node.all_input_nodes) != 1
+            or not _is_nop(curr_node)
+        ):
+            logger.debug(f"Cannot fuse {reshape_node} with {curr_node}")
+            return False
+
+        fused_nodes.insert(0, curr_node)
+        curr_node = curr_node.all_input_nodes[0]
+
+    def _is_tiled(n): 
+        return "tiled_shapes" in getattr(n, "meta", {})
+
+    if len(curr_node.users) > 1 or _is_tiled(curr_node):
+        return False
+
+    group = search_group(curr_node, candidates)
+
+    if group is not None:
+        if any(_is_tiled(n) for n in group):
+            return False
+        else:
+            group.extend(n for n in fused_nodes if n not in group)
+    else:
+        candidates.append([curr_node, *fused_nodes])
+
+    nodes_map[reshape_node] = curr_node
+
+    return True
 
 
 def move_transpose_after_select(
@@ -861,7 +905,11 @@ def fuse_op_with_input(
         )
 
 
-def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
+def fuse_operator(
+    model: GraphModule,
+    operations: List[List[Callable]] = None,
+    fuse_reshape: bool = True
+):
     """
     Fuse reshape, slicing, and dequantize operations with their immediate users.
 
@@ -883,54 +931,23 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
     if operations is not None:
         fused_nodes_list = find_sequential_nodes(model, operations)
 
-    for node in list(graph.nodes):
-        # For MHA query, key, and value permutation, we can fuse them their previous
-        # GEMM operation
-        if is_mha_qkv_permute(node):
-            input_node = node.all_input_nodes[0]
-            fused_nodes = [node]
-            while not (_is_gemm_op(input_node) or _is_elementwise_op(input_node)):
-                if (
-                    len(input_node.users) > 1 or
-                    len(input_node.all_input_nodes) != 1 or
-                    not _is_nop(input_node)
-                ):
-                    logger.debug(f"Cannot fuse {node} with {input_node}")
-                    break
-
-                fused_nodes.insert(0, input_node)
-                input_node = input_node.all_input_nodes[0]
-            else:
-                if len(input_node.users) == 1 and "tiled_shapes" not in input_node.meta:
-                    if (group := search_group(input_node, fused_nodes_list)) is not None:
-                        if all("tiled_shapes" not in n.meta for n in group):
-                            nodes_map[node] = input_node
-                            group.extend(n for n in fused_nodes if n not in group)
-                            continue
-                        else:
-                            tiled_node = next(n for n in group if "tiled_shapes" in n.meta)
-                            logger.info(f"Cannot fuse {node} with {input_node} becuase {tiled_node} is a tiled op")
-                    else:
-                        nodes_map[node] = input_node
-                        fused_nodes_list.append([input_node, *fused_nodes])
-                        continue
-                else:
-                    reason = (
-                        f"{input_node} is a tiled op" if "tiled_shapes" in input_node.meta else
-                        f"{input_node} has more than one user ({len(input_node.users)})"
-                    )
-                    logger.info(f"Cannot fuse {node} with {input_node} because {reason}.")
-
-        # If the reshape op cannot be fused with its predecesor, attempt to fuse it
-        # with its immediate user
-        if _is_reshape_op(node):
-            fused_reshape_nodes = fuse_reshape_with_input(
+    if fuse_reshape:
+        for node in list(graph.nodes):
+            # Try to fuse MHA QKV permute with preceeding GEMM
+            if fuse_reshape_with_output(
                 graph, fused_nodes_list, nodes_map, node
-            )
+            ):
+                continue
 
-            for n in fused_reshape_nodes:
-                if n.target == torch.ops.aten.transpose.int:
-                    move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
+            # Attempt to fuse it with its immediate user
+            if _is_reshape_op(node):
+                fused_reshape_nodes = fuse_reshape_with_input(
+                    graph, fused_nodes_list, nodes_map, node
+                )
+
+                for n in fused_reshape_nodes:
+                    if n.target == torch.ops.aten.transpose.int:
+                        move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
     for node in list(graph.nodes):
         if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:

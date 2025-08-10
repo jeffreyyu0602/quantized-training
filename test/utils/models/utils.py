@@ -6,6 +6,7 @@ def get_transform_args(args, vector_stages):
         "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
         "conv2d_im2col": args.conv2d_im2col,
+        "fuse_reshape": args.fuse_reshape,
     }
     return transform_args
 

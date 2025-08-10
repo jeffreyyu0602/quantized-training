@@ -85,7 +85,7 @@ TRANSPOSED_OPERATORS = {
 }
 
 
-def fuse(model, patterns, example_args, example_kwargs=None):
+def fuse(model, patterns, example_args, example_kwargs=None, fuse_reshape=True):
     if example_kwargs is None:
         example_kwargs = {}
 
@@ -100,7 +100,7 @@ def fuse(model, patterns, example_args, example_kwargs=None):
             for ops in pattern
         ]
 
-        fuse_operator(model, vector_stages)
+        fuse_operator(model, vector_stages, fuse_reshape)
 
     return model
 
@@ -116,6 +116,7 @@ def transform(
     cache_size=None,
     unroll_dims=None,
     conv2d_im2col=False,
+    fuse_reshape=True,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -158,7 +159,7 @@ def transform(
         eliminate_reshape_with_no_effect(model)
 
     if fuse_operator:
-        fuse(model, patterns, flatten_args)
+        fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
 
     rename_gemm_nodes(model)
 
