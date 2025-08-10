@@ -218,7 +218,7 @@ if __name__ == "__main__":
         help="Hardware unroll dimensions for the accelerator."
     )
     parser.add_argument(
-        "--fuse_reshape",
+        "--dont_fuse_reshape",
         action="store_true",
         help="Whether to fuse reshape operations in the model."
     )
@@ -255,7 +255,10 @@ if __name__ == "__main__":
         "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
         "conv2d_im2col": args.conv2d_im2col,
-        "fuse_reshape": args.fuse_reshape,
+        "fuse_reshape": (
+            not args.dont_fuse_reshape
+            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64),
+        ),
     }
 
     compile_args = {
