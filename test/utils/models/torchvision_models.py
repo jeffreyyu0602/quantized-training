@@ -58,7 +58,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
     if "mobilenet" in args.model:
         quantizer.set_module_name("classifier", None)
 
-        if "microscaling" in args.activation:
+        if args.activation is not None and "microscaling" in args.activation:
             mobilenet_int8_layers = [
                 "features.0.0",
                 # "features.1.conv.0.0",

@@ -589,16 +589,20 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         propagate_shape(node)
 
         if pad_K:
-            with model.graph.inserting_after(node):
+            sliced_node = node
+            if (list(node.users.keys())[0].target == torch.ops.quantized_ops.dequantize.default):
+                sliced_node = list(node.users.keys())[0]
+
+            with model.graph.inserting_after(sliced_node):
                 slice_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor, (node, 1, 0, C_out),
+                    torch.ops.aten.slice.Tensor, (sliced_node, 1, 0, C_out),
                 )
 
-            node.replace_all_uses_with(slice_node)
-            slice_node.replace_input_with(slice_node, node)
+            sliced_node.replace_all_uses_with(slice_node)
+            slice_node.replace_input_with(slice_node, sliced_node)
 
             propagate_shape(slice_node)
-            slice_node.meta["dtype"] = node.meta.get("dtype")
+            slice_node.meta["dtype"] = sliced_node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
