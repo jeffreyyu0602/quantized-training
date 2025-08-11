@@ -8,7 +8,7 @@ def get_transform_args(args, vector_stages):
         "conv2d_im2col": args.conv2d_im2col,
         "fuse_reshape": (
             not args.dont_fuse_reshape
-            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64),
+            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64)
         ),
     }
     return transform_args

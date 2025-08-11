@@ -257,7 +257,7 @@ if __name__ == "__main__":
         "conv2d_im2col": args.conv2d_im2col,
         "fuse_reshape": (
             not args.dont_fuse_reshape
-            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64),
+            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64)
         ),
     }
 
