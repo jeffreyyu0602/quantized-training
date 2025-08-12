@@ -42,6 +42,7 @@ __all__ = [
     "get_conv_bn_layers",
     "transpose_conv2d_inputs_and_weights",
     "pad_gemm_inputs_to_hardware_unroll_size",
+    "pad_vector_ops_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
@@ -591,6 +592,62 @@ def pad_gemm_inputs_to_hardware_unroll_size(
 
             propagate_shape(slice_node)
             slice_node.meta["dtype"] = node.meta.get("dtype")
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def pad_vector_ops_to_hardware_unroll_size(
+    model: torch.fx.GraphModule,
+    K_unroll,
+) -> torch.fx.GraphModule:
+    """
+    Pad inputs to vector operations to multiples of the hardware unroll size.
+    Only support softmax operation for now.
+
+    Parameters:
+        model (torch.fx.GraphModule): The FX graph module to transform.
+        K_unroll (int): Unroll factor for the output channels.
+
+    Returns:
+        torch.fx.GraphModule: The transformed FX graph module.
+    """
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.softmax.int:
+            continue
+
+        input = node.args[0]
+        reduction_dim = input.shape[-1]
+
+        pad_K = (K_unroll - (reduction_dim % K_unroll)) % K_unroll
+
+        if not pad_K:
+            continue
+
+        with model.graph.inserting_after(input):
+            new_input = model.graph.call_function(
+                torch.ops.aten.pad.default,
+                (input, [0, pad_K], "constant", float("-inf")),
+            )
+
+        propagate_shape(new_input)
+        new_input.meta["dtype"] = input.meta.get("dtype")
+        node.replace_input_with(input, new_input)
+
+        propagate_shape(node)
+
+        with model.graph.inserting_after(node):
+            slice_node = model.graph.call_function(
+                torch.ops.aten.slice.Tensor, (node, -1, 0, reduction_dim),
+            )
+
+        node.replace_all_uses_with(slice_node)
+        slice_node.replace_input_with(slice_node, node)
+
+        propagate_shape(slice_node)
+        slice_node.meta["dtype"] = node.meta.get("dtype")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()

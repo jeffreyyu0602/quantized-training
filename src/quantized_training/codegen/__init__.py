@@ -16,6 +16,7 @@ __all__ = [
     "gen_compute_graph",
     "get_conv_bn_layers",
     "pad_gemm_inputs_to_hardware_unroll_size",
+    "pad_vector_ops_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",

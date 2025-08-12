@@ -143,7 +143,7 @@ def transform(
 
     if unroll_dims is not None:
         pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
-        ShapeProp(model).propagate(*flatten_args)
+        pad_vector_ops_to_hardware_unroll_size(model, unroll_dims[1])
 
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size)
