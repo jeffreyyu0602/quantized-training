@@ -47,31 +47,17 @@ def save_tensor(tensor, filename):
         _save_tensor(tensor, filename)
 
 
-def get_new_node_name_with_prefix(prefix, directory):
-    """
-    Generate a new attribute name with a given prefix that is not already used in the module's graph.
-    """
-    prefix = prefix.replace(".", "_")
-    if directory is None or not os.path.isdir(directory):
-        return prefix
-
-    def get_node_name(i: int):
-        return f"{prefix}_{i}" if i > 0 else prefix
-    i = 0
-    node_name = get_node_name(i)
-    while os.path.isfile(os.path.join(directory, node_name + ".bin")):
-        i += 1
-        node_name = get_node_name(i)
-        logger.debug(f"Node name {node_name} already exists, trying a new one...")
-    return node_name
-
-
 def set_tensor_field(field, node, output_dir=None, is_output=False):
     assert isinstance(node, Node) and hasattr(node, 'value'), (
         f"Expected node {node} has value attribute."
     )
 
-    original_node = node
+    if (tiled_shape := node.meta.get("tiled_shape")) is not None:
+        field.tiled_shape.extend(list(tiled_shape))
+
+    if (scratchpad := node.meta.get("scratchpad")) is not None:
+        field.scratchpad.partition = scratchpad.memory_space
+        field.scratchpad.address = scratchpad.start
 
     if (
         (reshape_node := node.meta.get("reshape")) is not None and
@@ -93,15 +79,8 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if (source_node := node.meta.get("source_node")) is not None:
         node = source_node
 
-    if (tiled_shape := original_node.meta.get("shape")) is not None:
-        field.node = (
-            node.name + "_tiled" if is_output else
-            get_new_node_name_with_prefix(node.name + "_tiled", output_dir)
-        )
-        field.shape.extend(list(tiled_shape))
-    else:
-        field.node = node.name
-        field.shape.extend(list(node.shape) or [1])
+    field.node = node.name
+    field.shape.extend(list(node.shape) or [1])
 
     if (dtype := node.meta.get("dtype")) is not None:
         field.dtype = dtype
@@ -109,43 +88,33 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         field.dtype = str(node.value.dtype).split(".")[1]
 
     if (memory := node.meta.get("memory")) is not None:
-        field.memory.partition = memory.partition_id
+        field.memory.partition = memory.memory_space
         field.memory.address = memory.start
 
-    if (scratchpad := original_node.meta.get("scratchpad")) is not None:
-        field.scratchpad.offset = scratchpad.start
-
-    if tiled_shape is not None and not is_output and output_dir is not None:
-        n = len(tiled_shape)
-        slices = tuple(
-            [slice(None)] * (node.value.ndim - n) + [slice(0, s) for s in tiled_shape]
-        )
-        save_tensor(
-            node.value[slices], os.path.join(output_dir, f"{field.node}.bin")
-        )
-    elif output_dir is not None:
+    if output_dir is not None:
         save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
 
 
 def set_output_field(param, node, output_dir):
     if isinstance(node.value, torch.Tensor):
         if "tiled_shapes" in node.meta:
-            node.meta["shape"] = node.meta["tiled_shapes"].get(node)
+            node.meta["tiled_shape"] = node.meta["tiled_shapes"].get(node)
 
         if "scratchpad_mem" in node.meta:
             node.meta["scratchpad"] = node.meta["scratchpad_mem"].get(node)
 
         set_tensor_field(param.output, node, output_dir, True)
     
-        node.meta.pop("shape", None)
+        node.meta.pop("tiled_shape", None)
         node.meta.pop("scratchpad", None)
     elif isinstance(node.value, (tuple, list)):
         if (memory := node.meta.get("memory")) is not None:
-            partition = memory.partition_id
+            partition = memory.memory_space
             address = memory.start
 
         if (scratchpad_mem := node.meta.get("scratchpad_mem")) is not None:
-            offset = scratchpad_mem[node].start
+            scratch_space = scratchpad_mem[node].memory_space
+            scratch_addr = scratchpad_mem[node].start
 
         if (tiled_shape := node.meta.get("tiled_shapes")) is not None:
             shapes = tiled_shape[node]
@@ -154,8 +123,8 @@ def set_output_field(param, node, output_dir):
 
         for i, t in enumerate(node.value):
             tensor = Tensor(
-                node=f"{node.name}_{i}_tiled" if tiled_shape else f"{node.name}_{i}",
-                shape=shapes[i] if tiled_shape else list(t.shape),
+                node=f"{node.name}_{i}",
+                shape=list(t.shape),
                 dtype=dtypes[i] or str(t.dtype).split(".")[1],
             )
 
@@ -165,8 +134,12 @@ def set_output_field(param, node, output_dir):
                 address += node.meta["output_sizes"][i]
 
             if scratchpad_mem is not None:
-                tensor.scratchpad.offset = int(offset)
-                offset += node.meta["tiled_output_sizes"][i]
+                tensor.scratchpad.partition = scratch_space
+                tensor.scratchpad.address = int(scratch_addr)
+                scratch_addr += node.meta["tiled_output_sizes"][i]
+
+            if tiled_shape is not None:
+                tensor.tiled_shape.extend(shapes[i])
 
             if output_dir is not None:
                 save_tensor(t, os.path.join(output_dir, f"{node.name}_{i}.bin"))
@@ -268,7 +241,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
             n = value.meta.get("input_node", value)
             n = n.meta.get("source_node", n)
             if tiled_shapes is not None:
-                value.meta["shape"] = tiled_shapes.get(n)
+                value.meta["tiled_shape"] = tiled_shapes.get(n)
 
             if scratchpad_mem is not None:
                 value.meta["scratchpad"] = scratchpad_mem.get(n)
@@ -276,7 +249,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
         op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
 
         if isinstance(value, torch.fx.Node):
-            value.meta.pop("shape", None)
+            value.meta.pop("tiled_shape", None)
             value.meta.pop("scratchpad", None)
 
     if "l2_tiling" in node.meta:

@@ -26,7 +26,7 @@ from .mapping_utils import (
     set_tensor_field,
     save_tensor,
 )
-from .memory import MemoryAllocator, Segment
+from .memory import MemoryAllocator, Segment, MemorySpace
 from .param_pb2 import Model, Operation, Tensor
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
@@ -1302,7 +1302,7 @@ def run_memory_mapping(
             else:
                 tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
 
-        sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size)
+        sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD)
 
         if node.op == "call_module":
             mod = named_modules[node.target]
@@ -1369,7 +1369,7 @@ def run_memory_mapping(
             index = stack_node.args[0].index(nodes[-2])
             start_offset = memory.start + sum(tensor_sizes[:index])
             size = tensor_sizes[index]
-            segment = Segment(start_offset, start_offset + size, allocator.partition_id)
+            segment = Segment(start_offset, start_offset + size, allocator.memory_space)
 
             # TODO: if there is a select/slice operation, and the output has multiple
             # users, we need to make a copy to avoid overwriting the memory
@@ -1419,7 +1419,7 @@ def run_memory_mapping(
             output_sizes = input_node.meta["output_sizes"]
             start_offset = input_node.meta["memory"].start + sum(output_sizes[:node.args[1]])
             size = output_sizes[node.args[1]]
-            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.memory_space)
             skip_allocation = True
 
         # We do not allocate new memory for select operations. Instead, calculate
@@ -1431,7 +1431,7 @@ def run_memory_mapping(
         ):
             size = node.value.numel() * get_node_bytes(node)
             start_offset = node.args[0].meta["memory"].start + node.args[2] * size
-            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.partition_id)
+            node.meta["memory"] = Segment(start_offset, start_offset + size, allocator.memory_space)
             skip_allocation = True
 
         # We use the partition of the first input tensor since it preallocates
@@ -1467,26 +1467,6 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     model_params = Model()
 
-    def map_arg(arg, tiled_shapes=None):
-        if not isinstance(arg, torch.fx.Node):
-            return arg
-
-        if tiled_shapes is None or arg not in tiled_shapes:
-            return arg.value.clone()
-        
-        tensor = arg.value.clone()
-        shape = tiled_shapes[arg]
-        n = len(shape)
-        slices = [slice(None)] * (tensor.ndim - n) + [slice(0, s) for s in shape]
-        return tensor[tuple(slices)]
-
-    def save_output_tensor(value, name):
-        if isinstance(value, torch.Tensor):
-            save_tensor(value, os.path.join(output_dir, f"{name}_tiled.bin"))
-        elif isinstance(value, (tuple, list)):
-            for i, t in enumerate(value):
-                save_tensor(t, os.path.join(output_dir, f"{name}_{i}_tiled.bin"))
-
     for node in model.graph.nodes:
         node_value = getattr(node, 'value', None)
         if not isinstance(node_value, (torch.Tensor, tuple, list)):
@@ -1506,26 +1486,15 @@ def gen_code(model, args, output_dir=None):
                 model_params.parameters.append(tensor)
             continue
         elif node.op == 'call_function':
-            if (tiled_shapes := node.meta.get('tiled_shapes')) is not None:
-                args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
-                kwargs = torch.fx.node.map_arg(node.kwargs, lambda n: map_arg(n, tiled_shapes))
-                output = node.target(*args, **kwargs)
-
-                if output_dir is not None:
-                    save_output_tensor(output, node.name)
-
             op.op.CopyFrom(map_node(node, output_dir if tiled_shapes else None))
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
 
+            args = torch.fx.node.map_arg(node.args, lambda n: n.value.clone())
+            ShapeProp(gm).propagate(*args)
+
             tiled_shapes = node.meta.get('tiled_shapes')
-            args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
-            output = ShapeProp(gm).propagate(*args)
-
-            if tiled_shapes and output_dir is not None:
-                save_output_tensor(output, node.name)
-
             scratchpad_mem = node.meta.get("scratchpad_mem")
 
             operators = []
@@ -1536,7 +1505,7 @@ def gen_code(model, args, output_dir=None):
                 n.meta["tiled_shapes"] = tiled_shapes
                 n.meta["scratchpad_mem"] = scratchpad_mem
 
-                operators.append(map_node(n, output_dir if tiled_shapes else None))
+                operators.append(map_node(n))
 
             op.fused_op.name = node.name
             op.fused_op.op_list.extend(operators)

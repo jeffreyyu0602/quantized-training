@@ -1375,32 +1375,32 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
     def snap(x, unroll):
         return int((x // unroll) * unroll)
 
-    X_tile = X
-    C_tile = snap(C, unroll_dims[0])
-    K_tile = snap(K, unroll_dims[1])
+    x_tiled = X
+    c_tiled = snap(C, unroll_dims[0])
+    k_tiled = snap(K, unroll_dims[1])
 
     # Shrink output channel dim first, then reduction dim, then input dim
     while True:
         total_size = calculate_gemm_node_size(
             node,
-            X // X_tile,
-            C // C_tile,
-            K // K_tile
+            X // x_tiled,
+            C // c_tiled,
+            K // k_tiled
         )
 
         if total_size <= max_mem_bytes:
             break
 
-        if K_tile > unroll_dims[1]:
-            K_tile = snap(K_tile / 2, unroll_dims[1])
-        elif X_tile > 128:
-            X_tile = int(X_tile / 2)
-        elif C_tile > unroll_dims[0]:
-            C_tile = snap(C_tile / 2, unroll_dims[0])
+        if k_tiled > unroll_dims[1]:
+            k_tiled = snap(k_tiled / 2, unroll_dims[1])
+        elif x_tiled > 128:
+            x_tiled = int(x_tiled / 2)
+        elif c_tiled > unroll_dims[0]:
+            c_tiled = snap(c_tiled / 2, unroll_dims[0])
         else:
             raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
 
-    return X_tile, C_tile, K_tile
+    return x_tiled, c_tiled, k_tiled
 
 
 def slice_tensor(node, dim, start, end, model):
@@ -1493,24 +1493,22 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             logger.info(f"{node}: X={X}, C={C}, K={K}, total_size={total_size} fits in cache, no tiling needed.")
             continue
 
-        X_tile, C_tile, K_tile = choose_tile(
-            node, X, C, K, cache_size, unroll,
-        )
+        x_tiled, c_tiled, k_tiled = choose_tile(node, X, C, K, cache_size, unroll)
 
-        num_x_tiles = X // X_tile
-        num_k_tiles = K // K_tile
-        num_c_tiles = C // C_tile
+        num_x_tiles = X // x_tiled
+        num_k_tiles = K // k_tiled
+        num_c_tiles = C // c_tiled
 
-        logger.info(f"{node}: X={X}, C={C}, K={K} -> X_tile={X_tile}, C_tile={C_tile}, K_tile={K_tile}")
+        logger.info(f"{node}: X={X}, C={C}, K={K} -> x_tiled={x_tiled}, c_tiled={c_tiled}, k_tiled={k_tiled}")
 
         if num_c_tiles == 1:
             node.meta["tiled_shapes"] = {
-                "input": (X_tile, C),
-                weight_key: (C, K_tile) if is_matmul else (K_tile, C),
-                "bias": (K_tile,),
-                "input_scale": (X_tile, C // block_size),
-                "weight_scale": (C // block_size, K_tile) if is_matmul else (K_tile, C // block_size),
-                "output": (X_tile, K_tile),
+                "input": (x_tiled, C),
+                weight_key: (C, k_tiled) if is_matmul else (k_tiled, C),
+                "bias": (k_tiled,),
+                "input_scale": (x_tiled, C // block_size),
+                "weight_scale": (C // block_size, k_tiled) if is_matmul else (k_tiled, C // block_size),
+                "output": (x_tiled, k_tiled),
             }
             node.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
             continue
@@ -1521,8 +1519,8 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             source_fn = node.target
 
         last_output = None
-        for c in range(0, C, C_tile):
-            c_end = min(c + C_tile, C)
+        for c in range(0, C, c_tiled):
+            c_end = min(c + c_tiled, C)
             scale_c, scale_c_end = int(c / block_size), int(c_end / block_size)
 
             with graph.inserting_before(node):
@@ -1572,12 +1570,12 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                     last_output = tiled_gemm
 
             tiled_gemm.meta["tiled_shapes"] = {
-                "input": (X_tile, C_tile),
-                weight_key: (C_tile, K_tile) if is_matmul else (K_tile, C_tile),
-                "bias": (K_tile,),
-                "input_scale": (X_tile, C_tile // block_size),
-                "weight_scale": (C_tile // block_size, K_tile) if is_matmul else (K_tile, C_tile // block_size),
-                "output": (X_tile, K_tile),
+                "input": (x_tiled, c_tiled),
+                weight_key: (c_tiled, k_tiled) if is_matmul else (k_tiled, c_tiled),
+                "bias": (k_tiled,),
+                "input_scale": (x_tiled, c_tiled // block_size),
+                "weight_scale": (c_tiled // block_size, k_tiled) if is_matmul else (k_tiled, c_tiled // block_size),
+                "output": (x_tiled, k_tiled),
             }
             tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
 
