@@ -1553,13 +1553,18 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         tiled_input_shape = tiled_input_shape[:-1] + (c_tiled,)
         tiled_input_scale_shape = tiled_input_shape[:-1] + (c_tiled // bs,)
 
+        tiled_output_shape = construct_tiled_shape(
+            node.value.shape, x_tiled, list(range(input_value.ndim))[:-1]
+        )
+        tiled_output_shape = tiled_output_shape[:-1] + (k_tiled,)
+
         tiled_shapes = {
             "input": tiled_input_shape,
             weight_key: (c_tiled, k_tiled) if is_matmul else (k_tiled, c_tiled),
             "bias": (k_tiled,),
             "input_scale": tiled_input_scale_shape,
             "weight_scale": (c_tiled // bs, k_tiled) if is_matmul else (k_tiled, c_tiled // bs),
-            "output": (x_tiled, k_tiled),
+            "output": tiled_output_shape,
         }
 
         num_x_tiles = X // x_tiled
