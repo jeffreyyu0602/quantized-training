@@ -1403,6 +1403,55 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
     return x_tiled, c_tiled, k_tiled
 
 
+def _prime_factors(n: int):
+    f, p = [], 2
+    while p * p <= n:
+        while n % p == 0:
+            f.append(p)
+            n //= p
+        p += 1 if p == 2 else 2  # 2,3,5,7,...
+    if n > 1:
+        f.append(n)
+    return f
+
+
+def construct_tiled_shape(full_shape, tiled_dim: int, dims):
+    """
+    Reconstruct full-rank tiled shape.
+
+    Args:
+      full_shape: tuple/list[int] original shape (len N)
+      tiled_dim: int, flattened size of the compressed (tiled) dims
+      dims: iterable[int], indices of dims that were flattened into tiled_dim
+
+    Returns:
+      Tuple[int] of length N
+    """
+    full_shape = tuple(full_shape)
+    N = len(full_shape)
+    if N == 0:
+        raise ValueError("full_shape must have at least one dimension.")
+
+    # Normalize & validate compressed dims
+    comp = sorted(set(int(i) for i in dims))
+    if not comp:
+        raise ValueError("dims cannot be empty.")
+    if any(i < 0 or i >= N for i in comp):
+        raise IndexError(f"dims must be in [0, {N-1}]. Got {dims}.")
+
+    # Distribute prime factors of R across compressed dims (greedy balance)
+    tiled = {i: 1 for i in comp}
+    for p in _prime_factors(tiled_dim):
+        for i in reversed(comp):
+            if full_shape[i] % p == 0:
+                tiled[i] *= p
+                break
+
+    # Build final shape
+    out = [tiled[i] if i in comp else full_shape[i] for i in range(N)]
+    return tuple(out)
+
+
 def slice_tensor(node, dim, start, end, model):
     """
     Slice a tensor along a specific dimension using the given start and end indices.
@@ -1467,13 +1516,15 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         weight_node = node.args[1]
         input_scale_node = node.kwargs.get("input_scale")
         weight_scale_node = node.kwargs.get("weight_scale")
-        block_size = node.kwargs.get("block_size", 1)
+        bs = node.kwargs.get("block_size", 1)
 
         input_value, weight_value = input_node.value, weight_node.value
 
         is_matmul = node.target in [
-            torch.ops.aten.matmul.default, torch.ops.quantized_ops.matmul_mx.default
+            torch.ops.aten.matmul.default,
+            torch.ops.quantized_ops.matmul_mx.default
         ]
+
         if is_matmul:
             C = int(weight_value.shape[0])
             K = int(weight_value.shape[1])
@@ -1490,26 +1541,33 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         total_size = calculate_gemm_node_size(node, 1, 1, 1)
 
         if total_size <= cache_size:
-            logger.info(f"{node}: X={X}, C={C}, K={K}, total_size={total_size} fits in cache, no tiling needed.")
+            logger.info(f"{node} ({X} x {C} x {K}), total_size={total_size} fits in cache.")
             continue
 
         x_tiled, c_tiled, k_tiled = choose_tile(node, X, C, K, cache_size, unroll)
+        logger.info(f"{node} ({X} x {C} x {K}) -> ({x_tiled} x {c_tiled} x {k_tiled})")
+
+        tiled_input_shape = construct_tiled_shape(
+            input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
+        )
+        tiled_input_shape = tiled_input_shape[:-1] + (c_tiled,)
+        tiled_input_scale_shape = tiled_input_shape[:-1] + (c_tiled // bs,)
+
+        tiled_shapes = {
+            "input": tiled_input_shape,
+            weight_key: (c_tiled, k_tiled) if is_matmul else (k_tiled, c_tiled),
+            "bias": (k_tiled,),
+            "input_scale": tiled_input_scale_shape,
+            "weight_scale": (c_tiled // bs, k_tiled) if is_matmul else (k_tiled, c_tiled // bs),
+            "output": (x_tiled, k_tiled),
+        }
 
         num_x_tiles = X // x_tiled
         num_k_tiles = K // k_tiled
         num_c_tiles = C // c_tiled
 
-        logger.info(f"{node}: X={X}, C={C}, K={K} -> x_tiled={x_tiled}, c_tiled={c_tiled}, k_tiled={k_tiled}")
-
         if num_c_tiles == 1:
-            node.meta["tiled_shapes"] = {
-                "input": (x_tiled, C),
-                weight_key: (C, k_tiled) if is_matmul else (k_tiled, C),
-                "bias": (k_tiled,),
-                "input_scale": (x_tiled, C // block_size),
-                "weight_scale": (C // block_size, k_tiled) if is_matmul else (k_tiled, C // block_size),
-                "output": (x_tiled, k_tiled),
-            }
+            node.meta["tiled_shapes"] = tiled_shapes
             node.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
             continue
 
@@ -1521,7 +1579,7 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         last_output = None
         for c in range(0, C, c_tiled):
             c_end = min(c + c_tiled, C)
-            scale_c, scale_c_end = int(c / block_size), int(c_end / block_size)
+            scale_c, scale_c_end = int(c / bs), int(c_end / bs)
 
             with graph.inserting_before(node):
                 tiled_input = slice_tensor(input_node, -1, c, c_end, model)
@@ -1569,14 +1627,7 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                 else:
                     last_output = tiled_gemm
 
-            tiled_gemm.meta["tiled_shapes"] = {
-                "input": (x_tiled, c_tiled),
-                weight_key: (c_tiled, k_tiled) if is_matmul else (k_tiled, c_tiled),
-                "bias": (k_tiled,),
-                "input_scale": (x_tiled, c_tiled // block_size),
-                "weight_scale": (c_tiled // block_size, k_tiled) if is_matmul else (k_tiled, c_tiled // block_size),
-                "output": (x_tiled, k_tiled),
-            }
+            tiled_gemm.meta["tiled_shapes"] = tiled_shapes
             tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
 
         node.replace_all_uses_with(last_output)
