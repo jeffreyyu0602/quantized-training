@@ -607,6 +607,62 @@ def pad_gemm_inputs_to_hardware_unroll_size(
     model.graph.lint()
     model.graph.eliminate_dead_code()
     model.recompile()
+
+    # # clear out slice-op-pad pattern for performance
+    # erase_node_set = set()
+    # for node in list(model.graph.nodes):
+    #     if node.target == torch.ops.aten.slice.Tensor:
+    #         users = list(node.users)
+    #         if len(users) == 1:
+    #             sub_users = list(users[0].users)
+    #             if len(sub_users) == 1 and sub_users[0].target == torch.ops.aten.pad.default:
+    #                 erase_node_set.add(node)
+    #                 erase_node_set.add(sub_users[0])
+
+    from collections import deque
+
+    erase_node_set = set()
+
+    for node in list(model.graph.nodes):
+        if node.target == torch.ops.aten.slice.Tensor:
+            visited = set()
+            pads_found = []
+            queue = deque(node.users)
+
+            stop = False
+            while queue and not stop:
+                cur = queue.popleft()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+
+                if cur.target == torch.ops.aten.slice.Tensor:
+                    # Hit another slice, stop the search completely
+                    stop = True
+                    break
+
+                if cur.target == torch.ops.aten.pad.default:
+                    pads_found.append(cur)
+
+                # Add next users to queue
+                queue.extend(cur.users)
+
+            # If we found pads before hitting another slice, record them
+            if pads_found:
+                print(f"slice node: {node.name}")
+                for p in pads_found:
+                    print(f"  found pad: {p.name}")
+                    erase_node_set.add(node)      # keep original slice
+                    erase_node_set.add(p)         # keep all pads found
+
+    for e_node in erase_node_set:
+        e_node.replace_all_uses_with(e_node.args[0])
+        model.graph.erase_node(e_node)
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
+    model.recompile()
+
     return model
 
 
