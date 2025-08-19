@@ -1486,7 +1486,7 @@ def gen_code(model, args, output_dir=None):
                 model_params.parameters.append(tensor)
             continue
         elif node.op == 'call_function':
-            op.op.CopyFrom(map_node(node, output_dir if tiled_shapes else None))
+            op.op.CopyFrom(map_node(node))
         elif node.op == 'call_module':
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
