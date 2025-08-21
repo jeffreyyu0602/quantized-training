@@ -218,6 +218,11 @@ if __name__ == "__main__":
         help="Hardware unroll dimensions for the accelerator."
     )
     parser.add_argument(
+        "--dont_fuse_reshape",
+        action="store_true",
+        help="Whether to fuse reshape operations in the model."
+    )
+    parser.add_argument(
         "--evaluate",
         action="store_true",
         help="Whether to run the pytorch evaluation during compilation"
@@ -250,6 +255,10 @@ if __name__ == "__main__":
         "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
         "conv2d_im2col": args.conv2d_im2col,
+        "fuse_reshape": (
+            not args.dont_fuse_reshape
+            and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64)
+        ),
     }
 
     compile_args = {
@@ -358,7 +367,7 @@ if __name__ == "__main__":
         past_key_values = None
 
         if args.model == "llm_decode":
-            max_generated_length = input_ids.shape[1] + 64
+            max_generated_length = input_ids.shape[1] + 128
             past_key_values = StaticCache(
                 config=model.config,
                 max_batch_size=1,

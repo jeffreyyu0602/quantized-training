@@ -86,7 +86,7 @@ TRANSPOSED_OPERATORS = {
 }
 
 
-def fuse(model, patterns, example_args, example_kwargs=None):
+def fuse(model, patterns, example_args, example_kwargs=None, fuse_reshape=True):
     if example_kwargs is None:
         example_kwargs = {}
 
@@ -101,7 +101,7 @@ def fuse(model, patterns, example_args, example_kwargs=None):
             for ops in pattern
         ]
 
-        fuse_operator(model, vector_stages)
+        fuse_operator(model, vector_stages, fuse_reshape)
 
     return model
 
@@ -117,6 +117,7 @@ def transform(
     cache_size=None,
     unroll_dims=None,
     conv2d_im2col=False,
+    fuse_reshape=True,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -138,11 +139,12 @@ def transform(
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
 
-    if unroll_dims is not None:
-        pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
-
     if conv2d_im2col:
         replace_conv2d_with_im2col(model)
+
+    if unroll_dims is not None:
+        pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
+        pad_vector_ops_to_hardware_unroll_size(model, unroll_dims[1])
 
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size)
@@ -158,7 +160,7 @@ def transform(
         eliminate_reshape_with_no_effect(model)
 
     if fuse_operator:
-        fuse(model, patterns, flatten_args)
+        fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
 
     rename_gemm_nodes(model)
 

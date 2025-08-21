@@ -295,7 +295,7 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.bn_folding and len(conv_bn_pairs) > 0:
             model = torch.ao.quantization.fuse_modules(model.eval(), conv_bn_pairs)
 
-        embeddings = model.vit.embeddings
+        # embeddings = model.vit.embeddings
 
         if args.bf16:
             model.bfloat16()
@@ -329,37 +329,39 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.convert_model:
             convert_pt2e(model, args.bias)
 
-        from quantized_training.codegen.mapping import duplicate_shared_nodes
+        # from quantized_training.codegen.mapping import duplicate_shared_nodes
 
-        sym_size_int_node = next(n for n in model.graph.nodes if n.target == torch.ops.aten.sym_size.int)
-        print(f"sym_size_int_node: {sym_size_int_node}")
+        # sym_size_int_node = next(
+        #     (n for n in model.graph.nodes if n.target == torch.ops.aten.sym_size.int), None
+        # )
+        # print(f"sym_size_int_node: {sym_size_int_node}")
 
-        for user in list(sym_size_int_node.users.keys()):
-            duplicate_shared_nodes(model.graph, [sym_size_int_node, user])
+        # for user in list(sym_size_int_node.users.keys()):
+        #     duplicate_shared_nodes(model.graph, [sym_size_int_node, user])
 
-        from quantized_training.codegen.utils import pad_vit_embeddings_output
+        # from quantized_training.codegen.utils import pad_vit_embeddings_output
 
-        pad_vit_embeddings_output(model, embeddings, (example_inputs,), dynamic_shapes=dynamic_shapes)
-        model.graph.print_tabular()
+        # pad_vit_embeddings_output(model, embeddings, (example_inputs,), dynamic_shapes=dynamic_shapes)
+        # model.graph.print_tabular()
 
-        if args.compile:
-            import copy
-            from quantized_training import transform
+        # if args.compile:
+        #     import copy
+        #     from quantized_training import transform
 
-            # We perform transformation specifically for compilation
-            model_to_compile = copy.deepcopy(model)
+        #     # We perform transformation specifically for compilation
+        #     model_to_compile = copy.deepcopy(model)
 
-            # FIXME this is not a proper use of replace_all_uses_with
-            for n in list(model_to_compile.graph.nodes):
-                if n.target == torch.ops.aten.sym_size.int:
-                    n.replace_all_uses_with(1)
+        #     # FIXME this is not a proper use of replace_all_uses_with
+        #     for n in list(model_to_compile.graph.nodes):
+        #         if n.target == torch.ops.aten.sym_size.int:
+        #             n.replace_all_uses_with(1)
 
-            transform(
-                model_to_compile,
-                example_args=(example_inputs[:1],),
-                output_file=args.arch,
-                output_dir=args.output_dir,
-            )
+        #     transform(
+        #         model_to_compile,
+        #         example_args=(example_inputs[:1],),
+        #         output_file=args.arch,
+        #         output_dir=args.output_dir,
+        #     )
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)

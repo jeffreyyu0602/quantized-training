@@ -1,7 +1,8 @@
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional
+from enum import IntEnum
+from typing import Optional, Union
 
 import torch
 import matplotlib.cm as cm
@@ -13,24 +14,36 @@ from ..pt2e_utils import dtype_byte_size
 logger = logging.getLogger(__name__)
 
 
+class MemorySpace(IntEnum):
+    """Logical memory spaces available to the system/hardware."""
+    DRAM        = 0  # main system memory (e.g., DDR)
+    SCRATCHPAD  = 1  # local SW-managed fast memory
+
+
 @dataclass
 class Segment:
-    start: int
-    end: int
-    partition_id: Optional[int] = None
-    node: Optional[torch.fx.Node] = None
+    start: Union[float, int]
+    end: Union[float, int]
+    memory_space: Optional[int] = None
+    node: Optional["fx.Node"] = None
 
-    def __post_init__(self):
-        original_start = self.start
-        original_end = self.end
+    def __post_init__(self) -> None:
+        s_raw = self.start
+        e_raw = self.end
 
-        self.start = int(self.start)
-        self.end = math.ceil(self.end)
+        s = int(s_raw)          # truncate toward zero (matches your original)
+        e = math.ceil(e_raw)    # round end up
 
-        if self.start != original_start:
-            logger.warning(f"Segment start {original_start} is not an integer. Rounding to {self.start}.")
-        if self.end != original_end:
-            logger.warning(f"Segment end {original_end} is not an integer. Rounding up to {self.end}.")
+        if s != s_raw:
+            logger.warning("Segment start %r is not an integer. Rounding to %d.", s_raw, s)
+        if e != e_raw:
+            logger.warning("Segment end %r is not an integer. Rounding up to %d.", e_raw, e)
+
+        if e < s:
+            raise ValueError(f"Segment end ({e}) is less than start ({s}).")
+
+        self.start = s
+        self.end = e
 
 
 def get_user_with_target(node: torch.fx.Node, targets):
@@ -60,17 +73,14 @@ class MemoryAllocator:
         memory_map (dict): A dictionary mapping tensors to their allocated memory partitions.
 
     """
-    total_partitions = 0
 
-    def __init__(self, total_memory=None, bank_width=None, bank_size=None):
+    def __init__(self, total_memory=None, bank_width=None, bank_size=None, memory_space=None):
         self.total_memory = total_memory or (1 << 63) - 1
         self.bank_width = bank_width
         self.bank_size = bank_size
+        self.memory_space = memory_space or MemorySpace.DRAM  # default to DRAM
 
-        self.partition_id = MemoryAllocator.total_partitions
-        MemoryAllocator.total_partitions += 1
-
-        self.segments = [Segment(start=0, end=self.total_memory, partition_id=self.partition_id)]
+        self.segments = [Segment(start=0, end=self.total_memory, memory_space=self.memory_space)]
         self.memory_map = {}
         self.snapshots = []
 
@@ -99,13 +109,17 @@ class MemoryAllocator:
                 input_node = input_node.meta.get('source_node', input_node)
                 dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
-                    tensor_size *= 2
                     logger.info(f"Increasing size for conv2d {node} for replication")
+                    tensor_size *= 2
 
-            softmax_node = get_user_with_target(node, torch.ops.aten.softmax.int)
-            if softmax_node is not None:
-                tensor_size *= 3
-                logger.info(f"Increasing size for softmax {node} for intermediate outputs")
+            user = get_user_with_target(node, [
+                torch.ops.aten.softmax.int,
+                torch.ops.aten.layer_norm.default,
+            ])
+
+            if user is not None:
+                logger.info(f"Increasing size for {node} for intermediate outputs")
+                tensor_size *= 2
 
             return self.align_size(tensor_size, align_bank)
 
@@ -165,13 +179,13 @@ class MemoryAllocator:
                     new_segment = Segment(
                         start=segment.start + tensor_size,
                         end=segment.end,
-                        partition_id=self.partition_id,
+                        memory_space=self.memory_space,
                     )
                     segment.end = segment.start + tensor_size
                     self.segments.insert(index + 1, new_segment)
                 self.memory_map[node] = segment
                 segment.node = node
-                return Segment(start=segment.start, end=segment.end, partition_id=self.partition_id)
+                return Segment(start=segment.start, end=segment.end, memory_space=self.memory_space)
 
         if expand_on_failure:
             last_segment = self.segments[-1]
@@ -181,7 +195,7 @@ class MemoryAllocator:
             new_segment = Segment(
                 start=start,
                 end=end,
-                partition_id=self.partition_id,
+                memory_space=self.memory_space,
                 node=node,
             )
             self.memory_map[node] = new_segment
@@ -193,7 +207,7 @@ class MemoryAllocator:
             else:
                 self.segments.append(new_segment)
                 self.segments.append(Segment(
-                    start=end, end=self.total_memory * 2, partition_id=self.partition_id
+                    start=end, end=self.total_memory * 2, memory_space=self.memory_space
                 ))
 
             logger.warning(
@@ -204,7 +218,7 @@ class MemoryAllocator:
             self.total_memory *= 2
 
             return Segment(
-                start=new_segment.start, end=new_segment.end, partition_id=self.partition_id
+                start=new_segment.start, end=new_segment.end, memory_space=self.memory_space
             )
 
         raise RuntimeError(f"Memory allocation failed for tensor {node.name}")

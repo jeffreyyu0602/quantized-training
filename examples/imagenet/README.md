@@ -9,6 +9,14 @@ This implements training of popular model architectures, such as ResNet, AlexNet
 - Download the ImageNet dataset from http://www.image-net.org/
   - Then, move and extract the training and validation images to labeled subfolders, using [the following shell script](extract_ILSVRC.sh)
 
+## Inference
+
+To run MobileNet inference, run `main.py` with the following command:
+
+```bash
+python examples/imagenet/main.py /data/datasets/ImageNet_Pytorch/ -a mobilenet_v2 --pretrained --evaluate --bn_folding --calibration_steps 10 --gpu 0
+```
+
 ## Training
 
 To train a model, run `main.py` with the desired model architecture and the path to the ImageNet dataset:
@@ -21,6 +29,20 @@ The default learning rate schedule starts at 0.1 and decays by a factor of 10 ev
 
 ```bash
 python main.py -a alexnet --lr 0.01 [imagenet-folder with train and val folders]
+```
+
+## Quantization-Aware Training (QAT)
+
+To perform quantization-aware training:
+
+```bash
+python examples/imagenet/main.py /data/datasets/ImageNet_Pytorch/ -a mobilenet_v2 --pretrained -b 64 --lr 1e-4 --bn_folding --calibration_steps 10 --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --gpu 0
+```
+
+To run inference on trained QAT model:
+
+```bash
+python examples/imagenet/main.py /data/datasets/ImageNet_Pytorch/ -a mobilenet_v2 --pretrained -b 64 --evaluate --qat_model_id [path to qat model] --bn_folding --calibration_steps 10 --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --gpu 0
 ```
 
 ## Use Dummy Data

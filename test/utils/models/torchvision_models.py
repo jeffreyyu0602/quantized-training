@@ -140,7 +140,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
 def evaluate(model, dataset):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    model.to(device)
 
     correct_predictions = 0
     total_samples = 0
