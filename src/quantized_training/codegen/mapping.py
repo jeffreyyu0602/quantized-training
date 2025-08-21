@@ -1065,7 +1065,7 @@ def get_node_bytes(n: Node):
 
 
 def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
-    from .utils import get_tiled_shapes
+    from .utils import get_tiled_shapes, construct_tiled_shape
 
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
 
@@ -1121,9 +1121,11 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
 
     is_gemm = _is_gemm_op(first_node)
     min_sizes = (1, 64) if is_gemm else None
+    tiled_output_shapes = get_tiled_shapes(output_shape, reverse=is_gemm, min_sizes=min_sizes)
 
-    for tiled_output_shape in get_tiled_shapes(output_shape, reverse=is_gemm, min_sizes=min_sizes):
+    for tiled_output_shape in tiled_output_shapes:
         reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
+        print(node, output_shape, tiled_output_shape, reduce_factor)
 
         if isinstance(node.value, (tuple, list)):
             new_shapes = {
@@ -1133,34 +1135,38 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
             new_shapes = {node: tiled_output_shape}
 
         if is_gemm:
+            x_tiled = math.prod(tiled_output_shape[:-1])
+            k_tiled = tiled_output_shape[-1]
+            reduce_factor = (math.prod(reduce_factor[:-1]), reduce_factor[-1])
+
             input_node = first_node.args[0].meta.get('source_node')
-            input_factor = (*reduce_factor[:-1], 1)
-            new_shapes[input_node] = get_reduced_shape(tiled_shapes[input_node], input_factor)
+            input_shape = tiled_shapes[input_node]
+            tiled_input_shape = construct_tiled_shape(input_shape, x_tiled, range(len(input_shape) - 1))
+            new_shapes[input_node] = tiled_input_shape[:-1] + (input_shape[-1],)
 
-            transposed = first_node.meta.get("transposed", False)
             weight_node = first_node.args[1].meta.get('source_node')
-            weight_factor = (
-                (1, reduce_factor[-1]) if transposed or _is_matmul(first_node)
-                else (reduce_factor[-1], 1)
+            weight_shape = tiled_shapes[weight_node]
+            weight_transposed = first_node.meta.get("transposed", False) or _is_matmul(first_node)
+            new_shapes[weight_node] = (
+                weight_shape[:-1] + (k_tiled,) if weight_transposed else (k_tiled,) + weight_shape[1:]
             )
-            new_shapes[weight_node] = get_reduced_shape(tiled_shapes[weight_node], weight_factor)
 
-            if not _is_matmul(first_node) and len(first_node.args) > 2:
+            if len(first_node.args) > 2:
                 bias_node = first_node.args[2].meta.get('source_node')
-                new_shapes[bias_node] = get_reduced_shape(
-                    tiled_shapes[bias_node], (reduce_factor[-1],)
-                )
+                new_shapes[bias_node] = (k_tiled,)
 
             if (input_scale_node := first_node.kwargs.get("input_scale")) is not None:
                 input_scale_node = input_scale_node.meta.get('source_node')
-                new_shapes[input_scale_node] = get_reduced_shape(
-                    tiled_shapes[input_scale_node], input_factor
-                )
+                input_scale_shape = tiled_shapes[input_scale_node]
+                new_shapes[input_scale_node] = tiled_input_shape[:-1] + (input_scale_shape[-1],)
 
             if (weight_scale_node := first_node.kwargs.get("weight_scale")) is not None:
                 weight_scale_node = weight_scale_node.meta.get('source_node')
-                new_shapes[weight_scale_node] = get_reduced_shape(
-                    tiled_shapes[weight_scale_node], weight_factor
+                weight_scale_shape = tiled_shapes[weight_scale_node]
+                new_shapes[weight_scale_node] = (
+                    weight_scale_shape[:-1] + (k_tiled,)
+                    if weight_transposed
+                    else (k_tiled,) + weight_scale_shape[1:]
                 )
 
         for n in node.all_input_nodes:
@@ -1181,9 +1187,13 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
 
         if bytes_to_allocate <= allocator.total_memory:
             l2_tiling = first_node.meta.get("l2_tiling", [1] * len(reduce_factor))
+            assert len(l2_tiling) == len(reduce_factor)
+
             l2_tiling = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
+
             if math.prod(l2_tiling) == 1:
                 return {}
+
             first_node.meta["l2_tiling"] = l2_tiling
             return new_shapes
 
@@ -1467,6 +1477,19 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     model_params = Model()
 
+    def map_arg(arg, tiled_shapes=None):
+        if not isinstance(arg, torch.fx.Node):
+            return arg
+
+        if tiled_shapes is None or arg not in tiled_shapes:
+            return arg.value.clone()
+
+        tensor = arg.value.clone()
+        shape = tiled_shapes[arg]
+        n = len(shape)
+        slices = [slice(None)] * (tensor.ndim - n) + [slice(0, s) for s in shape]
+        return tensor[tuple(slices)]
+
     for node in model.graph.nodes:
         node_value = getattr(node, 'value', None)
         if not isinstance(node_value, (torch.Tensor, tuple, list)):
@@ -1491,10 +1514,17 @@ def gen_code(model, args, output_dir=None):
             gm = named_modules[node.target]
             assert isinstance(gm, torch.fx.GraphModule)
 
+            if (tiled_shapes := node.meta.get('tiled_shapes')):
+                args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
+                ShapeProp(gm).propagate(*args)
+
+                for n in gm.graph.nodes:
+                    if hasattr(n, "shape"):
+                        tiled_shapes.setdefault(n, n.shape)
+
             args = torch.fx.node.map_arg(node.args, lambda n: n.value.clone())
             ShapeProp(gm).propagate(*args)
 
-            tiled_shapes = node.meta.get('tiled_shapes')
             scratchpad_mem = node.meta.get("scratchpad_mem")
 
             operators = []

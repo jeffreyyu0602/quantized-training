@@ -1,4 +1,5 @@
 import collections
+import copy
 import itertools
 import logging
 import math
@@ -1632,7 +1633,7 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                 else:
                     last_output = tiled_gemm
 
-            tiled_gemm.meta["tiled_shapes"] = tiled_shapes
+            tiled_gemm.meta["tiled_shapes"] = copy.deepcopy(tiled_shapes)
             tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
 
         node.replace_all_uses_with(last_output)
@@ -1644,7 +1645,13 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     return model
 
 
-def get_tiled_shapes(input_shape, fix_last_dim=False, last_dim=-1, reverse=False, min_sizes=None):
+def get_tiled_shapes(
+    input_shape,
+    fix_last_dim=False,
+    last_dim=-1,
+    reverse=False,
+    min_sizes=None,
+):
     """
     Yields tile shapes by progressively reducing from outermost to innermost (or reverse).
     Once a dimension is reduced to 1, it stays fixed. Last dim can be fixed optionally.
