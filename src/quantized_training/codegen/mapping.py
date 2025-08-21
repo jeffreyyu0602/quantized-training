@@ -1027,15 +1027,15 @@ def fuse_operator(
     return model
 
 
-def get_tiled_tensor(shape1, shape2):
+def get_tiled_input(shape1, shape2):
     """
     Given:
-      - shape1: original shape of tensor A
-      - shape2: original shape of tensor B (broadcastable to shape1)
-      - tiled_last2: tuple (X, K) for the new last two dims of A after tiling
+      - shape1: tiled shape of tensor A
+      - shape2: original shape of tensor B (broadcastable to the original shape
+                of tensor A)
 
     Returns:
-      - shape2_tiled: shape for B that is broadcastable to the new shape of A
+      - shape2_tiled: shape for B that is broadcastable to the tiled shape of A
     """
     # Align shape2 to the same number of dims as new_shape1
     shape2 = list(shape2)
@@ -1125,7 +1125,6 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
 
     for tiled_output_shape in tiled_output_shapes:
         reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
-        print(node, output_shape, tiled_output_shape, reduce_factor)
 
         if isinstance(node.value, (tuple, list)):
             new_shapes = {
@@ -1304,11 +1303,11 @@ def run_memory_mapping(
             output_shape = tiled_shapes[first_node]
             for n in node.all_input_nodes:
                 if n not in tiled_shapes and not n.name.startswith("code"):
-                    tiled_shapes[n] = get_tiled_tensor(output_shape, n.value.shape)
+                    tiled_shapes[n] = get_tiled_input(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
             if isinstance(node.value, torch.Tensor):
-                tiled_shapes[node] = output_shape
+                tiled_shapes[node] = get_tiled_shape(node.shape, l2_tiling)
             else:
                 tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
 
