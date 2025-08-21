@@ -932,18 +932,18 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                 if n.target == torch.ops.aten.transpose.int:
                     move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
 
-    # for node in list(graph.nodes):
-    #     if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
-    #         continue
+    for node in list(graph.nodes):
+        if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
+            continue
 
-    #     if (
-    #         _is_nop(node) or
-    #         node.target == torch.ops.aten.select.int and
-    #         all(d == 1 for d in node.args[0].shape[:node.args[1]])
-    #     ):
-    #         continue
+        if (
+            _is_nop(node) or
+            node.target == torch.ops.aten.select.int and
+            all(d == 1 for d in node.args[0].shape[:node.args[1]])
+        ):
+            continue
 
-    #     fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)
+        fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)
 
     for node in list(graph.nodes):
         if node.target != torch.ops.quantized_ops.dequantize.default:
@@ -980,8 +980,8 @@ def fuse_operator(model: GraphModule, operations: List[List[Callable]] = None):
                 else:
                     n.meta['reshape'] = fused_node
 
-            # if _is_indexing_or_concatenation_op(fused_node):
-            #     n.meta['slicing'] = fused_node
+            if _is_indexing_or_concatenation_op(fused_node):
+                n.meta['slicing'] = fused_node
 
             if fused_node.target == torch.ops.quantized_ops.dequantize.default:
                 n.meta['dq_scale'] = named_buffers[fused_node.args[1].target]

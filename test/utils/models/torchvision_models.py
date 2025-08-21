@@ -9,7 +9,6 @@ from quantized_training import (
     QuantizationConfig,
     QuantizationSpec,
     convert_pt2e,
-    export_model,
     prepare_pt2e,
     transform,
     compile,
@@ -114,7 +113,6 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
         quantizer.set_module_name("^conv1$", qconfig)
 
     example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
-
     gm = prepare_pt2e(model, quantizer, example_args)
 
     for i in tqdm(range(10), desc=f"Calibrating {model.__class__.__name__}"):
@@ -142,7 +140,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
 def evaluate(model, dataset):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device, dtype=torch.bfloat16)
+    model = model.to(device)
 
     correct_predictions = 0
     total_samples = 0
@@ -151,7 +149,7 @@ def evaluate(model, dataset):
         for image_label_pair in tqdm(dataset, desc=f"Evaluating {model.__class__.__name__}"):
             # for running the original model without the preprocessing function 
             # applied to the dataset
-            image = image_label_pair["image"].to(device, dtype=torch.bfloat16)
+            image = image_label_pair["image"].to(device)
             label = image_label_pair["label"]
     
             logits = model(image)

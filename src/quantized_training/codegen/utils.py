@@ -514,8 +514,6 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 padded_scale.meta["dtype"] = scale.meta.get("dtype")
 
     for node in list(model.graph.nodes):
-        # if not _is_gemm_op(node) or is_depthwise_conv(node):
-        #     continue
         if not _is_gemm_op(node):
             continue
 
@@ -559,8 +557,6 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 else:
                     weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
                     weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
-                # weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-                # weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
             elif _is_matmul(node):
                 weight_pad = [0, pad_K, 0, pad_C]
                 weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
@@ -608,56 +604,46 @@ def pad_gemm_inputs_to_hardware_unroll_size(
     model.graph.eliminate_dead_code()
     model.recompile()
 
-    # # clear out slice-op-pad pattern for performance
-    # erase_node_set = set()
-    # for node in list(model.graph.nodes):
-    #     if node.target == torch.ops.aten.slice.Tensor:
-    #         users = list(node.users)
-    #         if len(users) == 1:
-    #             sub_users = list(users[0].users)
-    #             if len(sub_users) == 1 and sub_users[0].target == torch.ops.aten.pad.default:
-    #                 erase_node_set.add(node)
-    #                 erase_node_set.add(sub_users[0])
+    agressive_pruning = False
+    if agressive_pruning:
+        from collections import deque
+        erase_node_set = set()
 
-    from collections import deque
+        for node in list(model.graph.nodes):
+            if node.target == torch.ops.aten.slice.Tensor:
+                visited = set()
+                pads_found = []
+                queue = deque(node.users)
 
-    erase_node_set = set()
+                stop = False
+                while queue and not stop:
+                    cur = queue.popleft()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
 
-    for node in list(model.graph.nodes):
-        if node.target == torch.ops.aten.slice.Tensor:
-            visited = set()
-            pads_found = []
-            queue = deque(node.users)
+                    if cur.target == torch.ops.aten.slice.Tensor:
+                        # Hit another slice, stop the search completely
+                        stop = True
+                        break
 
-            stop = False
-            while queue and not stop:
-                cur = queue.popleft()
-                if cur in visited:
-                    continue
-                visited.add(cur)
+                    if cur.target == torch.ops.aten.pad.default:
+                        pads_found.append(cur)
 
-                if cur.target == torch.ops.aten.slice.Tensor:
-                    # Hit another slice, stop the search completely
-                    stop = True
-                    break
+                    # Add next users to queue
+                    queue.extend(cur.users)
 
-                if cur.target == torch.ops.aten.pad.default:
-                    pads_found.append(cur)
+                # If we found pads before hitting another slice, record them
+                if pads_found:
+                    print(f"slice node: {node.name}")
+                    for p in pads_found:
+                        print(f"  found pad: {p.name}")
+                        erase_node_set.add(node)      # keep original slice
+                        erase_node_set.add(p)         # keep all pads found
 
-                # Add next users to queue
-                queue.extend(cur.users)
-
-            # If we found pads before hitting another slice, record them
-            if pads_found:
-                print(f"slice node: {node.name}")
-                for p in pads_found:
-                    print(f"  found pad: {p.name}")
-                    erase_node_set.add(node)      # keep original slice
-                    erase_node_set.add(p)         # keep all pads found
-
-    for e_node in erase_node_set:
-        e_node.replace_all_uses_with(e_node.args[0])
-        model.graph.erase_node(e_node)
+        for e_node in erase_node_set:
+            e_node.replace_all_uses_with(e_node.args[0])
+            model.graph.erase_node(e_node)
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
