@@ -71,6 +71,7 @@ OPERATOR_MAPPINGS = {
     "relu": [nn.ReLU, F.relu, F.relu_],
     "gelu": [nn.GELU, F.gelu],
     "silu": [nn.SiLU, F.silu],
+    "hardtanh" : [nn.ReLU6, F.relu6],
     "maxpool2d": [nn.MaxPool2d, F.max_pool2d],
     "avgpool2d": [nn.AdaptiveAvgPool2d, F.adaptive_avg_pool2d],
     "layer_norm": ["layer_norm", nn.LayerNorm, F.layer_norm],

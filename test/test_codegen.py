@@ -78,7 +78,7 @@ vector_stages = [
         ["gemm"],
         ["dequantize"],
         ["add", "sub", "mul", "div"],
-        ["exp", "abs", "relu", "gelu", "tanh", "silu", "vmap"],
+        ["exp", "abs", "relu", "gelu", "tanh", "silu", "vmap", "hardtanh"],
         ["add", "mul", "div"],
         ["div", "quantize"],
     ],
