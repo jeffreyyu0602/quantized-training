@@ -831,33 +831,35 @@ def move_transpose_after_select(
         curr_user = next(iter(curr_user.users))
         dims = [x - 1 for x in dims]
 
-    if select_nodes:
-        with graph.inserting_before(curr_user):
-            new_node = graph.call_function(
-                torch.ops.aten.transpose.int, (select_nodes[-1], *dims),
-            )
+    if not select_nodes:
+        return False
 
-        curr_user.replace_input_with(select_nodes[-1], new_node)
-        select_nodes[0].replace_input_with(transpose_node, transpose_node.args[0])
-        graph.erase_node(transpose_node)
-
-        group = search_group(transpose_node, candidates)
-        group.remove(transpose_node)
-
-        for n in select_nodes:
-            group.remove(n)
-            propagate_shape(n)
-
-        group.append(new_node)
-        propagate_shape(new_node)
-
-        mapped_node = nodes_map.pop(transpose_node, None)
-        nodes_map[new_node] = (
-            new_node if mapped_node == select_nodes[-1] else mapped_node
+    with graph.inserting_before(curr_user):
+        new_node = graph.call_function(
+            torch.ops.aten.transpose.int, (select_nodes[-1], *dims),
         )
 
-    graph.lint()
-    graph.eliminate_dead_code()
+    curr_user.replace_input_with(select_nodes[-1], new_node)
+    select_nodes[0].replace_input_with(transpose_node, transpose_node.args[0])
+    graph.erase_node(transpose_node)
+
+    group = search_group(transpose_node, candidates)
+    group.append(new_node)
+    group.remove(transpose_node)
+
+    # Propagate shape in the order of nodes appearing in graph
+    for node in select_nodes:
+        group.remove(node)
+        propagate_shape(node)
+
+    propagate_shape(new_node)
+
+    mapped_node = nodes_map.pop(transpose_node, None)
+    nodes_map[new_node] = (
+        new_node if mapped_node == select_nodes[-1] else mapped_node
+    )
+
+    return True
 
 
 def fuse_op_with_input(
@@ -1027,45 +1029,33 @@ def fuse_operator(
     return model
 
 
-def get_tiled_input(shape1, shape2):
-    """
-    Given:
-      - shape1: tiled shape of tensor A
-      - shape2: original shape of tensor B (broadcastable to the original shape
-                of tensor A)
-
-    Returns:
-      - shape2_tiled: shape for B that is broadcastable to the tiled shape of A
-    """
-    # Align shape2 to the same number of dims as new_shape1
-    shape2 = list(shape2)
-    ndiff = len(shape1) - len(shape2)
-    # For each dim, if shape2 dim is 1 or matches, keep it, else set to 1
-    shape2_tiled = []
-    for i in range(len(shape2)):
-        shape2_tiled.append(shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i])
-    return tuple(shape2_tiled)
-
-
-def get_tiled_shape(shape, num_tiles):
-    if num_tiles is None:
-        return shape
-    ndiff = len(shape) - len(num_tiles)
-    tiled_shape = []
-    for i in range(len(shape)):
-        tiled_shape.append(int(shape[i] / num_tiles[i - ndiff]) if i - ndiff >= 0 else shape[i])
-    return tuple(tiled_shape)
-
-
 def get_node_bytes(n: Node):
-    if n.meta.get('dtype', None) is not None:
-        return dtype_byte_size(n.meta['dtype'])
+    if (dtype := n.meta.get('dtype', None)) is not None:
+        return (
+            (dtype_byte_size(t) for t in dtype)
+            if isinstance(dtype, (list, tuple))
+            else dtype_byte_size(dtype)
+        )
 
     return dtype_byte_size(n.value.dtype)
 
 
+def get_tiled_tensor(arg, tiled_shapes=None):
+    if not isinstance(arg, torch.fx.Node):
+        return arg
+
+    if tiled_shapes is None or arg not in tiled_shapes:
+        return arg.value.clone()
+
+    tensor = arg.value.clone()
+    shape = tiled_shapes[arg]
+    n = len(shape)
+    slices = [slice(None)] * (tensor.ndim - n) + [slice(0, s) for s in shape]
+    return tensor[tuple(slices)]
+
+
 def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
-    from .utils import get_tiled_shapes, construct_tiled_shape
+    from .utils import get_valid_tiling, get_tiled_shape, construct_tiled_shape
 
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
 
@@ -1089,24 +1079,6 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
     ]:
         return tiled_shapes
 
-    def get_reduce_factor(full_shape, tile_shape):
-        return tuple(f // t for f, t in zip(full_shape, tile_shape))
-
-    def get_reduced_shape(shape, reduce_factor):
-        if not shape:
-            return shape
-
-        max_len = max(len(shape), len(reduce_factor))
-        padded_shape = [1] * (max_len - len(shape)) + list(shape)
-        padded_reduce = [1] * (max_len - len(reduce_factor)) + list(reduce_factor)
-
-        reduced = [
-            dim // factor if dim > 1 else dim
-            for dim, factor in zip(padded_shape, padded_reduce)
-        ]
-
-        return tuple(reduced[-len(shape):])
-
     if not tiled_shapes:
         tiled_shapes = {n: n.value.shape for n in node.all_input_nodes}
         if isinstance(node.value, torch.Tensor):
@@ -1114,29 +1086,27 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
         else:
             tiled_shapes[node] = tuple(t.shape for t in node.value)
 
-    output_shape = (
-        tiled_shapes[node] if isinstance(node.value, torch.Tensor)
-        else tiled_shapes[node][1]
-    )
-
     is_gemm = _is_gemm_op(first_node)
     min_sizes = (1, 64) if is_gemm else None
-    tiled_output_shapes = get_tiled_shapes(output_shape, reverse=is_gemm, min_sizes=min_sizes)
 
-    for tiled_output_shape in tiled_output_shapes:
-        reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
+    if is_gemm:
+        args = map_arg(node.args, lambda n: get_tiled_tensor(n, tiled_shapes))
+        ShapeProp(module).propagate(*args)
+        output_shape = first_node.value.shape
+    elif isinstance(node.value, torch.Tensor):
+        output_shape = node.value.shape
+    else:
+        output_shape = node.value[1].shape
 
-        if isinstance(node.value, (tuple, list)):
-            new_shapes = {
-                node: [get_reduced_shape(s, reduce_factor) for s in tiled_shapes[node]]
-            }
-        else:
-            new_shapes = {node: tiled_output_shape}
+    tilings = get_valid_tiling(output_shape, reverse=is_gemm, min_sizes=min_sizes)
+
+    for tiled_output_shape, tiling in tilings:
+        new_shapes = {}
 
         if is_gemm:
             x_tiled = math.prod(tiled_output_shape[:-1])
             k_tiled = tiled_output_shape[-1]
-            reduce_factor = (math.prod(reduce_factor[:-1]), reduce_factor[-1])
+            tiling = (math.prod(tiling[:-1]), tiling[-1])
 
             input_node = first_node.args[0].meta.get('source_node')
             input_shape = tiled_shapes[input_node]
@@ -1170,34 +1140,54 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
 
         for n in node.all_input_nodes:
             if n not in new_shapes and not n.name.startswith("code"):
-                input_shape = list(tiled_shapes[n])
-                new_shapes[n] = get_reduced_shape(input_shape, reduce_factor)
+                new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
 
-        bytes_to_allocate = sum(
+        if isinstance(node.value, (tuple, list)):
+            new_shapes[node] = [get_tiled_shape(s, tiling) for s in tiled_shapes[node]]
+        else:
+            assert isinstance(node.value, torch.Tensor)
+            new_shapes[node] = tiled_output_shape
+
+        total_size = sum(
             allocator.get_tensor_size(n, new_shapes.get(n))
             for n in node.all_input_nodes if not n.name.startswith("code")
         )
 
-        if isinstance(node.value, torch.Tensor):
-            bytes_to_allocate += allocator.get_tensor_size(node, new_shapes.get(node))
-        elif isinstance(node.value, (tuple, list)):
-            output_shapes = new_shapes.get(node, [tuple(t.shape) for t in node.value])
-            bytes_to_allocate += allocator.get_tensor_size(node, output_shapes)
+        total_size += allocator.get_tensor_size(node, new_shapes[node])
 
-        if bytes_to_allocate <= allocator.total_memory:
-            l2_tiling = first_node.meta.get("l2_tiling", [1] * len(reduce_factor))
-            assert len(l2_tiling) == len(reduce_factor)
+        if total_size <= allocator.total_memory:
+            if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
+                assert len(orig_tiling) == len(tiling)
+                tiling = tuple(a * b for a, b in zip(orig_tiling, tiling))
 
-            l2_tiling = tuple(a * b for a, b in zip(l2_tiling, reduce_factor))
-
-            if math.prod(l2_tiling) == 1:
+            if math.prod(tiling) == 1:
                 return {}
 
-            first_node.meta["l2_tiling"] = l2_tiling
+            first_node.meta["l2_tiling"] = tiling
             return new_shapes
 
     logger.warning(f"Failed to adjust tiling for {node}")
     return tiled_shapes
+
+
+def get_tiled_input_shape(shape1, shape2):
+    """
+    Given:
+      - shape1: tiled shape of tensor A
+      - shape2: original shape of tensor B (broadcastable to the original shape
+                of tensor A)
+
+    Returns:
+      - shape2_tiled: shape for B that is broadcastable to the tiled shape of A
+    """
+    # Align shape2 to the same number of dims as new_shape1
+    shape2 = list(shape2)
+    ndiff = len(shape1) - len(shape2)
+    # For each dim, if shape2 dim is 1 or matches, keep it, else set to 1
+    shape2_tiled = []
+    for i in range(len(shape2)):
+        shape2_tiled.append(shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i])
+    return tuple(shape2_tiled)
 
 
 def run_memory_mapping(
@@ -1275,6 +1265,8 @@ def run_memory_mapping(
         return None
 
     def allocate_scratchpad(node: Node):
+        from .utils import get_tiled_shape
+
         if cache_size is None:
             return
 
@@ -1303,7 +1295,7 @@ def run_memory_mapping(
             output_shape = tiled_shapes[first_node]
             for n in node.all_input_nodes:
                 if n not in tiled_shapes and not n.name.startswith("code"):
-                    tiled_shapes[n] = get_tiled_input(output_shape, n.value.shape)
+                    tiled_shapes[n] = get_tiled_input_shape(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
             if isinstance(node.value, torch.Tensor):
@@ -1476,19 +1468,6 @@ def gen_code(model, args, output_dir=None):
     ShapeProp(model).propagate(*args)
     model_params = Model()
 
-    def map_arg(arg, tiled_shapes=None):
-        if not isinstance(arg, torch.fx.Node):
-            return arg
-
-        if tiled_shapes is None or arg not in tiled_shapes:
-            return arg.value.clone()
-
-        tensor = arg.value.clone()
-        shape = tiled_shapes[arg]
-        n = len(shape)
-        slices = [slice(None)] * (tensor.ndim - n) + [slice(0, s) for s in shape]
-        return tensor[tuple(slices)]
-
     for node in model.graph.nodes:
         node_value = getattr(node, 'value', None)
         if not isinstance(node_value, (torch.Tensor, tuple, list)):
@@ -1514,14 +1493,14 @@ def gen_code(model, args, output_dir=None):
             assert isinstance(gm, torch.fx.GraphModule)
 
             if (tiled_shapes := node.meta.get('tiled_shapes')):
-                args = torch.fx.node.map_arg(node.args, lambda n: map_arg(n, tiled_shapes))
+                args = map_arg(node.args, lambda n: get_tiled_tensor(n, tiled_shapes))
                 ShapeProp(gm).propagate(*args)
 
                 for n in gm.graph.nodes:
                     if hasattr(n, "shape"):
                         tiled_shapes.setdefault(n, n.shape)
 
-            args = torch.fx.node.map_arg(node.args, lambda n: n.value.clone())
+            args = map_arg(node.args, lambda n: n.value.clone())
             ShapeProp(gm).propagate(*args)
 
             scratchpad_mem = node.meta.get("scratchpad_mem")

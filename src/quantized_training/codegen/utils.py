@@ -1383,10 +1383,7 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
     # Shrink output channel dim first, then reduction dim, then input dim
     while True:
         total_size = calculate_gemm_node_size(
-            node,
-            X // x_tiled,
-            C // c_tiled,
-            K // k_tiled
+            node, X // x_tiled, C // c_tiled, K // k_tiled
         )
 
         if total_size <= max_mem_bytes:
@@ -1645,7 +1642,7 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     return model
 
 
-def get_tiled_shapes(
+def get_valid_tiling(
     input_shape,
     fix_last_dim=False,
     last_dim=-1,
@@ -1666,6 +1663,9 @@ def get_tiled_shapes(
     def get_factors(n, min_size):
         return [i for i in range(n, min_size - 1, -1) if n % i == 0]
 
+    def get_tiling(full_shape, tiled_shape):
+        return tuple(f // t for f, t in zip(full_shape, tiled_shape))
+
     dims = len(input_shape)
     last_dim = dims + last_dim if last_dim < 0 else last_dim
     stop = last_dim if fix_last_dim else dims
@@ -1682,14 +1682,29 @@ def get_tiled_shapes(
         min_sizes = list(min_sizes) + [1] * (dims - len(min_sizes))
 
     current = list(input_shape)
-    yield tuple(current)
+    yield tuple(current), get_tiling(input_shape, tuple(current))
 
     for dim in dim_order:
         factors = get_factors(input_shape[dim], min_sizes[dim])
         for f in factors[1:]:  # skip full-size factor
             current[dim] = f
-            yield tuple(current)
+            yield tuple(current), get_tiling(input_shape, tuple(current))
         current[dim] = max(min_sizes[dim], 1)  # lock at min size
+
+
+def get_tiled_shape(shape, tiling):
+    if not shape or tiling is None:
+        return shape
+    ndim = len(shape)
+    m = len(tiling)
+    if ndim > m:
+        tiling = (1,) * (ndim - m) + tiling
+    elif ndim < m:
+        shape = (1,) * (m - ndim) + shape
+    tiled_shape = []
+    for i in range(len(shape)):
+        tiled_shape.append(shape[i] // tiling[i] if shape[i] > 1 else shape[i])
+    return tuple(tiled_shape[-ndim:])
 
 
 def get_node_to_key(node):
@@ -1706,15 +1721,6 @@ def get_node_to_key(node):
 
 
 def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
-    def get_reduce_factor(full_shape, tile_shape):
-        return tuple(f // t for f, t in zip(full_shape, tile_shape))
-
-    def get_reduced_shape(shape, reduce_factor):
-        assert len(shape) == len(reduce_factor)
-        return tuple(
-            s // r if s > 1 else s for s, r in zip(shape, reduce_factor)
-        )
-
     for node in list(model.graph.nodes):
         if not _is_elementwise_op(node) and node.target not in [
             torch.ops.aten.softmax.int,
@@ -1743,41 +1749,39 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         else:
             last_dim = -1
 
-        for tiled_output_shape in get_tiled_shapes(output_shape, True, last_dim):
-            reduce_factor = get_reduce_factor(output_shape, tiled_output_shape)
-            tile_numel = math.prod(tiled_output_shape)
-            total_tile_size = get_node_bytes(node) * tile_numel
-
-            if node.target == torch.ops.aten.softmax.int:
-                total_tile_size *= 3
-
-            if isinstance(node.value, (tuple, list)):
-                tiled_shapes = {
-                    "output": [get_reduced_shape(t.shape, reduce_factor) for t in node.value]
-                }
-            else:
-                tiled_shapes = {"output": tiled_output_shape}
-
+        for tiled_output_shape, tiling in get_valid_tiling(output_shape, True, last_dim):
             node_to_key = get_node_to_key(node)
+            tiled_shapes = {}
 
             for n in node.all_input_nodes:
-                if n.name.startswith("code"):
-                    continue
+                if not n.name.startswith("code"):
+                    tiled_shapes[node_to_key.get(n)] = get_tiled_shape(tuple(n.value.shape), tiling)
 
-                input_shape = list(n.value.shape)
-                aligned_shape = [1] * (len(output_shape) - len(input_shape)) + input_shape
-                tiled_shape = tuple(
-                    s // r if s > 1 else s for s, r in zip(aligned_shape, reduce_factor)
+            total_size = sum(
+                get_node_bytes(n) * math.prod(tiled_shapes[node_to_key.get(n)])
+                for n in node.all_input_nodes if not n.name.startswith("code")
+            )
+
+            if node.target in [
+                torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
+            ]:
+                total_size *= 2
+
+            if isinstance(node.value, (tuple, list)):
+                tiled_shapes["output"] = [get_tiled_shape(t.shape, tiling) for t in node.value]
+                total_size += sum(
+                    b * math.prod(s) for b, s in zip(get_node_bytes(node), tiled_shapes["output"])
                 )
-                total_tile_size += get_node_bytes(n) * math.prod(tiled_shape)
+            else:
+                assert isinstance(node.value, torch.Tensor)
+                tiled_shapes["output"] = tiled_output_shape
+                total_size += get_node_bytes(node) * math.prod(tiled_output_shape)
 
-                tiled_shapes[node_to_key.get(n)] = tiled_shape[-len(input_shape):]
-
-            if total_tile_size <= cache_size:
-                if math.prod(reduce_factor) > 1:
-                    logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={reduce_factor}")
+            if total_size <= cache_size:
+                if math.prod(tiling) > 1:
+                    logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={tiling}")
                     node.meta["tiled_shapes"] = tiled_shapes
-                    node.meta["l2_tiling"] = reduce_factor
+                    node.meta["l2_tiling"] = tiling
                 break
         else:
             logger.warning(f"Warning: No tile shape found to fit {node} into cache.")
