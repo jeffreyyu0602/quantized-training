@@ -1095,9 +1095,9 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
         ShapeProp(module).propagate(*args)
         output_shape = first_node.value.shape
     elif isinstance(node.value, torch.Tensor):
-        output_shape = node.value.shape
+        output_shape = tiled_shapes[node]
     else:
-        output_shape = node.value[1].shape
+        output_shape = tiled_shapes[node][1]
 
     tilings = get_valid_tiling(output_shape, reverse=is_gemm, min_sizes=min_sizes)
 
