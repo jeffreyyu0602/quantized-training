@@ -21,12 +21,12 @@ from .mapping import (
     get_node_bytes,
 )
 from .mapping_utils import (
-    _is_gemm_op,
-    _is_matmul,
-    _is_elementwise_op,
-    _is_nop,
-    _is_reshape_op,
-    _is_indexing_or_concatenation_op,
+    is_gemm_op,
+    is_matmul,
+    is_elementwise_op,
+    is_nop,
+    is_reshape_op,
+    is_indexing_or_concatenation_op,
 )
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
@@ -516,7 +516,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 padded_scale.meta["dtype"] = scale.meta.get("dtype")
 
     for node in list(model.graph.nodes):
-        if not _is_gemm_op(node) or is_depthwise_conv(node):
+        if not is_gemm_op(node) or is_depthwise_conv(node):
             continue
 
         input = node.args[0]
@@ -539,8 +539,8 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             pad_input_node(input, input_pad, input_scale, input_scale_pad)
 
         weight = node.args[1]
-        C_in = weight.shape[-2] if _is_matmul(node) else weight.shape[1]
-        C_out = weight.shape[-1] if _is_matmul(node) else weight.shape[0]
+        C_in = weight.shape[-2] if is_matmul(node) else weight.shape[1]
+        C_out = weight.shape[-1] if is_matmul(node) else weight.shape[0]
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
@@ -553,7 +553,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             if is_conv2d(node):
                 weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
                 weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
-            elif _is_matmul(node):
+            elif is_matmul(node):
                 weight_pad = [0, pad_K, 0, pad_C]
                 weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
             else:
@@ -778,7 +778,7 @@ def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited:
         chain.add(node)
 
         for user in list(node.users.keys()) + node.all_input_nodes:
-            if is_conv2d(user) or _is_elementwise_op(user) or user.target in [
+            if is_conv2d(user) or is_elementwise_op(user) or user.target in [
                 torch.ops.aten.adaptive_avg_pool2d.default,
                 torch.ops.aten.max_pool2d.default,
                 torch.ops.aten.slice.Tensor,
@@ -845,7 +845,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 return [node, user]
 
             if (
-                _is_nop(user) or _is_indexing_or_concatenation_op(user)
+                is_nop(user) or is_indexing_or_concatenation_op(user)
                 or user.target in [
                     torch.ops.quantized_ops.quantize.default,
                     torch.ops.aten.pad.default,
@@ -970,14 +970,14 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
 def eliminate_reshape_with_no_effect(model: GraphModule):
     deleted_nodes = set()
     for node in list(model.graph.nodes):
-        if not _is_reshape_op(node) or node in deleted_nodes:
+        if not is_reshape_op(node) or node in deleted_nodes:
             continue
 
         curr_node = node
         input_node = node.all_input_nodes[0]
 
         group = []
-        while len(curr_node.users) == 1 and (_is_reshape_op(curr_node) or _is_nop(curr_node)):
+        while len(curr_node.users) == 1 and (is_reshape_op(curr_node) or is_nop(curr_node)):
             group.append(curr_node)
             curr_node = next(iter(curr_node.users))
 
@@ -1217,7 +1217,7 @@ def extract_input_preprocessor(model: GraphModule):
 
     user = next(iter(placeholder.users))
 
-    while _is_nop(user) or user.target in [
+    while is_nop(user) or user.target in [
         torch.ops.aten.permute.default,
         torch.ops.aten.transpose.int,
         torch.ops.aten.im2col.default,
@@ -1354,7 +1354,7 @@ def calculate_gemm_node_size(node, x_factor, c_factor, k_factor):
     total_bytes += node_mem(node, x_factor * k_factor)
 
     # Bias if present
-    if not _is_matmul(node) and len(node.args) > 2:
+    if not is_matmul(node) and len(node.args) > 2:
         total_bytes += node_mem(node.args[2], k_factor)
 
     # Optional scale factors
@@ -1722,7 +1722,7 @@ def get_node_to_key(node):
 
 def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
     for node in list(model.graph.nodes):
-        if not _is_elementwise_op(node) and node.target not in [
+        if not is_elementwise_op(node) and node.target not in [
             torch.ops.aten.softmax.int,
             torch.ops.aten.layer_norm.default,
             torch.ops.aten.permute.default,

@@ -33,10 +33,10 @@ from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
 from .codegen.mapping_utils import (
-    _is_gemm_op,
-    _is_indexing_or_concatenation_op,
-    _is_nop,
-    _is_reshape_op,
+    is_gemm_op,
+    is_indexing_or_concatenation_op,
+    is_nop,
+    is_reshape_op,
 )
 from .decomposed import quantized_decomposed_lib
 
@@ -389,7 +389,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         return
 
     for user_node in orig_fq_users:
-        if _is_gemm_op(user_node):
+        if is_gemm_op(user_node):
             user_node.meta["dtype"] = output_dtype
 
             # Insert dequantize node before the node that appear the earlist in the graph
@@ -805,9 +805,9 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             # stack and cat are handled above, so we can safely assume that
             # they won't appear here and there is only one input node
             if (
-                not _is_nop(prev_node)
-                and not _is_reshape_op(prev_node)
-                and not _is_indexing_or_concatenation_op(prev_node)
+                not is_nop(prev_node)
+                and not is_reshape_op(prev_node)
+                and not is_indexing_or_concatenation_op(prev_node)
                 and prev_node.target not in [
                     torch.ops.aten.expand.default,
                     torch.ops.aten.repeat.default,

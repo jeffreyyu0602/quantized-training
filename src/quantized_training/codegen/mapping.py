@@ -15,12 +15,13 @@ from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping_utils import (
-    _is_elementwise_op,
-    _is_gemm_op,
-    _is_indexing_or_concatenation_op,
-    _is_matmul,
-    _is_nop,
-    _is_reshape_op,
+    is_addressing_op,
+    is_elementwise_op,
+    is_gemm_op,
+    is_indexing_or_concatenation_op,
+    is_matmul,
+    is_nop,
+    is_reshape_op,
     map_node,
     set_output_field,
     set_tensor_field,
@@ -443,7 +444,7 @@ def get_submodule_name(module, nodes: List[Node]):
     from transformers.utils.import_utils import is_torch_greater_or_equal
 
     if is_torch_greater_or_equal("2.5"):
-        node = next((n for n in nodes if _is_gemm_op(n)), None)
+        node = next((n for n in nodes if is_gemm_op(n)), None)
         prefix = get_unique_node_name(node) if node is not None else nodes[0].name
         if len(nodes) > 1:
             prefix += "_fused"
@@ -479,7 +480,7 @@ def rename_gemm_nodes(model: GraphModule):
     if not is_torch_greater_or_equal("2.5"):
         return
     for node in list(model.graph.nodes):
-        if _is_gemm_op(node):
+        if is_gemm_op(node):
             node.name = get_submodule_name(model, [node])
             update_submodule_user(model, node)
     model.graph.lint()
@@ -519,7 +520,7 @@ def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
             if id(arg) == id(prev_node):
                 continue
 
-            while _is_nop(arg):
+            while is_nop(arg):
                 arg = arg.all_input_nodes[0]
 
             if arg.op == "call_function" and order[arg] > order[prev_node]:
@@ -557,7 +558,7 @@ def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
             # Include any NOP nodes after the last node in the group
             nop_nodes = []
             next_node = next(iter(last_node.users))
-            while _is_nop(next_node) and len(next_node.users) == 1:
+            while is_nop(next_node) and len(next_node.users) == 1:
                 nop_nodes.append(next_node)
                 next_node = next(iter(next_node.users))
 
@@ -697,11 +698,11 @@ def _fuse_reshape_with_input_impl(
 
     # Base case: check if fusion is valid
     if (
-        _is_gemm_op(current_node) and
+        is_gemm_op(current_node) and
         (is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)) and
         "tiled_shapes" not in current_node.meta
     ) or (
-        _is_elementwise_op(current_node) and not is_tranpose(reshape_node)
+        is_elementwise_op(current_node) and not is_tranpose(reshape_node)
     ):
         if simulate:
             return True
@@ -721,7 +722,7 @@ def _fuse_reshape_with_input_impl(
 
     if (
         id(current_node) != id(reshape_node)
-        and not _is_nop(current_node)
+        and not is_nop(current_node)
         and not is_select_after_tranpose
     ):
         logger.info(f"Cannot fuse {reshape_node} with {current_node}")
@@ -781,11 +782,11 @@ def fuse_reshape_with_output(
     curr_node = reshape_node.all_input_nodes[0]
     fused_nodes = [reshape_node]
 
-    while not (_is_gemm_op(curr_node) or _is_elementwise_op(curr_node)):
+    while not (is_gemm_op(curr_node) or is_elementwise_op(curr_node)):
         if (
             len(curr_node.users) > 1
             or len(curr_node.all_input_nodes) != 1
-            or not _is_nop(curr_node)
+            or not is_nop(curr_node)
         ):
             logger.debug(f"Cannot fuse {reshape_node} with {curr_node}")
             return False
@@ -878,7 +879,7 @@ def fuse_op_with_input(
 
     fused_nodes.append(current_node)
 
-    if id(current_node) != id(node_to_fuse) and _is_elementwise_op(current_node):
+    if id(current_node) != id(node_to_fuse) and is_elementwise_op(current_node):
         # Only address generator 0 support slicing op
         group = search_group(current_node, candidates)
         if (
@@ -897,7 +898,7 @@ def fuse_op_with_input(
         nodes_map[fused_nodes[0]] = fused_nodes[-2]
         return
 
-    if id(current_node) != id(node_to_fuse) and not _is_nop(current_node):
+    if id(current_node) != id(node_to_fuse) and not is_nop(current_node):
         logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
         return
 
@@ -942,7 +943,7 @@ def fuse_operator(
                 continue
 
             # Attempt to fuse it with its immediate user
-            if _is_reshape_op(node):
+            if is_reshape_op(node):
                 fused_reshape_nodes = fuse_reshape_with_input(
                     graph, fused_nodes_list, nodes_map, node
                 )
@@ -956,7 +957,7 @@ def fuse_operator(
             continue
 
         if (
-            _is_nop(node) or
+            is_nop(node) or
             node.target == torch.ops.aten.select.int and
             all(d == 1 for d in node.args[0].shape[:node.args[1]])
         ):
@@ -993,13 +994,13 @@ def fuse_operator(
             fused_node = next(iter(n for n in gm.graph.nodes if n.name == name))
             fused_node.meta['fused'] = True
 
-            if _is_reshape_op(fused_node):
+            if is_reshape_op(fused_node):
                 if next(iter(fused_node.users)).op == 'output':
                     node.meta['reshape'] = fused_node
                 else:
                     n.meta['reshape'] = fused_node
 
-            if _is_indexing_or_concatenation_op(fused_node):
+            if is_indexing_or_concatenation_op(fused_node):
                 n.meta['slicing'] = fused_node
 
             if fused_node.target == torch.ops.quantized_ops.dequantize.default:
@@ -1060,8 +1061,8 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
 
     if (
-        not _is_elementwise_op(first_node) and
-        not _is_gemm_op(first_node) and
+        not is_elementwise_op(first_node) and
+        not is_gemm_op(first_node) and
         first_node.target not in [
             torch.ops.aten.softmax.int,
             torch.ops.aten.layer_norm.default,
@@ -1086,7 +1087,7 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
         else:
             tiled_shapes[node] = tuple(t.shape for t in node.value)
 
-    is_gemm = _is_gemm_op(first_node)
+    is_gemm = is_gemm_op(first_node)
     min_sizes = (1, 64) if is_gemm else None
 
     if is_gemm:
@@ -1115,7 +1116,7 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
 
             weight_node = first_node.args[1].meta.get('source_node')
             weight_shape = tiled_shapes[weight_node]
-            weight_transposed = first_node.meta.get("transposed", False) or _is_matmul(first_node)
+            weight_transposed = first_node.meta.get("transposed", False) or is_matmul(first_node)
             new_shapes[weight_node] = (
                 weight_shape[:-1] + (k_tiled,) if weight_transposed else (k_tiled,) + weight_shape[1:]
             )
@@ -1230,8 +1231,8 @@ def run_memory_mapping(
             user_to_last_uses.setdefault(user, []).append(n)
 
             if (
-                _is_nop(n) or
-                _is_indexing_or_concatenation_op(n) or
+                is_nop(n) or
+                is_indexing_or_concatenation_op(n) or
                 n.target == operator.getitem
             ):
                 for arg in n.all_input_nodes:
@@ -1258,7 +1259,7 @@ def run_memory_mapping(
             if user.target in targets:
                 return [node, user]
 
-            if _is_nop(user) or _is_indexing_or_concatenation_op(user):
+            if is_nop(user) or is_addressing_op(user):
                 path = get_path_to_target(user, targets)
                 if path is not None:
                     return [node] + path
@@ -1361,6 +1362,8 @@ def run_memory_mapping(
         )
 
         if nodes is not None:
+            nodes = duplicate_shared_nodes(graph, nodes)
+
             stack_node = nodes[-1]
             if (memory := stack_node.meta.get("memory", None)) is None:
                 memory = allocate_for_stack_op(stack_node)
@@ -1372,15 +1375,13 @@ def run_memory_mapping(
             size = tensor_sizes[index]
             segment = Segment(start_offset, start_offset + size, allocator.memory_space)
 
-            # TODO: if there is a select/slice operation, and the output has multiple
-            # users, we need to make a copy to avoid overwriting the memory
             for n in reversed(nodes[:-1]):
                 n.meta["memory"] = segment
                 allocate_scratchpad(n)
 
             # If the first node is a param node, we need to copy it to the new location
             input_node = node.all_input_nodes[0]
-            if _is_nop(node) and input_node.meta["memory"].start != segment.start:
+            if is_nop(node) and input_node.meta["memory"].start != segment.start:
                 with graph.inserting_before(node):
                     copy_node = graph.call_function(
                         torch.ops.aten.add.Scalar, (input_node, 0)
@@ -1408,7 +1409,7 @@ def run_memory_mapping(
         skip_allocation = False
 
         # Propagate memory metadata for nop nodes
-        if _is_nop(node):
+        if is_nop(node):
             assert "memory" in node.args[0].meta, (
                 f"Node {node} does not have memory metadata, "
             )
@@ -1425,7 +1426,7 @@ def run_memory_mapping(
 
         # We do not allocate new memory for select operations. Instead, calculate
         # the memory offset from the select index
-        # TODO: add slice support
+        # TODO: Fuse select operation with its user if possible. Do not handle it here
         if (
             node.target == torch.ops.aten.select.int and
             all(d == 1 for d in node.args[0].value.shape[:node.args[1]])
@@ -1507,7 +1508,7 @@ def gen_code(model, args, output_dir=None):
 
             operators = []
             for n in gm.graph.nodes:
-                if n.op != 'call_function' or n.meta.get('fused', False) or _is_nop(n):
+                if n.op != 'call_function' or n.meta.get('fused', False) or is_nop(n):
                     continue
 
                 n.meta["tiled_shapes"] = tiled_shapes
