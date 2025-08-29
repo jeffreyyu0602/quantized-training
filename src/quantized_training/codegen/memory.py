@@ -210,11 +210,6 @@ class MemoryAllocator:
                     start=end, end=self.total_memory * 2, memory_space=self.memory_space
                 ))
 
-            logger.warning(
-                f"Memory allocation failed for tensor {node.name}. "
-                f"Expanding memory from {self.total_memory} to {self.total_memory * 2}."
-            )
-
             self.total_memory *= 2
 
             return Segment(

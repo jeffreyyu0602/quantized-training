@@ -1338,6 +1338,7 @@ def run_memory_mapping(
         remaining_cache_size = cache_size
 
         scratchpad_mem = {}
+        unaligned_tensors = []
 
         # Allocate large tensors first for better cache utilization
         for n, size in tensor_sizes.items():
@@ -1348,11 +1349,21 @@ def run_memory_mapping(
             remaining_cache_size -= aligned_size if align_bank else size
 
             if not align_bank:
-                logger.warning(f"{node}'s input node {n} cannot be put into an individual bank")
+                unaligned_tensors.append(n.name)
 
             scratchpad_mem[n] = sp_allocator.allocate_memory(
                 n, shape=tiled_shapes.get(n), align_bank=align_bank, expand_on_failure=True
             )
+
+        if sp_allocator.total_memory != cache_size:
+            logger.warning(
+                f"Memory allocation failed for {node}. "
+                f"Expanding memory from {cache_size} to {sp_allocator.total_memory}."
+            )
+
+        if unaligned_tensors:
+            names = ', '.join(unaligned_tensors)
+            logger.warning(f"{node}: tensors {names} could not be assigned to individual banks")
 
         node.meta["scratchpad_mem"] = scratchpad_mem
 
