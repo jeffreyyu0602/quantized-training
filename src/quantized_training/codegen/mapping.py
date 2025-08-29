@@ -1055,8 +1055,11 @@ def get_tiled_tensor(arg, tiled_shapes=None):
     return tensor[tuple(slices)]
 
 
-def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
+def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
     from .utils import get_valid_tiling, get_tiled_shape, construct_tiled_shape
+
+    if isinstance(unroll_dims, int):
+        unroll_dims = (unroll_dims, unroll_dims)
 
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
 
@@ -1088,7 +1091,7 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator):
             tiled_shapes[node] = tuple(t.shape for t in node.value)
 
     is_gemm = is_gemm_op(first_node)
-    min_sizes = (1, 64) if is_gemm else None
+    min_sizes = (1, unroll_dims[-1]) if is_gemm else None
 
     if is_gemm:
         args = map_arg(node.args, lambda n: get_tiled_tensor(n, tiled_shapes))
@@ -1197,6 +1200,7 @@ def run_memory_mapping(
     cache_size: int = None,
     bank_size: int = None,
     bank_width: int = None,
+    unroll_dims=None
 ):
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
@@ -1308,7 +1312,7 @@ def run_memory_mapping(
 
         if node.op == "call_module":
             mod = named_modules[node.target]
-            tiled_shapes = run_fused_op_l2_tiling(node, mod, tiled_shapes, sp_allocator)
+            tiled_shapes = run_fused_op_l2_tiling(node, mod, tiled_shapes, sp_allocator, unroll_dims)
 
             for n in list(mod.graph.nodes):
                 if n != first_node:

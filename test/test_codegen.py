@@ -252,8 +252,8 @@ if __name__ == "__main__":
         "patterns": vector_stages,
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
-        "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
+        "unroll_dims": args.hardware_unrolling,
         "conv2d_im2col": args.conv2d_im2col,
         "fuse_reshape": (
             not args.dont_fuse_reshape
@@ -268,6 +268,7 @@ if __name__ == "__main__":
             if args.cache_size is not None and args.num_banks is not None else None
         ),
         "bank_width": args.bank_width,
+        "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
     }

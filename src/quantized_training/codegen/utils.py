@@ -1679,7 +1679,7 @@ def get_valid_tiling(
     if min_sizes is None:
         min_sizes = [1] * dims
     else:
-        min_sizes = list(min_sizes) + [1] * (dims - len(min_sizes))
+        min_sizes = [1] * (dims - len(min_sizes)) + list(min_sizes)
 
     current = list(input_shape)
     yield tuple(current), get_tiling(input_shape, tuple(current))

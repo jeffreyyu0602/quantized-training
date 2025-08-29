@@ -21,6 +21,7 @@ def get_compile_args(args):
             args.cache_size // args.num_banks
             if args.cache_size is not None and args.num_banks is not None else None
         ),
+        "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
     }
