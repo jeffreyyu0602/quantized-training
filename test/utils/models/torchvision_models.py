@@ -93,10 +93,10 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
             for layer in mobilenet_int8_layers:
                 quantizer.set_module_name(layer, qconfig)
 
-        quantizer.set_module_name("fc", None)
-
         model.features[0][0].padding = (3, 3)
         model.features[0][0].weight.data = torch.nn.functional.pad(model.features[0][0].weight.data, (2, 2, 2, 2))
+
+    quantizer.set_module_name("fc", None)
 
     # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
     if args.activation is not None and "microscaling" in args.activation:
