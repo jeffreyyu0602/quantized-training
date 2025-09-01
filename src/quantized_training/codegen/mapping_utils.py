@@ -210,7 +210,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
         target=target,
     )
 
-    if _is_nop(node) or is_addressing_op(node) or node.target == operator.getitem:
+    if is_nop(node) or is_addressing_op(node) or node.target == operator.getitem:
         op_overload.op = "nop"
 
     if node.target == torch.ops.aten.pad.default:
@@ -258,7 +258,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     return op_overload
 
 
-def _is_gemm_op(node: Node) -> bool:
+def is_gemm_op(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.conv2d.default,
         torch.ops.aten.linear.default,
@@ -271,14 +271,14 @@ def _is_gemm_op(node: Node) -> bool:
     ]
 
 
-def _is_matmul(node: Node) -> bool:
+def is_matmul(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.matmul.default,
         torch.ops.quantized_ops.matmul_mx.default,
     ]
 
 
-def _is_elementwise_op(node: Node) -> bool:
+def is_elementwise_op(node: Node) -> bool:
     return node.target in [
         # Core aten ops
         torch.ops.aten.abs.default,
@@ -382,14 +382,14 @@ def _is_elementwise_op(node: Node) -> bool:
     ]
 
 
-def _is_reshape_op(node: Node) -> bool:
+def is_reshape_op(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.transpose.int,
         torch.ops.aten.permute.default,
     ]
 
 
-def _is_indexing_or_concatenation_op(node: Node) -> bool:
+def is_indexing_or_concatenation_op(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.slice.Tensor,
         torch.ops.aten.select.int,
@@ -399,7 +399,7 @@ def _is_indexing_or_concatenation_op(node: Node) -> bool:
     ]
 
 
-def _is_nop(node: Node) -> bool:
+def is_nop(node: Node) -> bool:
     """
     The following operations do not require any computation nor handling
     on the memory placement side. Generate a NOP instruction for these ops
