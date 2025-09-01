@@ -516,7 +516,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
                 padded_scale.meta["dtype"] = scale.meta.get("dtype")
 
     for node in list(model.graph.nodes):
-        if not is_gemm_op(node) or is_depthwise_conv(node):
+        if not is_gemm_op(node):
             continue
 
         input = node.args[0]
@@ -542,8 +542,16 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         C_in = weight.shape[-2] if is_matmul(node) else weight.shape[1]
         C_out = weight.shape[-1] if is_matmul(node) else weight.shape[0]
 
+        if is_depthwise_conv(node):
+            C_in *= node.args[6]
+            args = list(node.args)
+            args[-1] += pad_C
+            node.args = tuple(args)
+
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
+        if is_depthwise_conv(node):
+            pad_K = pad_C
 
         # Pad weight along K and C
         if pad_C or pad_K:
@@ -551,8 +559,12 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             weight_scale = node.kwargs.get("weight_scale")
 
             if is_conv2d(node):
-                weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-                weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
+                if is_depthwise_conv(node):
+                    weight_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+                    weight_scale_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+                else:
+                    weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+                    weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
             elif is_matmul(node):
                 weight_pad = [0, pad_K, 0, pad_C]
                 weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
@@ -583,20 +595,70 @@ def pad_gemm_inputs_to_hardware_unroll_size(
 
         if pad_K:
             slice_dim = 1 if is_conv2d(node) else -1
-            with model.graph.inserting_after(node):
+            sliced_node = node
+            if (list(node.users.keys())[0].target == torch.ops.quantized_ops.dequantize.default):
+                sliced_node = list(node.users.keys())[0]
+
+            with model.graph.inserting_after(sliced_node):
                 slice_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor, (node, slice_dim, 0, C_out),
+                    torch.ops.aten.slice.Tensor, (sliced_node, slice_dim, 0, C_out),
                 )
 
-            node.replace_all_uses_with(slice_node)
-            slice_node.replace_input_with(slice_node, node)
+            sliced_node.replace_all_uses_with(slice_node)
+            slice_node.replace_input_with(slice_node, sliced_node)
 
             propagate_shape(slice_node)
-            slice_node.meta["dtype"] = node.meta.get("dtype")
+            slice_node.meta["dtype"] = sliced_node.meta.get("dtype")
+
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
     model.recompile()
+
+    agressive_pruning = False
+    if agressive_pruning:
+        from collections import deque
+        erase_node_set = set()
+
+        for node in list(model.graph.nodes):
+            if node.target == torch.ops.aten.slice.Tensor:
+                visited = set()
+                pads_found = []
+                queue = deque(node.users)
+
+                stop = False
+                while queue and not stop:
+                    cur = queue.popleft()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
+
+                    if cur.target == torch.ops.aten.slice.Tensor:
+                        # Hit another slice, stop the search completely
+                        stop = True
+                        break
+
+                    if cur.target == torch.ops.aten.pad.default:
+                        pads_found.append(cur)
+
+                    # Add next users to queue
+                    queue.extend(cur.users)
+
+                # If we found pads before hitting another slice, record them
+                if pads_found:
+                    print(f"slice node: {node.name}")
+                    for p in pads_found:
+                        print(f"  found pad: {p.name}")
+                        erase_node_set.add(node)      # keep original slice
+                        erase_node_set.add(p)         # keep all pads found
+
+        for e_node in erase_node_set:
+            e_node.replace_all_uses_with(e_node.args[0])
+            model.graph.erase_node(e_node)
+
+        model.graph.lint()
+        model.graph.eliminate_dead_code()
+        model.recompile()
     return model
 
 
