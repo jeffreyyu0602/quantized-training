@@ -550,6 +550,7 @@ def pad_gemm_inputs_to_hardware_unroll_size(
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
+
         if is_depthwise_conv(node):
             pad_K = pad_C
 
@@ -558,13 +559,12 @@ def pad_gemm_inputs_to_hardware_unroll_size(
             bs = node.kwargs.get("block_size", 1)
             weight_scale = node.kwargs.get("weight_scale")
 
-            if is_conv2d(node):
-                if is_depthwise_conv(node):
-                    weight_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
-                    weight_scale_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
-                else:
-                    weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-                    weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
+            if is_depthwise_conv(node):
+                weight_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+                weight_scale_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+            elif is_conv2d(node):
+                weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
+                weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
             elif is_matmul(node):
                 weight_pad = [0, pad_K, 0, pad_C]
                 weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
@@ -593,72 +593,55 @@ def pad_gemm_inputs_to_hardware_unroll_size(
 
         propagate_shape(node)
 
+        def slice_output(output_node, slice_args):
+            nodes_require_slice = []
+            for user in list(output_node.users.keys()):
+                if is_elementwise_op(user):
+                    if len(user.all_input_nodes) == 1 or user.target in [
+                        torch.ops.quantized_ops.dequantize.default,
+                        torch.ops.quantized_ops.quantize.default,
+                    ]:
+                        propagate_shape(user)
+                        slice_output(user, slice_args)
+                        continue
+
+                    # if all inputs are a matching slice, then strip the redundant slice.
+                    if all(
+                        n == output_node or (
+                            n.target == torch.ops.aten.slice.Tensor and
+                            n.args[1:] == slice_args
+                        )
+                        for n in user.all_input_nodes
+                    ):
+                        for n in user.all_input_nodes:
+                            if n.target == torch.ops.aten.slice.Tensor:
+                                user.replace_input_with(n, n.args[0])
+
+                        propagate_shape(user)
+                        slice_output(user, slice_args)
+                        continue
+
+                nodes_require_slice.append(user)
+
+            if nodes_require_slice:
+                with model.graph.inserting_after(output_node):
+                    slice_node = model.graph.call_function(
+                        torch.ops.aten.slice.Tensor, (output_node, *slice_args),
+                    )
+
+                for n in nodes_require_slice:
+                    n.replace_input_with(output_node, slice_node)
+
+                propagate_shape(slice_node)
+                slice_node.meta["dtype"] = output_node.meta.get("dtype")
+
         if pad_K:
             slice_dim = 1 if is_conv2d(node) else -1
-            sliced_node = node
-            if (list(node.users.keys())[0].target == torch.ops.quantized_ops.dequantize.default):
-                sliced_node = list(node.users.keys())[0]
-
-            with model.graph.inserting_after(sliced_node):
-                slice_node = model.graph.call_function(
-                    torch.ops.aten.slice.Tensor, (sliced_node, slice_dim, 0, C_out),
-                )
-
-            sliced_node.replace_all_uses_with(slice_node)
-            slice_node.replace_input_with(slice_node, sliced_node)
-
-            propagate_shape(slice_node)
-            slice_node.meta["dtype"] = sliced_node.meta.get("dtype")
-
+            slice_output(node, (slice_dim, 0, C_out))
 
     model.graph.lint()
     model.graph.eliminate_dead_code()
     model.recompile()
-
-    agressive_pruning = False
-    if agressive_pruning:
-        from collections import deque
-        erase_node_set = set()
-
-        for node in list(model.graph.nodes):
-            if node.target == torch.ops.aten.slice.Tensor:
-                visited = set()
-                pads_found = []
-                queue = deque(node.users)
-
-                stop = False
-                while queue and not stop:
-                    cur = queue.popleft()
-                    if cur in visited:
-                        continue
-                    visited.add(cur)
-
-                    if cur.target == torch.ops.aten.slice.Tensor:
-                        # Hit another slice, stop the search completely
-                        stop = True
-                        break
-
-                    if cur.target == torch.ops.aten.pad.default:
-                        pads_found.append(cur)
-
-                    # Add next users to queue
-                    queue.extend(cur.users)
-
-                # If we found pads before hitting another slice, record them
-                if pads_found:
-                    print(f"slice node: {node.name}")
-                    for p in pads_found:
-                        print(f"  found pad: {p.name}")
-                        erase_node_set.add(node)      # keep original slice
-                        erase_node_set.add(p)         # keep all pads found
-
-        for e_node in erase_node_set:
-            e_node.replace_all_uses_with(e_node.args[0])
-            model.graph.erase_node(e_node)
-
-        model.graph.lint()
-        model.graph.eliminate_dead_code()
-        model.recompile()
     return model
 
 
