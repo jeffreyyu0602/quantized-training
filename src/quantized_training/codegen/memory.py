@@ -109,8 +109,8 @@ class MemoryAllocator:
                 input_node = input_node.meta.get('source_node', input_node)
                 dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
-                    logger.info(f"Increasing size for conv2d {node} for replication")
-                    tensor_size *= 2
+                    logger.info(f"Tripling size for conv2d {node} for replication")
+                    tensor_size *= 3
 
             user = get_user_with_target(node, [
                 torch.ops.aten.softmax.int,
@@ -118,7 +118,7 @@ class MemoryAllocator:
             ])
 
             if user is not None:
-                logger.info(f"Increasing size for {node} for intermediate outputs")
+                logger.info(f"Doubling size for {node} for intermediate outputs")
                 tensor_size *= 2
 
             return self.align_size(tensor_size, align_bank)
