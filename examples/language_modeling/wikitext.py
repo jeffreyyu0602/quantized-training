@@ -8,6 +8,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from prepare_model import QUANTIZATION_CONFIGS, set_qconfig
 from quantized_training import (
     add_qspec_args,
     get_default_quantizer,
@@ -22,7 +23,7 @@ from quantized_training import (
     dispatch_model,
     insert_align_device_nodes,
 )
-from quantized_training.modules import pt2e
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def parse_args():
             "dtype will be automatically derived from the model's weights."
         )
     )
-    parser.add_argument('--qscheme', default=None, help='Quantization scheme for the model')
+    parser.add_argument('--qconfig', default=None, help='Quantization scheme for the model')
     parser.add_argument('--reserved_memory', type=int, default=8, help='GPU memory reserved for storing activations')
     add_qspec_args(parser)
     return parser.parse_args()
@@ -76,11 +77,10 @@ def main(args):
         r"model\.rotary_emb", torch.ops.aten.matmul.default, 0, None
     )
 
-    from prepare_model import set_qscheme, QUANTIZATION_CONFIGS
-    if (qscheme := QUANTIZATION_CONFIGS.get(args.qscheme)) is not None:
-        set_qscheme(quantizer, qscheme)
+    if (qconfig := QUANTIZATION_CONFIGS.get(args.qconfig)) is not None:
+        set_qconfig(quantizer, qconfig)
 
-    input_ids = torch.randint(0, 100, (1, args.max_length), device=device)
+    input_ids = torch.randint(0, model.config.vocab_size, (1, args.max_length))
     example_args = (input_ids,)
     example_kwargs = {"labels": input_ids.clone(), 'use_cache': False}
     seq_len = torch.export.Dim("seq_length", min=3, max=args.max_length)
@@ -171,9 +171,15 @@ def main(args):
     logger.info(f"stride:     {args.stride}")
     logger.info(f"perplexity: {ppl.item()}")
 
+    outlier_pct = []
+
     for name, module in model.named_modules():
         if hasattr(module, "max_outlier_pct") and module.max_outlier_pct > 0:
             logger.info(f"{name}: {module.max_outlier_pct:.2%} outliers")
+            outlier_pct.append(module.max_outlier_pct)
+
+    if outlier_pct:
+        logger.info(f"Average outlier percentage: {sum(outlier_pct) / len(outlier_pct):.2%}")
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

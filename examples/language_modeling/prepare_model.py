@@ -1,19 +1,35 @@
+import logging
 import torch
 from quantized_training import QuantizationSpec, QuantizationConfig
 
 
+logger = logging.getLogger(__name__)
+
+
 QUANTIZATION_CONFIGS = {
-    "Q4_0": {
+    "linear4": {
         torch.nn.Linear: [
-            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-        ],
-        torch.ops.aten.matmul.default: [
-            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
-            "nf4_6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
+            "nf4,qs=microscaling,bs=64,ax=-1",
+            "nf4,qs=microscaling,bs=64,ax=-1",
         ],
     },
-    "Q4_1": {
+    "matmul4": {
+        torch.ops.aten.matmul.default: [
+            "nf4,qs=microscaling,bs=64,ax=-1",
+            "nf4,qs=microscaling,bs=64,ax=-2",
+        ],
+    },
+    "linear4_matmul6": {
+        torch.nn.Linear: [
+            "nf4,qs=microscaling,bs=64,ax=-1",
+            "nf4,qs=microscaling,bs=64,ax=-1",
+        ],
+        torch.ops.aten.matmul.default: [
+            "int6,qs=microscaling,bs=64,ax=-1",
+            "int6,qs=microscaling,bs=64,ax=-2",
+        ],
+    },
+    "linear4_matmul6_fp8": {
         torch.nn.Linear: [
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
@@ -23,7 +39,7 @@ QUANTIZATION_CONFIGS = {
             "int6,qs=microscaling,bs=64,ax=-2,scale=fp8_e5m3",
         ],
     },
-    "Q4_2": {
+    "linear4_matmul6_fp8_mixhead": {
         torch.nn.Linear: [
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
@@ -37,9 +53,9 @@ QUANTIZATION_CONFIGS = {
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
         ],
     },
-    "Q4_3": {
+    "linear4_matmul6_fp8_outlier": {
         torch.nn.Linear: [
-            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3,outlier=2.0",
+            "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3,outlier=4.0",
             "nf4_6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3",
         ],
         torch.ops.aten.matmul.default: [
@@ -53,8 +69,8 @@ QUANTIZATION_CONFIGS = {
     },
 }
 
-def set_qscheme(quantizer, qscheme):
-    for module_name_or_op_type, qspec in qscheme.items():
+def set_qconfig(quantizer, qconfigs):
+    for key, qspec in qconfigs.items():
         if qspec is None:
             qconfig = None
         elif isinstance(qspec, str):
@@ -72,17 +88,19 @@ def set_qscheme(quantizer, qscheme):
         else:
             raise ValueError(f"Invalid qspec: {qspec}")
 
-        if isinstance(module_name_or_op_type, tuple):
-            print("Setting qconfig for module name or object type: ", module_name_or_op_type)
-            quantizer.set_module_name_object_type_order(*module_name_or_op_type, qconfig)
-        elif isinstance(module_name_or_op_type, str):
-            print("Setting qconfig for module name:", module_name_or_op_type)
-            quantizer.set_module_name(module_name_or_op_type, qconfig)
-        elif isinstance(module_name_or_op_type, torch._ops.OpOverload):
-            print("Setting qconfig for op overload:", module_name_or_op_type)
-            quantizer.set_object_type(module_name_or_op_type, qconfig)
+        if isinstance(key, tuple):
+            logger.info(f"Setting qconfig for module name, object type and order: {key}")
+            quantizer.set_module_name_object_type_order(*key, qconfig)
+        elif isinstance(key, str):
+            logger.info(f"Setting qconfig for module name: {key}")
+            quantizer.set_module_name(key, qconfig)
+        elif isinstance(key, type) and issubclass(key, torch.nn.Module):
+            logger.info(f"Setting qconfig for module type: {key}")
+            quantizer.set_module_type(key, qconfig)
+        elif isinstance(key, torch._ops.OpOverload):
+            logger.info(f"Setting qconfig for op overload: {key}")
+            quantizer.set_object_type(key, qconfig)
         else:
-            print("Setting qconfig for module type:", module_name_or_op_type)
-            quantizer.set_module_type(module_name_or_op_type, qconfig)
+            raise ValueError(f"Invalid module name or type: {key}")
 
     return quantizer
