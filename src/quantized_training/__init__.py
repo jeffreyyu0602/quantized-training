@@ -2,6 +2,7 @@ from .codegen import *
 from .decomposed import *
 from .fake_quantize import *
 from .fp8 import *
+from .llm_utils import *
 from .normal_float import *
 from .posit import *
 from .pt2e_utils import *
@@ -25,12 +26,15 @@ __all__ = [
     "FusedAmaxObsFakeQuantize",
     "QConfig",
     "QuantizationSpec",
+    "TorchExportableModuleWithStaticCache",
     "add_qspec_args",
+    "convert_and_export_with_split_cache",
     "convert",
     "derive_bias_qparams_fn",
     "dispatch_model",
     "dtype_byte_size",
     "export_model",
+    "generate",
     "get_aten_graph_module",
     "get_device_map",
     "get_node_name_to_scope",
@@ -51,6 +55,7 @@ __all__ = [
     "quantize_to_posit",
     "replace_softmax",
     "setup_logging",
+    "swap_llama_attention",
 ]
 
 class qscheme: ...
@@ -59,6 +64,7 @@ class qscheme: ...
 per_tensor_symmetric: qscheme = QScheme.PER_TENSOR_SYMMETRIC
 per_channel_symmetric: qscheme = QScheme.PER_CHANNEL_SYMMETRIC
 microscaling: qscheme = QScheme.MICROSCALING
+group_wise_affine: qscheme = QScheme.GROUP_WISE_AFFINE
 
 aten = torch.ops.aten
 quantized_ops = torch.ops.quantized_ops

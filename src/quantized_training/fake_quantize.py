@@ -49,13 +49,19 @@ def get_quantization_map(dtype, device=None):
         quant_min, quant_max = -2 ** (nbits - 1), 2 ** (nbits - 1) - 1
         return torch.clamp(torch.round(values), quant_min, quant_max)
 
+    # Unsigned integer
+    if (match := re.fullmatch(r'uint(\d+)', dtype, re.IGNORECASE)):
+        nbits = int(match.group(1))
+        quant_min, quant_max = 0, 2 ** nbits - 1
+        return torch.clamp(torch.round(values), quant_min, quant_max)
+
     # Custom implementation for NVIDIA FP8 format
     if (match := re.fullmatch(r'(?:fp8\.)?(e4m3|e5m2)', dtype, re.IGNORECASE)):
         fp8_format = match.group(1).lower()
-        return (
-            quantize_to_fp8_e4m3(values) if fp8_format == 'e4m3'
-            else quantize_to_fp8_e5m2(values)
-        )
+        if fp8_format == 'e4m3':
+            return quantize_to_fp8_e4m3(values)
+        else:
+            return quantize_to_fp8_e5m2(values)
 
     # Floating point implementation adopted from microscaling code
     if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype)):
@@ -158,7 +164,71 @@ class MXFakeQuantFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None, None, None, None, None, None
+        return grad_output, None, None, None, None, None, None, None, None
+
+
+class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input,
+        fake_quant_enabled,
+        quant_min,
+        quant_max,
+        scale: torch.Tensor,
+        zero_point: torch.Tensor,
+        axes=None,
+        block_size=0,
+        scale_code=None,
+    ):
+        if fake_quant_enabled[0] == 0:
+            return input
+
+        assert block_size > 0
+
+        # Make sure axes is a list of non-negative numbers
+        axes = [axes] if type(axes) == int else axes
+        axes = [x + input.ndim if x < 0 else x for x in axes]
+
+        # Perform tiling to the hardware vector size
+        reshaped_input, axes, orig_shape, padded_shape = _reshape_to_blocks(
+            input, axes, block_size
+        )
+
+        shared_exp_axes = [x + 1 for x in axes]
+
+        min = torch.amin(reshaped_input, dim=shared_exp_axes)
+        max = torch.amax(reshaped_input, dim=shared_exp_axes)
+
+        sf = (max - min) / (quant_max - quant_min)
+        sf = torch.where(sf > 0.0, sf, 1.0)
+        zp = -min / sf + quant_min
+
+        # Quantize the scale using the codebook
+        if scale_code is not None:
+            sf = vmap(sf, scale_code)
+
+        for dim in axes:
+            sf = torch.repeat_interleave(sf, block_size, dim=dim)
+            zp = torch.repeat_interleave(zp, block_size, dim=dim)
+
+        # Quantize
+        q = torch.clamp(torch.round(input / sf + zp), quant_min, quant_max)
+
+        # Dequantize
+        input = (q - zp) * sf
+
+        scale.resize_(sf.shape).copy_(sf)
+        zero_point.resize_(zp.shape).copy_(zp)
+
+        # Undo tile reshaping
+        input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
+
+        return input
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None, None, None, None, None, None, None
 
 
 class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
@@ -231,14 +301,16 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     """
 
     code: torch.Tensor
+    scale_code: Optional[torch.Tensor]
     amax_history: torch.Tensor
     scale: torch.Tensor
-    scale_code: Optional[torch.Tensor]
+    zero_point: torch.Tensor
 
     def __init__(
         self,
         dtype: str,
         qscheme: Optional[str] = None,
+        quant_min: Optional[float] = None,
         quant_max: Optional[float] = None,
         amax_history_len: int = None,
         ch_axis: Optional[int] = None,
@@ -252,6 +324,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         super().__init__()
         self.dtype = dtype
         self.qscheme = qscheme
+        self.quant_min = quant_min
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
         self.ch_axis = ch_axis
@@ -276,6 +349,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
         self.register_buffer('scale', torch.tensor([1.0], **factory_kwargs))
+        self.register_buffer('zero_point', torch.tensor([1.0], **factory_kwargs))
         self.observer_enabled[0] = self.qscheme is not None
         self.is_per_channel = self.qscheme == qt.per_channel_symmetric
         # Create histogram buffer
@@ -284,6 +358,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
 
     @torch.jit.export
     def calculate_qparams(self):
+        if self.qscheme == qt.group_wise_affine:
+            return self.scale, self.zero_point
         return self.scale
 
     @torch.jit.export
@@ -334,6 +410,18 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.ch_axis,
                 self.block_size,
                 self.force_scale_power_of_two,
+                self.scale_code,
+            )
+        elif self.qscheme == qt.group_wise_affine:
+            X = GroupWiseAffineFakeQuantFunction.apply(
+                X,
+                self.fake_quant_enabled,
+                self.quant_min,
+                self.quant_max,
+                self.scale,
+                self.zero_point,
+                self.ch_axis,
+                self.block_size,
                 self.scale_code,
             )
         else:

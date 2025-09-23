@@ -470,10 +470,12 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     activation_post_process = modules[node.target]
 
     input_node = node.args[0]
-
     node_to_quantize = input_node
 
-    if activation_post_process.outlier_threshold is not None and input_node.op != "get_attr":
+    if activation_post_process.outlier_threshold is not None:
+        assert input_node.op != "get_attr", (
+            "Outlier suppression is not supported for weight quantization."
+        )
         with graph.inserting_before(node):
             filter_node = graph.call_function(
                 torch.ops.quantized_ops.filter_outlier.default,
@@ -481,24 +483,16 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 {}
             )
             node_to_quantize = graph.call_function(
-                operator.getitem,
-                (filter_node, 0),
-                {}
+                operator.getitem, (filter_node, 0), {}
             )
             csr_data_node = graph.call_function(
-                operator.getitem,
-                (filter_node, 1),
-                {}
+                operator.getitem, (filter_node, 1), {}
             )
             indices_node = graph.call_function(
-                operator.getitem,
-                (filter_node, 2),
-                {}
+                operator.getitem, (filter_node, 2), {}
             )
             indptr_node = graph.call_function(
-                operator.getitem,
-                (filter_node, 3),
-                {}
+                operator.getitem, (filter_node, 3), {}
             )
 
     device = assert_and_get_unique_device(activation_post_process)
@@ -510,14 +504,13 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         activation_post_process.dtype = f"int{N}"
 
         indices, values = code
-
         activation_post_process.code = indices
-
         midpoints = (values[:-1] + values[1:]) / 2
         with graph.inserting_before(node):
             dequant_code = create_getattr_from_value(model, graph, "code_", values)
             quant_code = create_getattr_from_value(model, graph, "code_", midpoints)
 
+        # NF4_[B] means approximate NormalFloat4 with B-bit integer
         if len(numbers) > 1:
             dequant_code.meta["dtype"] = f"int{numbers[1]}"
     else:
@@ -525,7 +518,11 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
     if input_node.op == 'get_attr':
         # quantize model parameter and remove the fq module
-        param = model.get_parameter(input_node.target)
+        try:
+            param = model.get_parameter(input_node.target)
+        except AttributeError:
+            param = model.get_buffer(input_node.target)
+
         scale = torch.ops.quantized_ops.calculate_mx_qparam(
             param.data,
             activation_post_process.ch_axis,
@@ -752,6 +749,69 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
             mx_op_node.replace_all_uses_with(add_node)
             add_node.replace_input_with(add_node, mx_op_node)
+
+
+def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed(
+    model: torch.fx.GraphModule,
+    node: Node,
+    modules: Dict[str, torch.nn.Module],
+):
+    graph = model.graph
+    assert modules is not None
+    assert isinstance(node.target, str)
+    activation_post_process = modules[node.target]
+
+    input_node = node.args[0]
+    device = assert_and_get_unique_device(activation_post_process)
+
+    if input_node.op == 'get_attr':
+        # quantize model parameter and remove the fq module
+        try:
+            param = model.get_parameter(input_node.target)
+        except AttributeError:
+            param = model.get_buffer(input_node.target)
+
+        activation_post_process(param.data)
+        scale, zero_point = activation_post_process.calculate_qparams()
+
+        scale = scale.to(param.data.dtype)
+        zero_point = zero_point.to(param.data.dtype)
+
+        weight = torch.ops.quantized_ops.quantize(
+            input=param.data,
+            scale=scale,
+            dtype=activation_post_process.dtype,
+            code=activation_post_process.code,
+            block_size=activation_post_process.block_size,
+            zero_point=zero_point,
+        )
+
+        with graph.inserting_before(node):
+            scale_node = create_getattr_from_value(
+                model, graph, input_node.name + "_scale_", scale)
+            zero_point_node = create_getattr_from_value(
+                model, graph, input_node.name + "_zero_point_", zero_point)
+            quantized_node = create_getattr_from_value(
+                model, graph, input_node.name + "_quantized_", weight)
+    else:
+        raise NotImplementedError
+
+    quantized_node.meta["dtype"] = activation_post_process.dtype
+
+    # Insert a dequantize node after the quantize node
+    with graph.inserting_before(quantized_node.next):
+        dq_inputs = [quantized_node, scale_node, None, None, zero_point_node]
+        dequantized_node = graph.call_function(
+            torch.ops.quantized_ops.dequantize.default,
+            tuple(dq_inputs),
+            {}
+        )
+
+    source_fn_st = dequantized_node.meta.setdefault("source_fn_stack", [])
+    source_fn_st.append((dequantized_node.name, dequantized_node.target))
+
+    node.replace_all_uses_with(dequantized_node)
+    graph.erase_node(node)
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
@@ -1058,6 +1118,9 @@ def convert_pt2e(model: GraphModule, output_dtype: str = None):
             if isinstance(mod, torch.ao.quantization.FakeQuantizeBase):
                 if mod.qscheme == qt.microscaling:
                     _replace_observer_with_quantize_mx_node_decomposed(model, node, modules)
+                elif mod.qscheme == qt.group_wise_affine:
+                    _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed(
+                        model, node, modules)
                 else:
                     _replace_observer_with_quantize_dequantize_node_decomposed(
                         model, node, modules, output_dtype)

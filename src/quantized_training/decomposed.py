@@ -74,10 +74,12 @@ def expand(input, shape, block_size):
     while input.ndim < len(shape):
         input = input.unsqueeze(0)
 
+    # Repeat the input along each dimension to match the target shape
     for dim in range(len(shape)):
         if input.shape[dim] != shape[dim]:
             input = torch.repeat_interleave(input, block_size, dim)
 
+    # If the shape is not a multiple of block_size, we may need to slice
     if list(input.shape) != list(shape):
         slices = [slice(0, x) for x in shape]
         input = input[slices]
@@ -108,8 +110,7 @@ def vmap(input: torch.Tensor, code: torch.Tensor, chunk_size=65536) -> torch.Ten
 
 
 quantized_decomposed_lib.define(
-    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, int? block_size=None, "
-    "Tensor quant_code=None) -> Tensor"
+    "quantize(Tensor input, Tensor scale, str? dtype, Tensor code, int? block_size=None, Tensor quant_code=None, Tensor? zero_point=None) -> Tensor"
 )
 
 
@@ -121,16 +122,19 @@ def quantize(
     code: torch.Tensor,
     block_size: Optional[int] = None,
     quant_code: Optional[torch.Tensor] = None,
+    zero_point: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """ Affine quantization for the Tensor using the same quantization parameters to map
+    """ Quantization for the Tensor using scales and zero points to map
     from floating point to quantized values
 
     Args:
        input (torch.Tensor): original float32 or bfloat16 Tensor
-       scale (float): quantization parameter for affine quantization
-       dtype (torch.dtype): requested dtype (e.g. int8) for output Tensor
+       scale (torch.Tensor): quantization parameter for quantization
+       zero_point (torch.Tensor): zero point for quantization, default is None
+       dtype (str): requested dtype (e.g. int8) for output Tensor
        code (torch.Tensor): quantization map for mapping from float to quantized values
        block_size (int): block size for microscaling, default is None
+       quant_code (torch.Tensor): codebook for quantizing the outputs
 
     Returns:
        Tensor with requested dtype (e.g. int8), note the quantization parameters
@@ -139,11 +143,19 @@ def quantize(
 
     if block_size is not None:
         scale = expand(scale, input.shape, block_size)
-    return vmap(input / scale, code)
+        if zero_point is not None:
+            zero_point = expand(zero_point, input.shape, block_size)
+
+    if zero_point is None:
+        input = input / scale
+    else:
+        input = input / scale + zero_point
+
+    return vmap(input, code)
 
 
 quantized_decomposed_lib.define(
-    "dequantize(Tensor input, Tensor scale, str? dtype, Tensor code) -> Tensor"
+    "dequantize(Tensor input, Tensor scale, Tensor? zero_point, str? dtype, Tensor code, Tensor? zero_point=None) -> Tensor"
 )
 
 
@@ -153,14 +165,15 @@ def dequantize(
     scale: torch.Tensor,
     dtype: Optional[str],
     code: torch.Tensor,
+    zero_point: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """ Dequantization for the Tensor using the same quantization parameters to map
     from floating point to quantized values
 
     Args:
        input (torch.Tensor): original float32 or bfloat16 Tensor
-       scale (float): quantization parameter for affine quantization
-       dtype (torch.dtype): requested dtype (e.g. int24) for input Tensor
+       scale (torch.Tensor): quantization parameter for affine quantization
+       dtype (str): requested dtype (e.g. int24) for input Tensor
        code (torch.Tensor): quantization map for mapping from float to quantized values
 
     Returns:
@@ -169,8 +182,8 @@ def dequantize(
     """
 
     if dtype is not None:
-        return vmap(input, code) * scale
-    return input * scale
+        input = vmap(input, code)
+    return input * scale if zero_point is None else (input - zero_point) * scale
 
 
 quantized_decomposed_lib.define(
@@ -199,9 +212,9 @@ def conv2d_mx(
 ) -> torch.Tensor:
     # For codebook quantization, decode input and weight into float values first
     if input_code is not None:
-        input = input_code[input.to(torch.long)]
+        input = input_code[input.to(torch.long)].to(input.dtype)
     if weight_code is not None:
-        weight = weight_code[weight.to(torch.long)]
+        weight = weight_code[weight.to(torch.long)].to(weight.dtype)
 
     # Replicate scales to match input and weight shapes
     if input_scale is not None:
@@ -232,9 +245,9 @@ def linear_mx(
     weight_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if input_code is not None:
-        input = input_code[input.to(torch.long)]
+        input = input_code[input.to(torch.long)].to(input.dtype)
     if weight_code is not None:
-        weight = weight_code[weight.to(torch.long)]
+        weight = weight_code[weight.to(torch.long)].to(weight.dtype)
 
     if input_scale is not None:
         input = input * expand(input_scale, input.shape, block_size)
@@ -262,9 +275,9 @@ def matmul_mx(
     weight_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if input_code is not None:
-        self = input_code[self.to(torch.long)]
+        self = input_code[self.to(torch.long)].to(self.dtype)
     if weight_code is not None:
-        other = weight_code[other.to(torch.long)]
+        other = weight_code[other.to(torch.long)].to(other.dtype)
 
     if input_scale is not None:
         self = self * expand(input_scale, self.shape, block_size)

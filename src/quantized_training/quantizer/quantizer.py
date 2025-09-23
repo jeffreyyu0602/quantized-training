@@ -19,8 +19,10 @@ class QScheme(Enum):
     PER_TENSOR_SYMMETRIC = "per_tensor_symmetric"
     PER_CHANNEL_SYMMETRIC = "per_channel_symmetric"
     MICROSCALING = "microscaling"
+    GROUP_WISE_AFFINE = "group_wise_affine"
 
 ABBREV_MAP = {
+    'qmin': 'quant_min',
     'qmax': 'quant_max',
     'qs': 'qscheme',
     'ahl': 'amax_history_len',
@@ -31,6 +33,7 @@ ABBREV_MAP = {
 }
 
 PARAMS_TYPE = {
+    'quant_min': float,
     'quant_max': float,
     'qscheme': QScheme,
     'amax_history_len': int,
@@ -40,32 +43,48 @@ PARAMS_TYPE = {
     'outlier_threshold': float,
 }
 
-def get_max_val(dtype):
+def get_quant_min_max(dtype: str):
+    # Signed integers
     if (match := re.fullmatch(r'int(\d+)', dtype, re.IGNORECASE)):
         nbits = int(match.group(1))
-        return 2 ** (nbits - 1) - 1
+        max_val = 2 ** (nbits - 1) - 1
+        min_val = -2 ** (nbits - 1)
+        return min_val, max_val
 
+    # Unsigned integers
+    if (match := re.fullmatch(r'uint(\d+)', dtype, re.IGNORECASE)):
+        nbits = int(match.group(1))
+        return 0, 2 ** nbits - 1
+
+    # Floating-point like fpN_eXmY
     if (match := re.fullmatch(r"fp(\d+)_e(\d+)m(\d+)", dtype, re.IGNORECASE)):
         ebits = int(match.group(2))
         mbits = int(match.group(3)) + 2
         emax = 2 ** (ebits - 1) - 1 if ebits > 4 else 2 ** (ebits - 1)
-        if dtype == "fp8_e4m3":
-            return 2**emax * 1.75
-        return 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
 
-    if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype)):
+        if dtype.lower() == "fp8_e4m3":
+            max_val = 2 ** emax * 1.75  # max mantissa (1.75)
+        else:
+            max_val = 2 ** emax * (2**(mbits - 1) - 1) / 2**(mbits - 2)
+
+        return -max_val, max_val
+
+    # Posit numbers
+    if (match := re.fullmatch(r'posit(\d+)_(\d+)', dtype, re.IGNORECASE)):
         nbits = int(match.group(1))
         es = int(match.group(2))
-        if nbits == 8 and es == 1:
-            return 64
-        return (2 ** (2 ** es)) ** (nbits - 2)
+        max_val = (2 ** (2 ** es)) ** (nbits - 2)
+        return -max_val, max_val
 
-    if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
+    # Normalized floats (NF)
+    if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype, re.IGNORECASE)):
         if match.group(2) is not None:
-            return 2 ** (int(match.group(2)) - 1) - 1
-        return 1
+            max_val = 2 ** (int(match.group(2)) - 1) - 1
+        else:
+            max_val = 1
+        return -max_val, max_val
 
-    return None
+    raise ValueError(f"Unsupported dtype: {dtype}")
 
 @dataclass(eq=True)
 class QuantizationSpec(QuantizationSpecBase):
@@ -75,6 +94,7 @@ class QuantizationSpec(QuantizationSpecBase):
 
     dtype: str
     observer_or_fake_quant_ctr: _ObserverOrFakeQuantizeConstructor = FusedAmaxObsFakeQuantize
+    quant_min: Optional[float] = None
     quant_max: Optional[float] = None
     qscheme: Optional[QScheme] = None
     amax_history_len: Optional[int] = None
@@ -99,8 +119,11 @@ class QuantizationSpec(QuantizationSpecBase):
             params[key] = PARAMS_TYPE[key](value)
 
         if (qscheme := params.get('qscheme', None)) is not None:
-            params.setdefault('quant_max', float(get_max_val(params['dtype'])))
-            if qscheme != QScheme.MICROSCALING:
+            qmin, qmax = get_quant_min_max(params['dtype'])
+            params.setdefault('quant_min', float(qmin))
+            params.setdefault('quant_max', float(qmax))
+
+            if qscheme in [QScheme.PER_TENSOR_SYMMETRIC, QScheme.PER_CHANNEL_SYMMETRIC]:
                 params.setdefault('amax_history_len', 16)
 
         return QuantizationSpec(**params)
@@ -109,7 +132,7 @@ class QuantizationSpec(QuantizationSpecBase):
         if self.qscheme is not None and self.quant_max is None:
             raise ValueError("quant_max is required for quantization.")
 
-        if self.qscheme== QScheme.MICROSCALING and self.block_size is None:
+        if self.qscheme in [QScheme.MICROSCALING, QScheme.GROUP_WISE_AFFINE] and self.block_size is None:
             raise ValueError("block_size is required for microscaling.")
 
 EdgeOrNode = Union[Tuple[Node, Node], Node]
