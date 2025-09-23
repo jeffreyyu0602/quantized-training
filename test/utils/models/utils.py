@@ -5,6 +5,7 @@ def get_transform_args(args, vector_stages):
         "transpose_fc": args.transpose_fc,
         "unroll_dims": args.hardware_unrolling,
         "cache_size": args.cache_size,
+        "num_banks": args.num_banks,
         "conv2d_im2col": args.conv2d_im2col,
         "fuse_reshape": (
             not args.dont_fuse_reshape
@@ -16,11 +17,8 @@ def get_transform_args(args, vector_stages):
 def get_compile_args(args):
     compile_args = {
         "cache_size": args.cache_size,
+        "num_banks": args.num_banks,
         "bank_width": args.bank_width,
-        "bank_size": (
-            args.cache_size // args.num_banks
-            if args.cache_size is not None and args.num_banks is not None else None
-        ),
         "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,

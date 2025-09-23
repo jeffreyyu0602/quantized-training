@@ -55,7 +55,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 target_path = os.path.join(script_dir, '../examples/language_modeling')
 sys.path.append(os.path.abspath(target_path))
 
-from prepare_model import set_qscheme
+from prepare_model import set_qconfig
 
 logger = logging.getLogger()
 
@@ -253,6 +253,7 @@ if __name__ == "__main__":
         "transpose_weight": args.transpose_weight,
         "transpose_fc": args.transpose_fc,
         "cache_size": args.cache_size,
+        "num_banks": args.num_banks,
         "unroll_dims": args.hardware_unrolling,
         "conv2d_im2col": args.conv2d_im2col,
         "fuse_reshape": (
@@ -263,10 +264,7 @@ if __name__ == "__main__":
 
     compile_args = {
         "cache_size": args.cache_size,
-        "bank_size": (
-            args.cache_size // args.num_banks
-            if args.cache_size is not None and args.num_banks is not None else None
-        ),
+        "num_banks": args.num_banks,
         "bank_width": args.bank_width,
         "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
@@ -444,7 +442,7 @@ if __name__ == "__main__":
                 return logits
 
         if args.mixed_precision:
-            set_qscheme(quantizer, get_llm_qscheme(args.hardware_unrolling[0], args.outlier_threshold))
+            set_qconfig(quantizer, get_llm_qscheme(args.hardware_unrolling[0], args.outlier_threshold))
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 

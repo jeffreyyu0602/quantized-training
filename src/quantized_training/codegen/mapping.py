@@ -1137,13 +1137,11 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
                 weight_scale_node = weight_scale_node.meta.get('source_node')
                 weight_scale_shape = tiled_shapes[weight_scale_node]
                 new_shapes[weight_scale_node] = (
-                    weight_scale_shape[:-1] + (k_tiled,)
-                    if weight_transposed
-                    else (k_tiled,) + weight_scale_shape[1:]
+                    weight_scale_shape[:-1] + (k_tiled,) if weight_transposed else (k_tiled,) + weight_scale_shape[1:]
                 )
 
         for n in node.all_input_nodes:
-            if n not in new_shapes and not n.name.startswith("code"):
+            if n not in new_shapes and not n.name.startswith("code") and n.value.numel() > 1:
                 new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
 
         if isinstance(node.value, (tuple, list)):
@@ -1153,11 +1151,8 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
             new_shapes[node] = tiled_output_shape
 
         total_size = sum(
-            allocator.get_tensor_size(n, new_shapes.get(n))
-            for n in node.all_input_nodes if not n.name.startswith("code")
+            allocator.get_tensor_size(n, s, True, n == node) for n, s in new_shapes.items()
         )
-
-        total_size += allocator.get_tensor_size(node, new_shapes[node])
 
         if total_size <= allocator.total_memory:
             if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
@@ -1198,7 +1193,7 @@ def run_memory_mapping(
     model: GraphModule,
     allocator: MemoryAllocator = None,
     cache_size: int = None,
-    bank_size: int = None,
+    num_banks: int = None,
     bank_width: int = None,
     unroll_dims=None
 ):
@@ -1308,6 +1303,7 @@ def run_memory_mapping(
             else:
                 tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
 
+        bank_size = cache_size // num_banks if num_banks is not None else None
         sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD)
 
         if node.op == "call_module":
@@ -1323,14 +1319,17 @@ def run_memory_mapping(
 
         tensor_sizes = {
             n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
-            for n in node.all_input_nodes if not n.name.startswith("code")
+            for n in node.all_input_nodes
+            if not n.name.startswith("code") and (n.value.numel() > 1 or n.op != "get_attr")
         }
 
         if isinstance(node.value, torch.Tensor):
-            tensor_sizes[node] = sp_allocator.get_tensor_size(node, tiled_shapes.get(node))
+            tensor_sizes[node] = sp_allocator.get_tensor_size(
+                node, tiled_shapes.get(node), is_scratch_output=True
+            )
         elif isinstance(node.value, (tuple, list)):
             output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            tensor_sizes[node] = sp_allocator.get_tensor_size(node, output_shapes)
+            tensor_sizes[node] = sp_allocator.get_tensor_size(node, output_shapes, is_scratch_output=True)
 
         tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
 
@@ -1352,18 +1351,24 @@ def run_memory_mapping(
                 unaligned_tensors.append(n.name)
 
             scratchpad_mem[n] = sp_allocator.allocate_memory(
-                n, shape=tiled_shapes.get(n), align_bank=align_bank, expand_on_failure=True
+                n,
+                shape=tiled_shapes.get(n),
+                align_bank=align_bank,
+                expand_on_failure=True,
+                is_scratch_output=(n == node),
             )
 
         if sp_allocator.total_memory != cache_size:
             logger.warning(
-                f"Memory allocation failed for {node}. "
+                f"[MEM_ALLOC_FAIL] Memory allocation failed for {node}. "
                 f"Expanding memory from {cache_size} to {sp_allocator.total_memory}."
             )
 
         if unaligned_tensors:
             names = ', '.join(unaligned_tensors)
-            logger.warning(f"{node}: tensors {names} could not be assigned to individual banks")
+            logger.warning(
+                f"[BANK_ASSIGN_FAIL] {node}: tensors {names} could not be assigned to individual banks"
+            )
 
         node.meta["scratchpad_mem"] = scratchpad_mem
 

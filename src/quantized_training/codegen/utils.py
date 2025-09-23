@@ -1386,9 +1386,12 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
-def calculate_gemm_node_size(node, x_factor, c_factor, k_factor):
-    def node_mem(n, div_factors):
-        return get_node_bytes(n) * n.value.numel() / div_factors
+def calculate_gemm_tile_size(node, x_factor, c_factor, k_factor, bank_size=None):
+    def node_mem(n, tiles):
+        size = get_node_bytes(n) * n.value.numel() / tiles
+        if bank_size is not None:
+            size = int(math.ceil(size / bank_size) * bank_size)
+        return size
 
     total_bytes = 0
     input_node, weight_node = node.args[0], node.args[1]
@@ -1414,7 +1417,7 @@ def calculate_gemm_node_size(node, x_factor, c_factor, k_factor):
     return total_bytes
 
 
-def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
+def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
@@ -1427,8 +1430,8 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims):
 
     # Shrink output channel dim first, then reduction dim, then input dim
     while True:
-        total_size = calculate_gemm_node_size(
-            node, X // x_tiled, C // c_tiled, K // k_tiled
+        total_size = calculate_gemm_tile_size(
+            node, X // x_tiled, C // c_tiled, K // k_tiled, bank_size
         )
 
         if total_size <= max_mem_bytes:
@@ -1528,7 +1531,7 @@ def slice_tensor(node, dim, start, end, model):
     return tiled_node
 
 
-def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
+def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None):
     """
     Perform tiling on GEMM operations in a model to fit intermediate data into cache.
 
@@ -1581,13 +1584,14 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         X = int(input_value.numel() / C)
 
-        total_size = calculate_gemm_node_size(node, 1, 1, 1)
+        bank_size = None if num_banks is None else cache_size // num_banks
+        total_size = calculate_gemm_tile_size(node, 1, 1, 1, bank_size=bank_size)
 
         if total_size <= cache_size:
             logger.info(f"{node} ({X} x {C} x {K}), total_size={total_size} fits in cache.")
             continue
 
-        x_tiled, c_tiled, k_tiled = choose_tile(node, X, C, K, cache_size, unroll)
+        x_tiled, c_tiled, k_tiled = choose_tile(node, X, C, K, cache_size, unroll, bank_size)
         logger.info(f"{node} ({X} x {C} x {K}) -> ({x_tiled} x {c_tiled} x {k_tiled})")
 
         tiled_input_shape = construct_tiled_shape(

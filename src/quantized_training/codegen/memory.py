@@ -93,33 +93,42 @@ class MemoryAllocator:
             return size
         return (size + alignment - 1) // alignment * alignment
 
-    def get_tensor_size(self, node, shape, align_bank=False):
+    def get_tensor_size(self, node, shape, align_bank=False, is_scratch_output=False):
         if isinstance(node.value, torch.Tensor):
             dtype = node.meta.get('dtype') or node.value.dtype
             numel = math.prod(shape) if shape is not None else node.value.numel()
             tensor_size = numel * dtype_byte_size(dtype)
 
-            conv2d_node = get_user_with_target(node, [
+            conv2d_node = get_user_with_target(node, (
                 torch.ops.aten.conv2d.default,
                 torch.ops.quantized_ops.conv2d.default,
-            ])
+            ))
 
             if conv2d_node is not None:
                 input_node = conv2d_node.args[0]
                 input_node = input_node.meta.get('source_node', input_node)
                 dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if input_node == node and node.value.shape[dim] < 16:
-                    logger.info(f"Tripling size for conv2d {node} for replication")
+                    logger.info(
+                        f"Increasing tensor size for node [{node}] -> [{conv2d_node}] "
+                        f"with target [{conv2d_node.target}] by 3x"
+                    )
                     tensor_size *= 3
 
-            user = get_user_with_target(node, [
+            user = get_user_with_target(node, (
                 torch.ops.aten.softmax.int,
                 torch.ops.aten.layer_norm.default,
-            ])
+            ))
 
-            if user is not None:
-                logger.info(f"Doubling size for {node} for intermediate outputs")
-                tensor_size *= 2
+            if not is_scratch_output and user is not None:
+                input_node = user.args[0]
+                input_node = input_node.meta.get('source_node', input_node)
+                if input_node == node:
+                    logger.info(
+                        f"Increasing tensor size for node [{node}] -> [{user}] "
+                        f"with target [{user.target}] by 2x"
+                    )
+                    tensor_size *= 2
 
             return self.align_size(tensor_size, align_bank)
 
@@ -146,6 +155,7 @@ class MemoryAllocator:
         shape=None,
         align_bank=False,
         expand_on_failure=False,
+        is_scratch_output=False,
     ):
         if not hasattr(node, 'value'):
             print(f"Node {node} does not have a value attribute")
@@ -167,7 +177,7 @@ class MemoryAllocator:
 
         tensor_size = (
             size if size is not None else
-            self.get_tensor_size(node, shape, align_bank=align_bank)
+            self.get_tensor_size(node, shape, align_bank, is_scratch_output)
         )
 
         if tensor_size is None:

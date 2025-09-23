@@ -115,6 +115,7 @@ def transform(
     transpose_weight=False,
     transpose_fc=False,
     cache_size=None,
+    num_banks=None,
     unroll_dims=None,
     conv2d_im2col=False,
     fuse_reshape=True,
@@ -147,7 +148,7 @@ def transform(
         pad_vector_ops_to_hardware_unroll_size(model, unroll_dims[1])
 
     if cache_size is not None:
-        run_matrix_op_l2_tiling(model, unroll_dims, cache_size)
+        run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
         run_vector_op_l2_tiling(model, unroll_dims, cache_size)
 
     if transpose_weight:
@@ -171,7 +172,7 @@ def compile(
     example_kwargs=None,
     total_memory=None,
     cache_size=None,
-    bank_size=None,
+    num_banks=None,
     bank_width=None,
     unroll_dims=None,
     output_dir=None,
@@ -184,7 +185,7 @@ def compile(
 
     allocator = MemoryAllocator(total_memory)
     run_memory_mapping(
-        model, allocator, cache_size, bank_size, bank_width, unroll_dims
+        model, allocator, cache_size, num_banks, bank_width, unroll_dims
     )
 
     os.makedirs(output_dir, exist_ok=True)
