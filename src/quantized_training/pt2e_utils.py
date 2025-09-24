@@ -1,3 +1,4 @@
+import logging
 import re
 from collections import defaultdict
 from typing import Dict, Tuple, Callable, Any, Union, List
@@ -12,14 +13,20 @@ from accelerate.utils import get_max_memory
 from .quantize_pt2e import export_model
 
 
+logger = logging.getLogger(__name__)
+
+
 __all__ = [
+    "deduplicate_nodes",
     "dispatch_model",
     "dtype_byte_size",
+    "fold_param_ops",
     "get_device_map",
     "get_aten_graph_module",
     "get_node_name_to_scope",
     "insert_align_device_nodes",
     "print_node_scope_tabular",
+    "sink_obs_or_fq",
 ]
 
 
@@ -145,7 +152,10 @@ def dispatch_model(model, device_map=None, max_memory=None):
         if name in device_map:
             child.to(device_map[name])
 
-    for name, buffer in model.named_buffers():
+    for name, buffer in model.named_buffers(recurse=False):
+        if name not in device_map:
+            logger.warning(f"Buffer {name} not found in device_map, skipping.")
+            continue
         buffer.data = buffer.data.to(device_map[name])
 
 
@@ -182,6 +192,59 @@ def deduplicate_nodes(graph: torch.fx.Graph):
 
     graph.lint()
     return mapping
+
+
+def fold_param_ops(model):
+    """
+    Normalizes parameters in an FX GraphModule by folding simple
+    single-user operations directly into the parameter tensors.
+    """
+    for node in list(model.graph.nodes):
+        if node.op != "get_attr":
+            continue
+
+        param = fetch_attr(model, node.target)
+
+        def load_arg(a):
+            return torch.fx.graph.map_arg(a, lambda n: param if n is node else n)
+
+        while len(node.users) == 1:
+            user = next(iter(node.users), None)
+            if user.op != 'call_function' or len(user.all_input_nodes) != 1:
+                break
+
+            logger.info(f"Folding op {user.target} into parameter {node.target}")
+
+            param.data = user.target(*load_arg(user.args), **load_arg(user.kwargs))
+
+            user.replace_all_uses_with(node)
+            model.graph.erase_node(user)
+
+    model.graph.lint()
+    model.recompile()
+    return model
+
+
+def sink_obs_or_fq(gm: GraphModule) -> GraphModule:
+    graph = gm.graph
+    for node in reversed(graph.nodes):
+        # Match FakeQuant / Observer nodes
+        if node.op == "call_module" and "activation_post_process" in node.target:
+            input_node = node.args[0]
+            users = list(node.users.keys())
+
+            # Re-insert the fake quant right before each consumer
+            for user in users:
+                with graph.inserting_before(user):
+                    new_fq = graph.call_module(node.target, (input_node,))
+                user.replace_input_with(node, new_fq)
+
+            # Remove the original early fake quant
+            graph.erase_node(node)
+
+    graph.lint()
+    gm.recompile()
+    return gm
 
 
 @torch.no_grad()

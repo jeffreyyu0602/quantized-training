@@ -5,12 +5,12 @@ import math
 import torch
 from torch import nn
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
-from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel
 from transformers.cache_utils import Cache, StaticCache
+from transformers.utils import is_torch_greater_or_equal
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb, repeat_kv
-from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_6
 
 
 __all__ = [
@@ -249,15 +249,12 @@ def swap_llama_attention(model: PreTrainedModel) -> PreTrainedModel:
         for name, child in module.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
             if isinstance(child, LlamaAttention):
-                new_attn = LlamaAttentionKIVI(child.config, child.layer_idx)
-
                 device = assert_and_get_unique_device(child)
                 dtype = next(child.parameters()).dtype
-                new_attn = new_attn.to(device=device, dtype=dtype)
-
+                new_attn = LlamaAttentionKIVI(child.config, child.layer_idx).to(device=device, dtype=dtype)
                 new_attn.load_state_dict(child.state_dict(), strict=True)
                 setattr(module, name, new_attn)
-                print(f"Replaced {full_name} with LlamaAttentionKIVI")
+                logger.info(f"Replaced {full_name} with LlamaAttentionKIVI")
             else:
                 swap_module(child, full_name)
 
@@ -497,6 +494,8 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
         min_length: int = 0,
         eos_token_id: Union[int, List[int]] = None,
         model_decode: torch.nn.Module = None,
+        key_quantizer=None,
+        value_quantizer=None,
     ):
         device = model.device
         generation_config = model.generation_config
@@ -527,17 +526,26 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
         seq_length = past_key_values.get_seq_length()
         # print(f"Prompt length: {seq_length}")
 
-        # Copy KV caches
         for i, layer in enumerate(past_key_values.layers):
-            cache_len = model_decode.get_buffer(f"key_cache_{i}").shape[2]
+            cache_len = model_decode.get_buffer(f"value_cache_{i}").shape[2]
             assert seq_length <= cache_len, f"seq_length {seq_length} exceeds cache size {cache_len}"
 
-            model_decode.get_buffer(f"key_cache_{i}").zero_()[:, :, : seq_length, :] = layer.keys
+            # TODO: handle list of quantizers. Update microscaling scale
+            if key_quantizer is not None:
+                layer.keys = key_quantizer(layer.keys)
+            if value_quantizer is not None:
+                layer.values = value_quantizer(layer.values)
+
+            key_cache_len = model_decode.get_buffer(f"key_cache_{i}").shape[2]
+            if key_cache_len != cache_len:
+                model_decode.get_buffer(f"key_cache_{i}").zero_()[:, :, :, : seq_length] = layer.keys.transpose(2, 3)
+            else:
+                model_decode.get_buffer(f"key_cache_{i}").zero_()[:, :, : seq_length, :] = layer.keys
+
             model_decode.get_buffer(f"value_cache_{i}").zero_()[:, :, : seq_length, :] = layer.values
 
         device = model_decode.device
 
-        # Generate tokens iteratively
         for step in range(1, max_new_tokens):
             with torch.no_grad():
                 cache_len = model_decode.get_buffer("key_cache_0").shape[2]
@@ -566,7 +574,6 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
                         torch.tensor([step - 1], dtype=torch.long, device=device),
                         causal_mask.to(device),
                     )
-                    raise
 
                 # print(f"Step {step} logits:", logits)
 
@@ -576,7 +583,6 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
             current_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             response_tokens.append(current_token.item())
 
-            # Check stopping criteria
             if len(response_tokens) >= min_length and current_token.item() in eos_token_id:
                 break
 
@@ -608,7 +614,7 @@ def convert_and_export_with_split_cache(
     Returns:
         Exported program (`torch.export.ExportedProgram`): The exported program generated via `torch.export`.
     """
-    if not is_torch_greater_or_equal_than_2_6:
+    if not is_torch_greater_or_equal("2.6", accept_dev=True):
         raise ImportError("torch >= 2.6 is required.")
     
     max_cache_len = max_len + max_new_tokens
@@ -663,106 +669,4 @@ def convert_and_export_with_split_cache(
             strict=strict if strict is not None else True,
         )
 
-        # FIXME: this creates problem for insert_align_device_nodes
-        # fold_param_ops(exported_program.module())
-
         return exported_program
-
-
-def fetch_attr(module, target : str):
-    target_atoms = target.split('.')
-    attr_itr = module
-    for i, atom in enumerate(target_atoms):
-        if not hasattr(attr_itr, atom):
-            raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
-        attr_itr = getattr(attr_itr, atom)
-    return attr_itr
-
-
-def fold_param_ops(model):
-    """
-    Normalizes parameters in an FX GraphModule by folding simple
-    single-user operations directly into the parameter tensors.
-    """
-    for node in list(model.graph.nodes):
-        if node.op != "get_attr":
-            continue
-
-        param = fetch_attr(model, node.target)
-
-        def load_arg(a):
-            return torch.fx.graph.map_arg(a, lambda n: param if n is node else n)
-
-        while len(node.users) == 1:
-            user = next(iter(node.users), None)
-            if user.op != 'call_function' or len(user.all_input_nodes) != 1:
-                break
-
-            param.data = user.target(*load_arg(user.args), **load_arg(user.kwargs))
-
-            user.replace_all_uses_with(node)
-            model.graph.erase_node(user)
-
-    model.graph.lint()
-    model.recompile()
-    return model
-
-
-def test_llama_kivi_export():
-    model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Llama-2-7b-hf",
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        attn_implementation="eager",
-    )
-
-    swap_llama_attention(model)
-
-    gm = convert_and_export_with_split_cache(model, max_len=4096, max_new_tokens=512).module()
-    fold_param_ops(gm)
-    gm.graph.print_tabular()
-
-    from quantized_training import (
-        QuantizationConfig,
-        QuantizationSpec,
-        get_default_quantizer,
-        print_node_scope_tabular,
-        prepare_pt2e,
-        convert_pt2e,
-        ShapeProp,
-    )
-
-    # print_node_scope_tabular(gm)
-
-    quantizer = get_default_quantizer(
-        input_activation="nf4_6,qs=microscaling,bs=64,scale=fp8_e5m3",
-        weight="nf4_6,qs=microscaling,bs=64,scale=fp8_e5m3",
-    )
-
-    activation = QuantizationSpec.from_str("fp8_e4m3")
-    qconfig_matmul = QuantizationConfig(activation, None, activation, None)
-
-    for layer_idx in range(model.config.num_hidden_layers):
-        module_name = f'model.model.layers.slice(None, 32, None)._modules.{layer_idx}.self_attn'
-        quantizer.set_module_name_object_type_order(module_name, torch.ops.aten.matmul.default, 1, None)
-        quantizer.set_module_name_object_type_order(module_name, torch.ops.aten.matmul.default, 3, None)
-
-    import re
-    from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
-
-    key_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-2")
-    value_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-1")
-
-    for node in gm.graph.nodes:
-        if node.op == "get_attr" and (match := re.match(r"^(key|value)_cache_(\d+)$", node.target)):
-            layer, idx = match.groups()
-            _annotate_output_qspec(node, key_qspec if layer == "key" else value_qspec)
-
-    gm = prepare_pt2e(gm, quantizer)
-    convert_pt2e(gm)
-    gm.graph.print_tabular()
-
-    input_ids = torch.randint(0, model.config.vocab_size - 1, (1, 1))
-    cache_position = torch.tensor([0], dtype=torch.long)
-
-    ShapeProp(gm).propagate(input_ids, cache_position)

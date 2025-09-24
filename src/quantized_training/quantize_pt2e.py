@@ -821,7 +821,7 @@ def _eliminate_dequantize_with_no_effect(model: GraphModule):
 
         scale_node = node.args[1]
         scale = model.get_buffer(scale_node.target)
-        if torch.any(scale != 1):
+        if scale_node.op != "get_attr" or torch.any(scale != 1):
             continue
 
         # During integer quantization, the dequantize node also perform a
@@ -1108,7 +1108,7 @@ def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
     return model
 
 
-def convert_pt2e(model: GraphModule, output_dtype: str = None):
+def convert_pt2e(model: GraphModule, output_dtype: str = None, eliminate_no_effect: bool = True):
     modules = dict(model.named_modules(remove_duplicate=False))
 
     for node in list(model.graph.nodes):
@@ -1125,7 +1125,8 @@ def convert_pt2e(model: GraphModule, output_dtype: str = None):
                     _replace_observer_with_quantize_dequantize_node_decomposed(
                         model, node, modules, output_dtype)
 
-    _eliminate_dequantize_with_no_effect(model)
+    if eliminate_no_effect:
+        _eliminate_dequantize_with_no_effect(model)
 
     model.graph.lint()
     model.recompile()

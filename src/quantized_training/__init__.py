@@ -30,10 +30,12 @@ __all__ = [
     "add_qspec_args",
     "convert_and_export_with_split_cache",
     "convert",
+    "deduplicate_nodes",
     "derive_bias_qparams_fn",
     "dispatch_model",
     "dtype_byte_size",
     "export_model",
+    "fold_param_ops",
     "generate",
     "get_aten_graph_module",
     "get_device_map",
@@ -55,6 +57,7 @@ __all__ = [
     "quantize_to_posit",
     "replace_softmax",
     "setup_logging",
+    "sink_obs_or_fq",
     "swap_llama_attention",
 ]
 

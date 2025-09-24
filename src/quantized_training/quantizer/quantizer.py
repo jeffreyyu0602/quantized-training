@@ -32,13 +32,17 @@ ABBREV_MAP = {
     'outlier': 'outlier_threshold',
 }
 
+def parse_int_or_list(value: str):
+    parts = [int(v.strip()) for v in value.split(',')]
+    return parts[0] if len(parts) == 1 else parts
+
 PARAMS_TYPE = {
     'quant_min': float,
     'quant_max': float,
     'qscheme': QScheme,
     'amax_history_len': int,
-    'ch_axis': int,
-    'block_size': int,
+    'ch_axis': parse_int_or_list,
+    'block_size': parse_int_or_list,
     'scale_dtype': str,
     'outlier_threshold': float,
 }
@@ -98,31 +102,34 @@ class QuantizationSpec(QuantizationSpecBase):
     quant_max: Optional[float] = None
     qscheme: Optional[QScheme] = None
     amax_history_len: Optional[int] = None
-    ch_axis: Optional[int] = None
-    block_size: Optional[int] = None
+    ch_axis: Optional[Union[int, List[int]]] = None
+    block_size: Optional[Union[int, List[int]]] = None
     scale_dtype: Optional[str] = None
     outlier_threshold: Optional[float] = None
     is_dynamic: bool = False  # required by sharing nodes
 
     @staticmethod
     def from_str(s):
-        assert(s != None), "String quantization_spec == None"
-        s = s.lower()
-        fields = s.split(',')
+        if not s:
+            raise ValueError("String quantization_spec is None or empty")
 
+        fields = [f.strip() for f in s.lower().split(',') if f.strip()]
         params = {'dtype': fields[0]}
+
         for item in fields[1:]:
+            if '=' not in item:
+                raise ValueError(f"Expected key=value format but got '{item}'")
             key, value = item.split('=')
             key = ABBREV_MAP.get(key, key)
             if key not in PARAMS_TYPE:
-                raise ValueError(f"Unknown argument: {key}")
+                valid = ', '.join(PARAMS_TYPE.keys())
+                raise ValueError(f"Unknown argument '{key}'. Valid keys: {valid}")
             params[key] = PARAMS_TYPE[key](value)
 
         if (qscheme := params.get('qscheme', None)) is not None:
             qmin, qmax = get_quant_min_max(params['dtype'])
             params.setdefault('quant_min', float(qmin))
             params.setdefault('quant_max', float(qmax))
-
             if qscheme in [QScheme.PER_TENSOR_SYMMETRIC, QScheme.PER_CHANNEL_SYMMETRIC]:
                 params.setdefault('amax_history_len', 16)
 

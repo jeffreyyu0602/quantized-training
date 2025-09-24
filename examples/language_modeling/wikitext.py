@@ -166,20 +166,20 @@ def main(args):
 
     ppl = torch.exp(torch.stack(nlls).mean())
 
-    logger.info(f"model:      {args.model_id}")
-    logger.info(f"max length: {args.max_length}")
-    logger.info(f"stride:     {args.stride}")
-    logger.info(f"perplexity: {ppl.item()}")
+    print(f"model:      {args.model_id}")
+    print(f"max length: {args.max_length}")
+    print(f"stride:     {args.stride}")
+    print(f"perplexity: {ppl.item()}")
 
     outlier_pct = []
 
     for name, module in model.named_modules():
         if hasattr(module, "max_outlier_pct") and module.max_outlier_pct > 0:
-            logger.info(f"{name}: {module.max_outlier_pct:.2%} outliers")
+            print(f"{name}: {module.max_outlier_pct:.2%} outliers")
             outlier_pct.append(module.max_outlier_pct)
 
     if outlier_pct:
-        logger.info(f"Average outlier percentage: {sum(outlier_pct) / len(outlier_pct):.2%}")
+        print(f"Average outlier percentage: {sum(outlier_pct) / len(outlier_pct):.2%}")
 
     if args.record_histogram and args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

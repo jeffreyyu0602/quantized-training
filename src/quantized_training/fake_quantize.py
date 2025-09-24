@@ -208,6 +208,9 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
         if scale_code is not None:
             sf = vmap(sf, scale_code)
 
+        scale.resize_(sf.shape).copy_(sf)
+        zero_point.resize_(zp.shape).copy_(zp)
+
         for dim in axes:
             sf = torch.repeat_interleave(sf, block_size, dim=dim)
             zp = torch.repeat_interleave(zp, block_size, dim=dim)
@@ -217,9 +220,6 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
 
         # Dequantize
         input = (q - zp) * sf
-
-        scale.resize_(sf.shape).copy_(sf)
-        zero_point.resize_(zp.shape).copy_(zp)
 
         # Undo tile reshaping
         input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
@@ -382,7 +382,6 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # TODO this is a workaround when input is not on the same device as the module
         devices = {p.device for p in self.buffers()}
         if len(devices) != 1 or next(iter(devices)) != X.device:
             self.to(X.device)
