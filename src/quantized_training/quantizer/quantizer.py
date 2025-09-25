@@ -33,8 +33,11 @@ ABBREV_MAP = {
 }
 
 def parse_int_or_list(value: str):
-    parts = [int(v.strip()) for v in value.split(',')]
-    return parts[0] if len(parts) == 1 else parts
+    value = value.strip()
+    if value.startswith("(") and value.endswith(")"):
+        parts = [int(v.strip()) for v in value[1:-1].split(',')]
+        return parts
+    return int(value)
 
 PARAMS_TYPE = {
     'quant_min': float,
@@ -113,7 +116,7 @@ class QuantizationSpec(QuantizationSpecBase):
         if not s:
             raise ValueError("String quantization_spec is None or empty")
 
-        fields = [f.strip() for f in s.lower().split(',') if f.strip()]
+        fields = re.split(r',(?![^()]*\))', s)
         params = {'dtype': fields[0]}
 
         for item in fields[1:]:

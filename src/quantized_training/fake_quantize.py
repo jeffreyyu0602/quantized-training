@@ -1,24 +1,20 @@
 import logging
 import math
 import re
-from typing import Optional, List, Callable, Tuple
+from typing import Optional, List, Callable, Tuple, Union
 
 import torch
 from torch import Tensor
 from torch.ao.quantization import FakeQuantizeBase, ObserverOrFakeQuantize
 
 import quantized_training as qt
-from quantized_training.decomposed import vmap
+from quantized_training.decomposed import expand, vmap, quantize_mx
 from quantized_training.fp8 import (
     _quantize_elemwise_core,
     quantize_to_fp8_e4m3,
     quantize_to_fp8_e5m2,
 )
-from quantized_training.mx_utils import (
-    _reshape_to_blocks,
-    _shared_exponents,
-    _undo_reshape_to_blocks,
-)
+from quantized_training.mx_utils import _reshape_to_blocks
 from quantized_training.normal_float import quantize_to_nf
 from quantized_training.posit import quantize_to_posit
 
@@ -101,64 +97,36 @@ def get_quantization_map(dtype, device=None):
 
 class MXFakeQuantFunction(torch.autograd.Function):
     """This function performs MX quantization by calculating the scaling
-    factor using absolute maximum values in the tensor.
+    factor using absolute maximum values in the input.
     """
 
     @staticmethod
     def forward(
         ctx,
-        input,
-        fake_quant_enabled,
-        code,
-        quant_max,
-        shared_exp_method="max",
-        axes=None,
-        block_size=0,
+        input: torch.Tensor,
+        fake_quant_enabled: torch.Tensor,
+        scale: torch.Tensor,
+        code: torch.Tensor,
+        axes: Union[int, List[int]],
+        block_size: Union[int, List[int]],
+        quant_max: float,
         force_scale_power_of_two=False,
         scale_code=None,
     ):
         if fake_quant_enabled[0] == 0:
             return input
 
-        assert block_size > 0
-
-        # Make sure axes is a list of non-negative numbers
-        axes = [axes] if type(axes) == int else axes
-        axes = [x + input.ndim if x < 0 else x for x in axes]
-
-        # Perform tiling to the hardware vector size
-        input, axes, orig_shape, padded_shape = _reshape_to_blocks(
-            input, axes, block_size
+        sf, input = quantize_mx(
+            input,
+            code,
+            axes,
+            block_size,
+            quant_max,
+            force_scale_power_of_two,
+            scale_code=scale_code
         )
 
-        shared_exp_axes = [x + 1 for x in axes]
-
-        if force_scale_power_of_two:
-            # Get shared exponents
-            shared_exp = _shared_exponents(
-                input, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
-            )
-
-            # Offset the max exponent by the largest representable exponent
-            # in the element data format
-            shared_exp = shared_exp - math.floor(math.log2(quant_max))
-
-            scale = (2 ** shared_exp).to(input.dtype)
-        else:
-            # Use absolute maximum value for scale calculation
-            amax = torch.amax(torch.abs(input), dim=shared_exp_axes, keepdim=True)
-            scale = amax / quant_max
-
-            # Quantize the scale using the codebook
-            if scale_code is not None:
-                scale = vmap(scale, scale_code)
-
-        scale = torch.where(scale > 0.0, scale, 1.0)
-
-        input = vmap(input / scale, code) * scale
-
-        # Undo tile reshaping
-        input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
+        scale.resize_(sf.shape).copy_(sf)
 
         return input
 
@@ -171,14 +139,14 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input,
-        fake_quant_enabled,
-        quant_min,
-        quant_max,
+        input: torch.Tensor,
+        fake_quant_enabled: torch.Tensor,
         scale: torch.Tensor,
         zero_point: torch.Tensor,
-        axes=None,
-        block_size=0,
+        axes: Union[int, List[int]],
+        block_size: Union[int, List[int]],
+        quant_min: float,
+        quant_max: float,
         scale_code=None,
     ):
         if fake_quant_enabled[0] == 0:
@@ -211,18 +179,14 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
         scale.resize_(sf.shape).copy_(sf)
         zero_point.resize_(zp.shape).copy_(zp)
 
-        for dim in axes:
-            sf = torch.repeat_interleave(sf, block_size, dim=dim)
-            zp = torch.repeat_interleave(zp, block_size, dim=dim)
+        sf = expand(sf, input.shape, block_size)
+        zp = expand(zp, input.shape, block_size)
 
         # Quantize
         q = torch.clamp(torch.round(input / sf + zp), quant_min, quant_max)
 
         # Dequantize
         input = (q - zp) * sf
-
-        # Undo tile reshaping
-        input = _undo_reshape_to_blocks(input, padded_shape, orig_shape, axes)
 
         return input
 
@@ -327,12 +291,11 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.quant_min = quant_min
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
-        self.ch_axis = ch_axis
+        self.ch_axis = (ch_axis,) if isinstance(ch_axis, int) else ch_axis
         self.block_size = block_size
         self.scale_dtype = scale_dtype
         self.force_scale_power_of_two = force_scale_power_of_two
         self.outlier_threshold = outlier_threshold
-        self.shared_exp_method = kwargs.get("shared_exp_method", "max")
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
         quant_map = get_quantization_map(dtype, device)
@@ -340,11 +303,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             indices, values = quant_map
             quant_map = values[indices]
         self.register_buffer("code", quant_map, persistent=False)
-        if self.scale_dtype is not None:
-            self.register_buffer(
-                "scale_code", get_quantization_map(self.scale_dtype, device), persistent=False)
-        else:
-            self.scale_code = None
+        scale_map = get_quantization_map(self.scale_dtype, device) if self.scale_dtype is not None else None
+        self.register_buffer("scale_code", scale_map, persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
@@ -403,11 +363,11 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             X = MXFakeQuantFunction.apply(
                 X,
                 self.fake_quant_enabled,
+                self.scale,
                 self.code,
-                self.quant_max,
-                self.shared_exp_method,
                 self.ch_axis,
                 self.block_size,
+                self.quant_max,
                 self.force_scale_power_of_two,
                 self.scale_code,
             )
@@ -415,12 +375,12 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             X = GroupWiseAffineFakeQuantFunction.apply(
                 X,
                 self.fake_quant_enabled,
-                self.quant_min,
-                self.quant_max,
                 self.scale,
                 self.zero_point,
                 self.ch_axis,
                 self.block_size,
+                self.quant_min,
+                self.quant_max,
                 self.scale_code,
             )
         else:
