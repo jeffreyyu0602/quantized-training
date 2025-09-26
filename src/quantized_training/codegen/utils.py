@@ -1434,6 +1434,11 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
             node, X // x_tiled, C // c_tiled, K // k_tiled, bank_size
         )
 
+        # Ensure each buffer load fits in a single bank
+        # TODO: should use actual tiling factor instead of 128
+        if 128 * c_tiled * get_node_bytes(node.args[0]) > bank_size:
+            c_tiled = snap(c_tiled // 2, unroll_dims[0])
+
         if total_size <= max_mem_bytes:
             break
 
@@ -1716,6 +1721,7 @@ def get_valid_tiling(
         return tuple(f // t for f, t in zip(full_shape, tiled_shape))
 
     dims = len(input_shape)
+    last_dim = min(last_dim) if isinstance(last_dim, (list, tuple)) else last_dim
     last_dim = dims + last_dim if last_dim < 0 else last_dim
     stop = last_dim if fix_last_dim else dims
 
@@ -1786,17 +1792,18 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             else node.value[1].shape
         )
 
-        if node.target in [
-            torch.ops.quantized_ops.calculate_mx_qparam.default,
-            torch.ops.quantized_ops.quantize_mx.default,
-        ]:
+        if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
             last_dim = node.args[1]
+        elif node.target == torch.ops.quantized_ops.quantize_mx.default:
+            last_dim = node.args[2]
         elif node.target == torch.ops.aten.transpose.int:
             last_dim = min(*node.args[1:])
         elif node.target == torch.ops.aten.permute.default:
             last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
         else:
             last_dim = -1
+
+        found_tiling = False
 
         for tiled_output_shape, tiling in get_valid_tiling(output_shape, True, last_dim):
             node_to_key = get_node_to_key(node)
@@ -1831,6 +1838,8 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
                     logger.info(f"Tile {node} with shape {tiled_output_shape} (reduce factor={tiling}")
                     node.meta["tiled_shapes"] = tiled_shapes
                     node.meta["l2_tiling"] = tiling
+                found_tiling = True
                 break
-        else:
+
+        if not found_tiling:
             logger.warning(f"Warning: No tile shape found to fit {node} into cache.")
