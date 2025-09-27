@@ -110,7 +110,7 @@ def vmap(input: torch.Tensor, code: torch.Tensor, chunk_size=65536) -> torch.Ten
 
 
 quantized_decomposed_lib.define(
-    "quantize(Tensor input, Tensor code, Tensor scale, Tensor? zero_point=None, str? dtype=None, int? block_size=None, Tensor quant_code=None) -> Tensor"
+    "quantize(Tensor input, Tensor code, Tensor scale, Tensor? zero_point=None, int? block_size=None, Tensor quant_code=None) -> Tensor"
 )
 
 
@@ -120,7 +120,6 @@ def quantize(
     code: torch.Tensor,
     scale: torch.Tensor,
     zero_point: Optional[torch.Tensor] = None,
-    dtype: Optional[str] = None,
     block_size: Optional[int] = None,
     quant_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -130,11 +129,10 @@ def quantize(
     Args:
         input (torch.Tensor): original float32 or bfloat16 Tensor
         code (torch.Tensor): quantization map for mapping from float to quantized values
-        scale (torch.Tensor): quantization parameter for quantization
+        scale (torch.Tensor): scale factors for quantization
         zero_point (torch.Tensor): zero point for quantization, default is None
-        dtype (str): requested dtype (e.g. int8) for output Tensor
-        block_size (int): block size for microscaling, default is None
-        quant_code (torch.Tensor): codebook for quantizing the input
+        block_size (int): block size for group-wise quantization, default is None
+        quant_code (torch.Tensor): codebook for quantizing the output
 
     Returns:
         Tensor with requested dtype (e.g. int8), note the quantization parameters
@@ -155,7 +153,7 @@ def quantize(
 
 
 quantized_decomposed_lib.define(
-    "dequantize(Tensor input, Tensor scale, str? dtype=None, Tensor code=None, Tensor? zero_point=None, int? block_size=None) -> Tensor"
+    "dequantize(Tensor input, Tensor scale, Tensor? zero_point=None, int? block_size=None, Tensor? code=None, Tensor? output_code=None) -> Tensor"
 )
 
 
@@ -163,21 +161,21 @@ quantized_decomposed_lib.define(
 def dequantize(
     input: torch.Tensor,
     scale: torch.Tensor,
-    dtype: Optional[str] = None,
-    code: Optional[torch.Tensor] = None,
     zero_point: Optional[torch.Tensor] = None,
     block_size: Optional[int] = None,
+    code: Optional[torch.Tensor] = None,
+    output_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """ Dequantization for the Tensor using the same quantization parameters to map
     from floating point to quantized values
 
     Args:
         input (torch.Tensor): original float32 or bfloat16 Tensor
-        scale (torch.Tensor): quantization parameter for affine quantization
-        dtype (str): requested dtype (e.g. int24) for input Tensor
-        code (torch.Tensor): quantization map for mapping from float to quantized values
+        scale (torch.Tensor): scale factors for dequantization
         zero_point (torch.Tensor): zero point for quantization, default is None
-        block_size (int): block size for microscaling, default is None
+        block_size (int): block size for group-wise quantization, default is None
+        code (torch.Tensor): quantization map used to quantize the input
+        output_code (torch.Tensor): quantization map used to quantize the output
 
     Returns:
         Tensor with floating point types, note the quantization parameters
@@ -193,11 +191,14 @@ def dequantize(
             zero_point = expand(zero_point, input.shape, block_size)
 
     if zero_point is None:
-        input = input * scale
+        dequantized = input * scale
     else:
-        input = (input - zero_point) * scale
+        dequantized = (input - zero_point) * scale
 
-    return input
+    if output_code is not None:
+        dequantized = vmap(dequantized, output_code)
+
+    return dequantized
 
 
 quantized_decomposed_lib.define(
@@ -359,8 +360,7 @@ def calculate_mx_qparam(
 
 quantized_decomposed_lib.define(
     "quantize_mx(Tensor self, Tensor code, SymInt[] axes, int block_size, float quant_max, "
-    "bool force_scale_power_of_two=False, str dtype=None, Tensor scale_code=None, "
-    "Tensor quant_code=None) -> (Tensor, Tensor)"
+    "bool force_scale_power_of_two=False, Tensor scale_code=None, Tensor quant_code=None) -> (Tensor, Tensor)"
 )
 
 
@@ -372,7 +372,6 @@ def quantize_mx(
     block_size: int,
     quant_max: float,
     force_scale_power_of_two: bool = False,
-    dtype: str = None,
     scale_code: Optional[torch.Tensor] = None,
     quant_code: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor]:
@@ -384,7 +383,7 @@ def quantize_mx(
         force_scale_power_of_two=force_scale_power_of_two,
         code=scale_code,
     )
-    input = quantize(input, code, scale, dtype=dtype, block_size=block_size)
+    input = quantize(input, code, scale, block_size=block_size)
     return scale, input
 
 

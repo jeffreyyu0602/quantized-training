@@ -363,7 +363,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize.default,
                 (node.args[0], get_attr_node, qparam_node),
-                {"dtype": activation_post_process.dtype}
+                {}
             )
 
         # source_fn_stack is used by get_source_partitions to find nodes with a given op
@@ -405,10 +405,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                     qparam_node = create_getattr_from_value(
                         model, graph, user_node.name + "_scale", scale)
                     get_attr_node = create_getattr_from_value(model, graph, "code", code)
-                    dq_inputs = [user_node, qparam_node, output_dtype, get_attr_node]
                     dequantized_node = graph.call_function(
                         torch.ops.quantized_ops.dequantize.default,
-                        tuple(dq_inputs),
+                        (user_node, qparam_node, None, None, get_attr_node),
                         {}
                     )
 
@@ -434,10 +433,9 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
             with graph.inserting_before(quantized_node.next):
                 qparam_node = create_getattr_from_value(
                     model, graph, user_node.name + "_scale", scale)
-                dq_inputs = [quantized_node, qparam_node, None, None]
                 dequantized_node = graph.call_function(
                     torch.ops.quantized_ops.dequantize.default,
-                    tuple(dq_inputs),
+                    (quantized_node, qparam_node),
                     {}
                 )
 
@@ -537,7 +535,6 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             param.data,
             activation_post_process.code,
             scale,
-            dtype=activation_post_process.dtype,
             block_size=activation_post_process.block_size,
         )
 
@@ -560,39 +557,28 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 scale_code_node = create_getattr_from_value(
                     model, model.graph, "code", activation_post_process.scale_code)
 
-            quantize_mx_inputs = [
-                node_to_quantize,
-                get_attr_node,
-                activation_post_process.ch_axis,
-                activation_post_process.block_size,
-                activation_post_process.quant_max,
-                activation_post_process.force_scale_power_of_two,
-                activation_post_process.dtype,
-                scale_code_node,
-                quant_code,
-            ]
-
             quantize_mx_node = model.graph.call_function(
                 torch.ops.quantized_ops.quantize_mx.default,
-                tuple(quantize_mx_inputs),
-                {}
+                (
+                    node_to_quantize,
+                    get_attr_node,
+                    activation_post_process.ch_axis,
+                    activation_post_process.block_size,
+                    activation_post_process.quant_max,
+                    activation_post_process.force_scale_power_of_two,
+                    scale_code_node,
+                    quant_code,
+                ),
             )
-            scale_node = graph.create_node(
-                "call_function",
-                operator.getitem,
-                (quantize_mx_node, 0),
-                {}
-            )
-            quantized_node = graph.create_node(
-                "call_function",
-                operator.getitem,
-                (quantize_mx_node, 1),
-                {}
-            )
+            scale_node = graph.call_function(operator.getitem, (quantize_mx_node, 0))
+            quantized_node = graph.call_function(operator.getitem, (quantize_mx_node, 1))
 
         quantize_mx_node.meta["dtype"] = (
-            ("fp8_e8m0" if activation_post_process.force_scale_power_of_two
-                else activation_post_process.scale_dtype),
+            (
+                "fp8_e8m0"
+                if activation_post_process.force_scale_power_of_two
+                else activation_post_process.scale_dtype
+            ),
             activation_post_process.dtype,
         )
 
@@ -627,12 +613,14 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             )
             quantized_node = model.graph.call_function(
                 torch.ops.quantized_ops.quantize.default,
-                (input_node, get_attr_node, scale_node),
-                {
-                    "dtype": activation_post_process.dtype,
-                    "block_size": activation_post_process.block_size,
-                    "quant_code": quant_code,
-                }
+                (
+                    input_node,
+                    get_attr_node,
+                    scale_node,
+                    None,
+                    activation_post_process.block_size,
+                    quant_code
+                ),
             )
 
         source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
@@ -660,22 +648,18 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         # Skip device alignment node
         if user.target == torch.Tensor.to:
             user_device = user.args[1]
-
             with graph.inserting_before(user):
                 if kwarg1 is not None:
                     kwarg1 = graph.call_function(
                         torch.Tensor.to, (dequant_code, user_device)
                     )
-
                 kwarg2 = graph.call_function(
                     torch.Tensor.to, (scale_node, user_device)
                 )
-
             user = next(iter(user.users))
 
         kwargs = OrderedDict(user.kwargs)
         kwargs.setdefault("block_size", activation_post_process.block_size)
-
         if input_node.op == 'get_attr' or id(quantized_node) == id(user.args[1]):
             kwargs.setdefault("weight_code", kwarg1)
             kwargs.setdefault("weight_scale", kwarg2)
@@ -768,7 +752,6 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
     input_node = node.args[0]
 
     if input_node.op == 'get_attr':
-        # quantize model parameter and remove the fq module
         try:
             param = model.get_parameter(input_node.target)
         except AttributeError:
@@ -776,16 +759,15 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
 
         activation_post_process(param.data)
         scale, zero_point = activation_post_process.calculate_qparams()
-
         scale = scale.to(param.data.dtype)
         zero_point = zero_point.to(param.data.dtype)
 
         weight = torch.ops.quantized_ops.quantize(
             param.data,
-            scale=scale,
-            zero_point=zero_point,
-            code=activation_post_process.code,
-            block_size=activation_post_process.block_size,
+            activation_post_process.code,
+            scale,
+            zero_point,
+            activation_post_process.block_size,
         )
 
         with graph.inserting_before(node):
@@ -804,8 +786,12 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
     with graph.inserting_before(node):
         dequantized_node = graph.call_function(
             torch.ops.quantized_ops.dequantize.default,
-            (quantized_node, scale_node, None, None, zero_point_node),
-            {"block_size": activation_post_process.block_size}
+            (
+                quantized_node,
+                scale_node,
+                zero_point_node,
+                activation_post_process.block_size,
+            ),
         )
 
     source_fn_st = dequantized_node.meta.setdefault("source_fn_stack", [])
@@ -959,29 +945,28 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
 
 
 def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
-    import operator
-
+    """
+    Fuses quantize and dequantize nodes in the model graph. Used for integer-only
+    ResNet models.
+    """
     graph = model.graph
-
     device = assert_and_get_unique_device(model)
 
-    partitions = get_source_partitions(
-        model.graph, [operator.add, torch.add, operator.iadd]
-    )
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
-        add_node = partition.output_nodes[0]
-        print(f"Add node: {add_node.name}")
+    for node in list(graph.nodes):
+        if node.target not in [torch.ops.aten.add.Tensor, torch.ops.aten.add_.Tensor]:
+            continue
+
+        add_node = node
 
         input_act0 = add_node.args[0]
         dq_scale0 = 1
         if input_act0.target == torch.ops.quantized_ops.dequantize.default:
-            dq_scale0 = model._buffers[input_act0.args[1].target].item()
+            dq_scale0 = model.get_buffer(input_act0.args[1].target).item()
 
         input_act1 = add_node.args[1]
         dq_scale1 = 1
         if input_act1.target == torch.ops.quantized_ops.dequantize.default:
-            dq_scale1 = model._buffers[input_act1.args[1].target].item()
+            dq_scale1 = model.get_buffer(input_act1.args[1].target).item()
 
         # If both inputs are not dequantize nodes, skip
         if dq_scale0 == 1 and dq_scale1 == 1:
@@ -1022,15 +1007,19 @@ def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
                 prev_node.target == torch.ops.quantized_ops.quantize.default and
                 len(prev_node.users) == 1
             ):
-                # If the previous node is a quantize node, simply update the dequantize scale.
-                # It will be later merged with the quantize node.
-                model.register_buffer(qparam_node.target, torch.tensor(new_scale, device=device))
-                print(f"Update scale for node: {node_to_remove.name} to {new_scale}\n")
+                # If the previous node is a quantize node, simply update the
+                # dequantize scale. It will later be merged with the quantize node.
+                model.register_buffer(
+                    qparam_node.target, torch.tensor(new_scale, device=device)
+                )
+                print(f"Update scale for node: {node_to_remove.name} to {new_scale}")
                 continue
             else:
                 # Else insert a quantize node before the dequantize node with 1 / scale
-                model.register_buffer(qparam_node.target, torch.tensor(1 / new_scale, device=device))
-                print(f"Update scale for node: {node_to_remove.name} to {new_scale}\n")
+                model.register_buffer(
+                    qparam_node.target, torch.tensor(1 / new_scale, device=device)
+                )
+                print(f"Update scale for node: {node_to_remove.name} to {new_scale}")
 
                 with graph.inserting_before(node_to_remove):
                     get_attr_node = create_getattr_from_value(
@@ -1038,37 +1027,41 @@ def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
                     quantized_node = graph.call_function(
                         torch.ops.quantized_ops.quantize.default,
                         (node_to_remove.args[0], get_attr_node, qparam_node),
-                        {"dtype": output_dtype}
+                        {}
                     )
                 node_to_remove.replace_all_uses_with(quantized_node)
 
                 graph.erase_node(node_to_remove)
 
-    partitions = get_source_partitions(
-        model.graph, [torch.ops.quantized_ops.dequantize.default]
-    )
-    partitions = list(itertools.chain.from_iterable(partitions.values()))
-    for partition in partitions:
-        dequantized_node = partition.output_nodes[0]
-        dq_scale = model._buffers[dequantized_node.args[1].target].item()
-        print(f"Dequantize node: {dequantized_node.name}")
+    for node in list(graph.nodes):
+        if node.target != torch.ops.quantized_ops.dequantize.default:
+            continue
+
+        dequantized_node = node
+        dq_scale = model.get_buffer(dequantized_node.args[1].target).item()
 
         # Try to merge the dequantize node with the previous quantize node
-        prev_node = dequantized_node.all_input_nodes[0]
-        if prev_node.target == torch.ops.quantized_ops.quantize.default and len(prev_node.users) == 1:
-            qparam_node = prev_node.args[1]
-            q_scale = model._buffers[qparam_node.target].item()
-
-            model.register_buffer(qparam_node.target, torch.tensor(q_scale / dq_scale, device=device))
-            print(f"New quantize scale: {q_scale / dq_scale}\n")
+        prev_node = dequantized_node.args[0]
+        if (
+            prev_node.target == torch.ops.quantized_ops.quantize.default
+            and len(prev_node.users) == 1
+        ):
+            qparam_node = prev_node.args[2]
+            q_scale = model.get_buffer(qparam_node.target).item()
+            model.register_buffer(
+                qparam_node.target, torch.tensor(q_scale / dq_scale, device=device)
+            )
+            print(f"New quantize scale: {q_scale / dq_scale}")
 
             # Update quantization data type
-            get_attr_node = prev_node.args[3]
-            model.register_buffer(get_attr_node.target, get_quantization_map(output_dtype, device))
+            get_attr_node = prev_node.args[1]
+            model.register_buffer(
+                get_attr_node.target, get_quantization_map(output_dtype, device)
+            )
 
-            prev_node.args = (prev_node.args[0], qparam_node, output_dtype, get_attr_node)
+            prev_node.args = (prev_node.args[0], get_attr_node, qparam_node)
 
-            dequantized_node.replace_all_uses_with(dequantized_node.args[0])
+            dequantized_node.replace_all_uses_with(prev_node)
             graph.erase_node(dequantized_node)
             continue
 
@@ -1094,16 +1087,14 @@ def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
             continue
 
         qparam_node = next_node.args[1]
-        q_scale = model._buffers[qparam_node.target].item()
-
+        q_scale = model.get_buffer(qparam_node.target).item()
         model.register_buffer(qparam_node.target, torch.tensor(q_scale / dq_scale, device=device))
-        print(f"Update scale for node: {next_node.name} to {q_scale / dq_scale}\n")
+        print(f"Update scale for node: {next_node.name} to {q_scale / dq_scale}")
 
         dequantized_node.replace_all_uses_with(dequantized_node.args[0])
         graph.erase_node(dequantized_node)
 
     graph.lint()
-
     graph.eliminate_dead_code()
     model.recompile()
 
