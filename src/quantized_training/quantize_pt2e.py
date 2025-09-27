@@ -868,6 +868,7 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
 
             # stack and cat are handled above, so we can safely assume that
             # they won't appear here and there is only one input node
+            # TODO: group-wise Q and DQ cannot be moved past reshape ops
             if (
                 not is_nop(prev_node)
                 and not is_reshape_op(prev_node)
@@ -890,18 +891,19 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         if id(prev_node) == id(node.args[0]):
             return None
 
-        user = next(iter(prev_node.users))
-        with model.graph.inserting_before(user):
-            qparam_node = graph.node_copy(node.args[1])
-            get_attr_node = graph.node_copy(node.args[3])
-            quantize_op_inputs = [prev_node, qparam_node, node.args[2], get_attr_node]
-            new_node = graph.call_function(node.target, tuple(quantize_op_inputs), {})
+        value_remap = {node.args[0]: prev_node}
+        with graph.inserting_before(prev_node.next):
+            for n in node.all_input_nodes:
+                if n.op == "get_attr" and n.target not in value_remap:
+                    value_remap[n] = graph.node_copy(n)
+            new_node = graph.node_copy(node, lambda n: value_remap[n])
 
-        propagate_shape(qparam_node, model)
-        propagate_shape(get_attr_node, model)
+        for n in value_remap.values():
+            propagate_shape(n, model)
         propagate_shape(new_node, model)
 
-        user.replace_input_with(prev_node, new_node)
+        prev_node.replace_all_uses_with(new_node)
+        new_node.replace_input_with(new_node, prev_node)
 
         # Copy meta data from the original node, specifically dtype and source_fn_stack
         new_node.meta = {
@@ -950,7 +952,6 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         graph.erase_node(output_node)
 
     graph.lint()
-
     graph.eliminate_dead_code()
     model.recompile()
 
