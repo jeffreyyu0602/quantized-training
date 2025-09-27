@@ -128,17 +128,17 @@ def quantize(
     from floating point to quantized values
 
     Args:
-       input (torch.Tensor): original float32 or bfloat16 Tensor
-       code (torch.Tensor): quantization map for mapping from float to quantized values
-       scale (torch.Tensor): quantization parameter for quantization
-       zero_point (torch.Tensor): zero point for quantization, default is None
-       dtype (str): requested dtype (e.g. int8) for output Tensor
-       block_size (int): block size for microscaling, default is None
-       quant_code (torch.Tensor): codebook for quantizing the input
+        input (torch.Tensor): original float32 or bfloat16 Tensor
+        code (torch.Tensor): quantization map for mapping from float to quantized values
+        scale (torch.Tensor): quantization parameter for quantization
+        zero_point (torch.Tensor): zero point for quantization, default is None
+        dtype (str): requested dtype (e.g. int8) for output Tensor
+        block_size (int): block size for microscaling, default is None
+        quant_code (torch.Tensor): codebook for quantizing the input
 
     Returns:
-       Tensor with requested dtype (e.g. int8), note the quantization parameters
-       are not stored in the Tensor, we are storing them in function arguments instead
+        Tensor with requested dtype (e.g. int8), note the quantization parameters
+        are not stored in the Tensor, we are storing them in function arguments instead
     """
 
     if block_size is not None:
@@ -155,7 +155,7 @@ def quantize(
 
 
 quantized_decomposed_lib.define(
-    "dequantize(Tensor input, Tensor scale, str? dtype=None, Tensor code=None, Tensor? zero_point=None) -> Tensor"
+    "dequantize(Tensor input, Tensor scale, str? dtype=None, Tensor code=None, Tensor? zero_point=None, int? block_size=None) -> Tensor"
 )
 
 
@@ -166,23 +166,31 @@ def dequantize(
     dtype: Optional[str] = None,
     code: Optional[torch.Tensor] = None,
     zero_point: Optional[torch.Tensor] = None,
+    block_size: Optional[int] = None,
 ) -> torch.Tensor:
     """ Dequantization for the Tensor using the same quantization parameters to map
     from floating point to quantized values
 
     Args:
-       input (torch.Tensor): original float32 or bfloat16 Tensor
-       scale (torch.Tensor): quantization parameter for affine quantization
-       dtype (str): requested dtype (e.g. int24) for input Tensor
-       code (torch.Tensor): quantization map for mapping from float to quantized values
+        input (torch.Tensor): original float32 or bfloat16 Tensor
+        scale (torch.Tensor): quantization parameter for affine quantization
+        dtype (str): requested dtype (e.g. int24) for input Tensor
+        code (torch.Tensor): quantization map for mapping from float to quantized values
+        zero_point (torch.Tensor): zero point for quantization, default is None
+        block_size (int): block size for microscaling, default is None
 
     Returns:
-       Tensor with floating point types, note the quantization parameters
-       are not stored in the Tensor, we are storing them in function arguments instead
+        Tensor with floating point types, note the quantization parameters
+        are not stored in the Tensor, we are storing them in function arguments instead
     """
 
     if code is not None:
         input = vmap(input, code)
+
+    if block_size is not None:
+        scale = expand(scale, input.shape, block_size)
+        if zero_point is not None:
+            zero_point = expand(zero_point, input.shape, block_size)
 
     if zero_point is None:
         input = input * scale

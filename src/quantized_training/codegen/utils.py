@@ -374,6 +374,7 @@ def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
         output_node.replace_all_uses_with(new_node)
         original_graph.erase_node(output_node)
 
+        new_node.meta = output_node.meta
         new_node.meta["source_fn_stack"] = [(new_node.name, "layer_norm")]
 
     original_graph.lint()

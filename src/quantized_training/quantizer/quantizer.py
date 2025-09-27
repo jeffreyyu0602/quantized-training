@@ -35,7 +35,7 @@ ABBREV_MAP = {
 def parse_int_or_list(value: str):
     value = value.strip()
     if value.startswith("(") and value.endswith(")"):
-        parts = [int(v.strip()) for v in value[1:-1].split(',')]
+        parts = tuple(int(v.strip()) for v in value[1:-1].split(','))
         return parts
     return int(value)
 

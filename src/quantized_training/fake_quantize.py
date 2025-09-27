@@ -291,7 +291,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.quant_min = quant_min
         self.quant_max = quant_max
         self.amax_history_len = amax_history_len
-        self.ch_axis = (ch_axis,) if isinstance(ch_axis, int) else ch_axis
+        self.ch_axis = ch_axis
         self.block_size = block_size
         self.scale_dtype = scale_dtype
         self.force_scale_power_of_two = force_scale_power_of_two

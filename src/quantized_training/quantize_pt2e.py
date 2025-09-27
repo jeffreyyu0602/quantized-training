@@ -469,6 +469,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     input_dtype = activation_post_process.dtype
     node_to_quantize = input_node
 
+    if isinstance(activation_post_process.ch_axis, int):
+        activation_post_process.ch_axis = (activation_post_process.ch_axis,)
+
     if activation_post_process.outlier_threshold is not None:
         assert input_node.op != "get_attr", (
             "Outlier suppression is not supported for weight quantization."
@@ -539,50 +542,14 @@ def _replace_observer_with_quantize_mx_node_decomposed(
         )
 
         with graph.inserting_before(node):
-            scale_node = create_getattr_from_value(
-                model, graph, input_node.name + "_scale", scale)
             quantized_node = create_getattr_from_value(
                 model, graph, input_node.name + "_" + input_dtype, weight)
-    elif activation_post_process.ch_axis == -2:
-        with model.graph.inserting_before(node):
-            calculate_qparam_op_inputs = [
-                input_node,
-                activation_post_process.ch_axis,
-                activation_post_process.block_size,
-                activation_post_process.quant_max,
-                activation_post_process.force_scale_power_of_two,
-            ]
-
-            if activation_post_process.scale_code is not None:
-                get_attr_node = create_getattr_from_value(
-                    model, model.graph, "code", activation_post_process.scale_code)
-                calculate_qparam_op_inputs.append(get_attr_node)
-
-            scale_node = model.graph.call_function(
-                torch.ops.quantized_ops.calculate_mx_qparam.default,
-                tuple(calculate_qparam_op_inputs),
-                {}
-            )
-
-            if activation_post_process.scale_dtype is not None:
-                scale_node.meta["dtype"] = activation_post_process.scale_dtype
-
-            get_attr_node = create_getattr_from_value(
-                model, model.graph, "code", activation_post_process.code,
-            )
-            quantized_node = model.graph.call_function(
-                torch.ops.quantized_ops.quantize.default,
-                (input_node, get_attr_node, scale_node),
-                {
-                    "dtype": activation_post_process.dtype,
-                    "block_size": activation_post_process.block_size,
-                    "quant_code": quant_code,
-                }
-            )
-
-        source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
-        source_fn_st.append((quantized_node.name, quantized_node.target))
-    else:
+            scale_node = create_getattr_from_value(
+                model, graph, input_node.name + "_scale", scale)
+    elif (
+        len(activation_post_process.ch_axis) == 1 and
+        activation_post_process.ch_axis[0] in (-1, input_node.meta["val"].ndim - 1)
+    ):
         with model.graph.inserting_before(node):
             get_attr_node = create_getattr_from_value(
                 model, model.graph, "code", activation_post_process.code,
@@ -631,6 +598,45 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
         source_fn_st = quantize_mx_node.meta.setdefault("source_fn_stack", [])
         source_fn_st.append((quantize_mx_node.name, quantize_mx_node.target))
+    else:
+        with model.graph.inserting_before(node):
+            calculate_qparam_op_inputs = [
+                input_node,
+                activation_post_process.ch_axis,
+                activation_post_process.block_size,
+                activation_post_process.quant_max,
+                activation_post_process.force_scale_power_of_two,
+            ]
+
+            if activation_post_process.scale_code is not None:
+                get_attr_node = create_getattr_from_value(
+                    model, model.graph, "code", activation_post_process.scale_code)
+                calculate_qparam_op_inputs.append(get_attr_node)
+
+            scale_node = model.graph.call_function(
+                torch.ops.quantized_ops.calculate_mx_qparam.default,
+                tuple(calculate_qparam_op_inputs),
+                {}
+            )
+
+            if activation_post_process.scale_dtype is not None:
+                scale_node.meta["dtype"] = activation_post_process.scale_dtype
+
+            get_attr_node = create_getattr_from_value(
+                model, model.graph, "code", activation_post_process.code,
+            )
+            quantized_node = model.graph.call_function(
+                torch.ops.quantized_ops.quantize.default,
+                (input_node, get_attr_node, scale_node),
+                {
+                    "dtype": activation_post_process.dtype,
+                    "block_size": activation_post_process.block_size,
+                    "quant_code": quant_code,
+                }
+            )
+
+        source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
+        source_fn_st.append((quantized_node.name, quantized_node.target))
 
     quantized_node.meta["dtype"] = activation_post_process.dtype
 
@@ -757,9 +763,9 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
     assert modules is not None
     assert isinstance(node.target, str)
     activation_post_process = modules[node.target]
+    device = assert_and_get_unique_device(activation_post_process)
 
     input_node = node.args[0]
-    device = assert_and_get_unique_device(activation_post_process)
 
     if input_node.op == 'get_attr':
         # quantize model parameter and remove the fq module
@@ -783,24 +789,23 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
         )
 
         with graph.inserting_before(node):
+            quantized_node = create_getattr_from_value(
+                model, graph, input_node.name + "_" + activation_post_process.dtype, weight)
             scale_node = create_getattr_from_value(
                 model, graph, input_node.name + "_scale", scale)
             zero_point_node = create_getattr_from_value(
                 model, graph, input_node.name + "_zero_point", zero_point)
-            quantized_node = create_getattr_from_value(
-                model, graph, input_node.name + "_" + activation_post_process.dtype, weight)
     else:
         raise NotImplementedError
 
     quantized_node.meta["dtype"] = activation_post_process.dtype
 
     # Insert a dequantize node after the quantize node
-    with graph.inserting_before(quantized_node.next):
-        dq_inputs = [quantized_node, scale_node, None, None, zero_point_node]
+    with graph.inserting_before(node):
         dequantized_node = graph.call_function(
             torch.ops.quantized_ops.dequantize.default,
-            tuple(dq_inputs),
-            {}
+            (quantized_node, scale_node, None, None, zero_point_node),
+            {"block_size": activation_post_process.block_size}
         )
 
     source_fn_st = dequantized_node.meta.setdefault("source_fn_stack", [])
@@ -808,6 +813,9 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
 
     node.replace_all_uses_with(dequantized_node)
     graph.erase_node(node)
+
+    if input_node.op == 'get_attr':
+        graph.erase_node(input_node)
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
