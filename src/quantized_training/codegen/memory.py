@@ -120,6 +120,7 @@ class MemoryAllocator:
                 torch.ops.aten.layer_norm.default,
             ))
 
+            # TODO: handle the case where one node has multiple users
             if not is_scratch_output and user is not None:
                 input_node = user.args[0]
                 input_node = input_node.meta.get('source_node', input_node)

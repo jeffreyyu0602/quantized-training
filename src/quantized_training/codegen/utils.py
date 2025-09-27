@@ -27,6 +27,8 @@ from .mapping_utils import (
     is_nop,
     is_reshape_op,
     is_indexing_or_concatenation_op,
+    is_conv2d,
+    is_depthwise_conv,
 )
 from ..pt2e_utils import get_aten_graph_module
 from ..quantize_pt2e import create_getattr_from_value, export_model
@@ -792,24 +794,6 @@ def conv2d_transposed(
     return output.permute(0, 2, 3, 1)
 
 
-def is_conv2d(node: Node) -> bool:
-    return node.op == "call_function" and node.target in [
-        torch.ops.aten.conv2d.default,
-        torch.ops.quantized_ops.conv2d_mx.default
-    ]
-
-
-def is_depthwise_conv(node: Node) -> bool:
-    return (
-        node.target in [
-            torch.ops.aten.conv2d.default,
-            torch.ops.quantized_ops.conv2d_mx.default
-        ] and
-        len(node.args) == 7 and
-        node.args[6] != 1
-    )
-
-
 def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited: Set[Node]) -> Set[Node]:
     """DFS downstream traversal to find conv2d nodes connected through elementwise ops."""
     stack = [start]
@@ -829,6 +813,7 @@ def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited:
                 torch.ops.aten.max_pool2d.default,
                 torch.ops.aten.slice.Tensor,
                 torch.ops.aten.pad.default,
+                torch.ops.quantized_ops.calculate_mx_qparam.default,
                 torch.ops.quantized_ops.quantize_mx.default,
                 operator.getitem,
             ]:
@@ -988,8 +973,15 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 )
                 node_in_chain.args = (node_in_chain.args[0], pad) + node_in_chain.args[2:]
 
+            if node_in_chain.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
+                axes = node_in_chain.args[1]
+                assert len(axes) == 1 and axes[0] == 1, f"Unexpected dim {axes} in {node_in_chain}"
+                node_in_chain.args = node_in_chain.args[:1] + ((-1,),) + node_in_chain.args[2:]
+
             if node_in_chain.target == torch.ops.quantized_ops.quantize_mx.default:
-                node_in_chain.args = node_in_chain.args[:1] + (-1,) + node_in_chain.args[2:]
+                axes = node_in_chain.args[2]
+                assert len(axes) == 1 and axes[0] == 1, f"Unexpected dim {axes} in {node_in_chain}"
+                node_in_chain.args = node_in_chain.args[:2] + ((-1,),) + node_in_chain.args[3:]
 
             if node_in_chain.target == torch.ops.aten.conv2d.default:
                 with graph.inserting_before(node_in_chain):

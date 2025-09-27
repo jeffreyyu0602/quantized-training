@@ -1,5 +1,4 @@
 import copy
-import itertools
 import operator
 import re
 from collections import OrderedDict
@@ -10,17 +9,8 @@ import torch
 from torch import Tensor
 from torch.ao.quantization import ObserverOrFakeQuantize
 from torch.ao.quantization.fx.utils import assert_and_get_unique_device
-from torch.ao.quantization.quantizer import (
-    EdgeOrNode,
-    SharedQuantizationSpec,
-    QuantizationSpecBase,
-)
-from torch.fx import (
-    GraphModule,
-    Graph,
-    Node,
-)
-from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
+from torch.ao.quantization.quantizer import EdgeOrNode, QuantizationSpecBase
+from torch.fx import GraphModule, Graph, Node
 
 import quantized_training as qt
 from quantized_training.fake_quantize import (
@@ -37,6 +27,7 @@ from .codegen.mapping_utils import (
     is_indexing_or_concatenation_op,
     is_nop,
     is_reshape_op,
+    is_conv2d,
 )
 from .decomposed import quantized_decomposed_lib
 
@@ -470,6 +461,21 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     if isinstance(activation_post_process.ch_axis, int):
         activation_post_process.ch_axis = (activation_post_process.ch_axis,)
 
+    # Can only fuse scale calculation with quantization if along the last dim
+    fuse_with_quantize = False
+    if len(activation_post_process.ch_axis) == 1:
+        axis = activation_post_process.ch_axis[0]
+        if any(is_conv2d(user) for user in node.users):
+            fuse_with_quantize = axis in (1, -3)
+        else:
+            fuse_with_quantize = (
+                axis == -1
+                or (
+                    "val" in input_node.meta
+                    and axis == input_node.meta["val"].ndim - 1
+                )
+            )
+
     if activation_post_process.outlier_threshold is not None:
         assert input_node.op != "get_attr", (
             "Outlier suppression is not supported for weight quantization."
@@ -543,10 +549,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 model, graph, input_node.name + "_" + input_dtype, weight)
             scale_node = create_getattr_from_value(
                 model, graph, input_node.name + "_scale", scale)
-    elif (
-        len(activation_post_process.ch_axis) == 1 and
-        activation_post_process.ch_axis[0] in (-1, input_node.meta["val"].ndim - 1)
-    ):
+    elif fuse_with_quantize:
         with model.graph.inserting_before(node):
             get_attr_node = create_getattr_from_value(
                 model, model.graph, "code", activation_post_process.code,

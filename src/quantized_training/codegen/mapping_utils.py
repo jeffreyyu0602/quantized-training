@@ -271,6 +271,33 @@ def is_gemm_op(node: Node) -> bool:
     ]
 
 
+def is_conv2d(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.conv2d.default,
+        torch.ops.quantized_ops.conv2d.default,
+        torch.ops.quantized_ops.conv2d_mx.default
+    ]
+
+
+def is_depthwise_conv(node: Node) -> bool:
+    return (
+        node.target in [
+            torch.ops.aten.conv2d.default,
+            torch.ops.quantized_ops.conv2d_mx.default
+        ] and
+        len(node.args) == 7 and
+        node.args[6] != 1
+    )
+
+
+def is_linear(node: Node) -> bool:
+    return node.target in [
+        torch.ops.aten.linear.default,
+        torch.ops.quantized_ops.linear.default,
+        torch.ops.quantized_ops.linear_mx.default,
+    ]
+
+
 def is_matmul(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.matmul.default,
