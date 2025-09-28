@@ -1472,7 +1472,8 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    # Stage 1: pick a reduction-dim tile that fits in a bank
+    # Stage 1: pick a reduction dim that fits in a bank
+    c_outer = 1
     if bank_size is not None:
         for (xt, ct, kt), _ in get_valid_tiling(
             (X, C, K),
@@ -1480,30 +1481,30 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
             fixed_dims=(0, 2)
         ):
             if min(128, X) * ct * get_node_bytes(node.args[0]) <= bank_size:
-                C = ct
+                c_outer = C // ct
                 break
 
-    # Stage 2: search tilings for (X, Ct, K) in given order
-    for (xt, ct, kt), _ in get_valid_tiling(
-        (X, C, K),
+    # Stage 2: search tilings for (X, C, K) in given order
+    for (xt, ct, kt), (x_factor, c_factor, k_factor) in get_valid_tiling(
+        (X, C // c_outer, K),
         min_sizes=(1, unroll_dims[0], unroll_dims[1]),
         order=(2, 0, 1),
     ):
         total_size = calculate_gemm_tile_size(
-            node, X // xt, C // ct, K // kt, bank_size
+            node, x_factor, c_outer * c_factor, k_factor, bank_size
         )
 
         if total_size <= max_mem_bytes:
             return xt, ct, kt
 
     # Stage 3: search tilings without bank constraint
-    for (xt, ct, kt), _ in get_valid_tiling(
-        (X, C, K),
+    for (xt, ct, kt), (x_factor, c_factor, k_factor) in get_valid_tiling(
+        (X, C // c_outer, K),
         min_sizes=(1, unroll_dims[0], unroll_dims[1]),
         order=(2, 0, 1),
     ):
         total_size = calculate_gemm_tile_size(
-            node, X // xt, C // ct, K // kt,
+            node, x_factor, c_outer * c_factor, k_factor, bank_size=None
         )
 
         if total_size <= max_mem_bytes:
