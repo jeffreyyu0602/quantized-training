@@ -1415,7 +1415,8 @@ def get_valid_tiling(
     if fixed_dims is not None:
         fixed.update(dims + d if d < 0 else d for d in fixed_dims)
     if last_dim is not None:
-        fixed.add(dims + last_dim if last_dim < 0 else last_dim)
+        ld = dims + last_dim if last_dim < 0 else last_dim
+        fixed.update(d for d in range(ld, dims))
 
     # Order of dimensions to traverse
     if order is not None:
@@ -1501,6 +1502,19 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
     ):
         total_size = calculate_gemm_tile_size(
             node, X // xt, C // ct, K // kt, bank_size
+        )
+
+        if total_size <= max_mem_bytes:
+            return xt, ct, kt
+
+    # Stage 3: search tilings without bank constraint
+    for (xt, ct, kt), _ in get_valid_tiling(
+        (X, C, K),
+        min_sizes=(1, unroll_dims[0], unroll_dims[1]),
+        order=(2, 0, 1),
+    ):
+        total_size = calculate_gemm_tile_size(
+            node, X // xt, C // ct, K // kt,
         )
 
         if total_size <= max_mem_bytes:
@@ -1812,7 +1826,9 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         found_tiling = False
 
-        for tiled_output_shape, tiling in get_valid_tiling(output_shape, last_dim=last_dim):
+        for tiled_output_shape, tiling in get_valid_tiling(
+            output_shape, last_dim=last_dim, min_sizes=(unroll,)
+        ):
             node_to_key = get_node_to_key(node)
             tiled_shapes = {}
 

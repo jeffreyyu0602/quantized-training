@@ -696,14 +696,16 @@ def _fuse_reshape_with_input_impl(
 
     fused_nodes.append(current_node)
 
-    # Base case: check if fusion is valid
-    if (
-        is_gemm_op(current_node) and
-        (is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)) and
-        "tiled_shapes" not in current_node.meta
-    ) or (
+    # Check if fusion is valid
+    has_no_tiled_shapes = "tiled_shapes" not in current_node.meta
+    is_gemm_case = is_gemm_op(current_node) and (
+        is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)
+    )
+    is_elementwise_case = (
         is_elementwise_op(current_node) and not is_tranpose(reshape_node)
-    ):
+    )
+
+    if has_no_tiled_shapes and (is_gemm_case or is_elementwise_case):
         if simulate:
             return True
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
@@ -950,10 +952,14 @@ def fuse_operator(
 
                 for n in fused_reshape_nodes:
                     if n.target == torch.ops.aten.transpose.int:
-                        move_transpose_after_select(graph, fused_nodes_list, nodes_map, n)
+                        move_transpose_after_select(
+                            graph, fused_nodes_list, nodes_map, n
+                        )
 
     for node in list(graph.nodes):
-        if node.target not in [torch.ops.aten.slice.Tensor, torch.ops.aten.select.int]:
+        if node.target not in [
+            torch.ops.aten.slice.Tensor, torch.ops.aten.select.int
+        ]:
             continue
 
         if (
