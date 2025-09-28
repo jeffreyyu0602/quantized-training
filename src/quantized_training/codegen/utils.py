@@ -399,7 +399,7 @@ def replace_target_with_vmap(
 
             with model.graph.inserting_before(node):
                 get_attr_node = create_getattr_from_value(
-                    model, model.graph, f'_tensor_constant_', code
+                    model, model.graph, '_tensor_constant_', code
                 )
 
             nodes_map[node.target] = get_attr_node
@@ -1379,6 +1379,74 @@ def rewrite_fx_graph(model: torch.fx.GraphModule, fn: Callable):
     return model
 
 
+def get_valid_tiling(
+    input_shape,
+    fixed_dims=None,
+    last_dim=None,
+    reverse=False,
+    min_sizes=None,
+    order=None,
+):
+    """
+    Yields tile shapes by progressively reducing dimensions in a specified order.
+    Once a dimension is reduced to its minimum size, it stays fixed. Certain dims
+    can be explicitly fixed, or you can specify a single `last_dim` as a shortcut.
+
+    Args:
+        input_shape (tuple): The original shape.
+        fixed_dims (list or tuple, optional): Indices of dims that should remain fixed.
+        last_dim (int, optional): Convenience arg: fix a single dim (e.g., -1 for last).
+        reverse (bool): If True, reverse the traversal order (ignored if order is given).
+        min_sizes (tuple or list, optional): Minimum size / multiple for each dimension
+                                             (default is 1).
+        order (list or tuple, optional): Explicit order of dimension indices to reduce.
+                                         Example: (2,0,1) means dim2 → dim0 → dim1.
+    """
+    def get_factors(n, min_size):
+        return [i for i in range(n, min_size - 1, -1) if n % i == 0]
+
+    def get_tiling(full_shape, tiled_shape):
+        return tuple(f // t for f, t in zip(full_shape, tiled_shape))
+
+    dims = len(input_shape)
+
+    # Normalize fixed dims
+    fixed = set()
+    if fixed_dims is not None:
+        fixed.update(dims + d if d < 0 else d for d in fixed_dims)
+    if last_dim is not None:
+        fixed.add(dims + last_dim if last_dim < 0 else last_dim)
+
+    # Order of dimensions to traverse
+    if order is not None:
+        dim_order = list(order)
+    else:
+        dim_order = list(range(dims))
+        if reverse:
+            dim_order = dim_order[::-1]
+
+    # Apply default min sizes
+    if min_sizes is None:
+        min_sizes = [1] * dims
+    else:
+        min_sizes = [1] * (dims - len(min_sizes)) + list(min_sizes)
+
+    current = list(input_shape)
+    yield tuple(current), get_tiling(input_shape, tuple(current))
+
+    for dim in dim_order:
+        if dim in fixed:
+            continue
+
+        factors = get_factors(input_shape[dim], min_sizes[dim])
+        for f in factors[1:]:  # skip full-size factor
+            if f % min_sizes[dim] != 0:
+                continue  # enforce unroll multiple
+            current[dim] = f
+            yield tuple(current), get_tiling(input_shape, tuple(current))
+        current[dim] = max(min_sizes[dim], 1)  # lock at min size
+
+
 def calculate_gemm_tile_size(node, x_factor, c_factor, k_factor, bank_size=None):
     def node_mem(n, tiles):
         size = get_node_bytes(n) * n.value.numel() / tiles
@@ -1414,37 +1482,34 @@ def choose_tile(node, X, C, K, max_mem_bytes, unroll_dims, bank_size=None):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    def snap(x, unroll):
-        return int((x // unroll) * unroll)
+    # Stage 1: pick a reduction-dim tile that fits in a bank
+    if bank_size is not None:
+        for (xt, ct, kt), _ in get_valid_tiling(
+            (X, C, K),
+            min_sizes=(1, unroll_dims[0], unroll_dims[1]),
+            fixed_dims=(0, 2)
+        ):
+            if min(128, X) * ct * get_node_bytes(node.args[0]) <= bank_size:
+                C = ct
+                break
 
-    x_tiled = X
-    c_tiled = snap(C, unroll_dims[0])
-    k_tiled = snap(K, unroll_dims[1])
-
-    # Shrink output channel dim first, then reduction dim, then input dim
-    while True:
+    # Stage 2: search tilings for (X, Ct, K) in given order
+    for (xt, ct, kt), _ in get_valid_tiling(
+        (X, C, K),
+        min_sizes=(1, unroll_dims[0], unroll_dims[1]),
+        order=(2, 0, 1),
+    ):
         total_size = calculate_gemm_tile_size(
-            node, X // x_tiled, C // c_tiled, K // k_tiled, bank_size
+            node, X // xt, C // ct, K // kt, bank_size
         )
 
-        # Ensure each buffer load fits in a single bank
-        # TODO: should use actual tiling factor instead of 128
-        if 128 * c_tiled * get_node_bytes(node.args[0]) > bank_size:
-            c_tiled = snap(c_tiled // 2, unroll_dims[0])
-
         if total_size <= max_mem_bytes:
-            break
+            return xt, ct, kt
 
-        if k_tiled > unroll_dims[1]:
-            k_tiled = snap(k_tiled / 2, unroll_dims[1])
-        elif x_tiled > 128:
-            x_tiled = int(x_tiled / 2)
-        elif c_tiled > unroll_dims[0]:
-            c_tiled = snap(c_tiled / 2, unroll_dims[0])
-        else:
-            raise ValueError(f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}.")
-
-    return x_tiled, c_tiled, k_tiled
+    # If no valid tiling found
+    raise ValueError(
+        f"Cannot tile X={X}, C={C}, K={K} to fit cache size {max_mem_bytes}."
+    )
 
 
 def _prime_factors(n: int):
@@ -1516,7 +1581,7 @@ def slice_tensor(node, dim, start, end, model):
         sliced_data = param.data.narrow(dim, start, end - start)
 
         tiled_node = create_getattr_from_value(
-            model, graph, node.target + "_", sliced_data
+            model, graph, node.target + "_tiled", sliced_data
         )
         tiled_node.value = sliced_data
         tiled_node.meta["dtype"] = node.meta.get("dtype")
@@ -1689,57 +1754,6 @@ def run_matrix_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_ba
     return model
 
 
-def get_valid_tiling(
-    input_shape,
-    fix_last_dim=False,
-    last_dim=-1,
-    reverse=False,
-    min_sizes=None,
-):
-    """
-    Yields tile shapes by progressively reducing from outermost to innermost (or reverse).
-    Once a dimension is reduced to 1, it stays fixed. Last dim can be fixed optionally.
-    
-    Args:
-        input_shape (tuple): The original shape.
-        fix_last_dim (bool): Whether to keep the last_dim fixed.
-        last_dim (int): Index of the last dim to fix (can be negative).
-        reverse (bool): If True, traverse dimensions from innermost to outermost.
-        min_sizes (tuple or list): Minimum size allowed for each dimension (default is 1).
-    """
-    def get_factors(n, min_size):
-        return [i for i in range(n, min_size - 1, -1) if n % i == 0]
-
-    def get_tiling(full_shape, tiled_shape):
-        return tuple(f // t for f, t in zip(full_shape, tiled_shape))
-
-    dims = len(input_shape)
-    last_dim = min(last_dim) if isinstance(last_dim, (list, tuple)) else last_dim
-    last_dim = dims + last_dim if last_dim < 0 else last_dim
-    stop = last_dim if fix_last_dim else dims
-
-    # Directional order
-    dim_order = list(range(stop))
-    if reverse:
-        dim_order = dim_order[::-1]
-
-    # Apply default min sizes
-    if min_sizes is None:
-        min_sizes = [1] * dims
-    else:
-        min_sizes = [1] * (dims - len(min_sizes)) + list(min_sizes)
-
-    current = list(input_shape)
-    yield tuple(current), get_tiling(input_shape, tuple(current))
-
-    for dim in dim_order:
-        factors = get_factors(input_shape[dim], min_sizes[dim])
-        for f in factors[1:]:  # skip full-size factor
-            current[dim] = f
-            yield tuple(current), get_tiling(input_shape, tuple(current))
-        current[dim] = max(min_sizes[dim], 1)  # lock at min size
-
-
 def get_tiled_shape(shape, tiling):
     if not shape or tiling is None:
         return shape
@@ -1786,9 +1800,9 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
         )
 
         if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
-            last_dim = node.args[1]
+            last_dim = min(node.args[1])
         elif node.target == torch.ops.quantized_ops.quantize_mx.default:
-            last_dim = node.args[2]
+            last_dim = min(node.args[2])
         elif node.target == torch.ops.aten.transpose.int:
             last_dim = min(*node.args[1:])
         elif node.target == torch.ops.aten.permute.default:
@@ -1798,7 +1812,7 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         found_tiling = False
 
-        for tiled_output_shape, tiling in get_valid_tiling(output_shape, True, last_dim):
+        for tiled_output_shape, tiling in get_valid_tiling(output_shape, last_dim=last_dim):
             node_to_key = get_node_to_key(node)
             tiled_shapes = {}
 
