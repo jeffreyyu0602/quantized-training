@@ -864,15 +864,13 @@ def remap_pad_after_permute(pad: Tuple[int, ...], order: Tuple[int, ...], ndim: 
 def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
+    node_dim_order = {}
 
     torch.nn.functional.conv2d = conv2d_transposed
 
-    def get_path_to_target(node: torch.fx.Node, targets):
-        if not isinstance(targets, (list, tuple)):
-            targets = [targets]
-
+    def get_path_to_conv2d(node: torch.fx.Node):
         for user in node.users:
-            if user.target in targets:
+            if is_conv2d(user):
                 return [node, user]
 
             if (
@@ -882,38 +880,31 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     torch.ops.aten.pad.default,
                 ]
             ):
-                path = get_path_to_target(user, targets)
+                path = get_path_to_conv2d(user)
                 if path is not None:
                     return [node] + path
         return None
 
-    for node in graph.nodes:
-        is_pool = node.target in [
+    for node in list(graph.nodes):
+        is_pooling = node.target in [
             torch.ops.aten.adaptive_avg_pool2d.default,
             torch.ops.aten.max_pool2d.default,
         ]
 
-        if node in visited or (not is_conv2d(node) and not is_pool):
+        if node in visited or not (is_conv2d(node) or is_pooling):
             continue
 
-        swapped_nodes = []
-        node_dim_order = {}
         conv_chain = dfs_collect_connected_conv2d_chain(model, node, visited)
+        swapped_nodes = []
 
         for node_in_chain in conv_chain:
             for arg in node_in_chain.all_input_nodes:
                 if arg in conv_chain or arg in swapped_nodes:
-                    if arg.all_input_nodes:
-                        node_dim_order[arg] = node_dim_order.get(arg.all_input_nodes[0])
                     continue
 
-                path = get_path_to_target(arg, [
-                    torch.ops.aten.conv2d.default,
-                    torch.ops.quantized_ops.conv2d_mx.default,
-                    torch.ops.quantized_ops.conv2d.default,
-                ])
+                path = get_path_to_conv2d(arg)
 
-                # Permute weight and weight scale
+                # Permute weight and weight scale param
                 if arg.op == "get_attr" and path is not None:
                     input_node = path[-2]
                     conv2d_node = path[-1]
@@ -933,21 +924,19 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                         scale.data = scale.data.permute(2, 3, 1, 0)
                         node_dim_order[arg] = (2, 3, 1, 0)
 
-                if arg.op == "get_attr":
-                    continue
+                if arg.op != "get_attr":
+                    is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
+                    dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
 
-                is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
-                dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
+                    logger.debug(f"Insert permute before {arg} with dims {dims}")
+                    with graph.inserting_after(arg):
+                        permute_node = graph.call_function(
+                            torch.ops.aten.permute.default, (arg, dims),
+                        )
+                    permute_node.meta["dtype"] = arg.meta.get("dtype")
+                    node_in_chain.replace_input_with(arg, permute_node)
 
-                logger.debug(f"Insert permute before {arg} with dims {dims}")
-                with graph.inserting_after(arg):
-                    permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (arg, dims),
-                    )
-                permute_node.meta["dtype"] = arg.meta.get("dtype")
-                node_in_chain.replace_input_with(arg, permute_node)
-
-                node_dim_order[permute_node] = dims
+                    node_dim_order[permute_node] = dims
 
             for user in list(node_in_chain.users.keys()):
                 if user in conv_chain or user in swapped_nodes:
