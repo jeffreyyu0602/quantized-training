@@ -1969,6 +1969,11 @@ def split_conv2d_node(model, node, tiling):
     }
     tiling = (1, K // tile_k, 1, 1)
 
+    pad_value = 0
+    if (input_code := node.kwargs.get("input_code")) is not None:
+        code = model.get_buffer(input_code.target)
+        pad_value = (code == 0).nonzero()[0].item()
+
     class Conv2dTiled(torch.nn.Module):
         def __init__(self, stride=1, padding=0, dilation=1, groups=1, block_size=1):
             super().__init__()
@@ -2034,7 +2039,9 @@ def split_conv2d_node(model, node, tiling):
                         if pad_top or pad_left or pad_bottom or pad_right:
                             input_tile = F.pad(
                                 input_tile,
-                                (pad_left, pad_right, pad_top, pad_bottom)
+                                (pad_left, pad_right, pad_top, pad_bottom),
+                                mode='constant',
+                                value=pad_value,
                             )
 
                         weight_tile = weight[:, c_start:c_end, :, :]
@@ -2262,7 +2269,7 @@ def run_matrix_op_l2_tiling(
     graph = model.graph
 
     for node in list(graph.nodes):
-        if not is_gemm_op(node) or (is_conv2d(node) and node.args[0].shape[1] == 3):
+        if not is_gemm_op(node):
             continue
 
         input_node = node.args[0]
