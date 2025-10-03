@@ -7,7 +7,7 @@ import torch
 from torch.fx import Node
 from torch.fx.operator_schemas import normalize_function
 
-from .param_pb2 import Argument, Memory, OpOverload, Tensor
+from .param_pb2 import Argument, OpOverload, Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +258,9 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     return op_overload
 
 
+aten = torch.ops.aten
+
+
 def is_gemm_op(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.conv2d.default,
@@ -302,6 +305,24 @@ def is_matmul(node: Node) -> bool:
     return node.target in [
         torch.ops.aten.matmul.default,
         torch.ops.quantized_ops.matmul_mx.default,
+    ]
+
+
+def is_pooling(node: Node) -> bool:
+    return node.target in [
+        # Core Aten IR
+        aten._adaptive_avg_pool2d,
+        aten._adaptive_avg_pool3d,
+        aten.adaptive_avg_pool1d,
+        aten.avg_pool1d,
+        aten.avg_pool2d,
+        aten.avg_pool3d,
+        aten.max_pool2d_with_indices,
+        aten.max_pool3d_with_indices,
+        # export_for_training IR
+        aten.adaptive_avg_pool2d.default,
+        aten.avg_pool2d.default,
+        aten.max_pool2d.default,
     ]
 
 
@@ -426,12 +447,8 @@ def is_indexing_or_concatenation_op(node: Node) -> bool:
     ]
 
 
-def is_nop(node: Node) -> bool:
-    """
-    The following operations do not require any computation nor handling
-    on the memory placement side. Generate a NOP instruction for these ops
-    to keep the compute graph intact.
-    """
+def is_prunable_op(node: Node) -> bool:
+    """Operations that can be safely deleted from fx.Graph."""
     # A slice from 0 to the end of the input tensor
     if node.target == torch.ops.aten.slice.Tensor:
         default_args = [0, None, None, 1]
@@ -448,6 +465,18 @@ def is_nop(node: Node) -> bool:
 
     if node.target == torch.ops.aten.expand.default:
         return all(x == 1 or x == -1 for x in node.args[1])
+
+    return False
+
+
+def is_nop(node: Node) -> bool:
+    """
+    The following operations do not require any computation nor handling
+    on the memory placement side. Generate a NOP instruction for these ops
+    to keep the compute graph intact.
+    """
+    if is_prunable_op(node):
+        return True
 
     return node.target in [
         torch.ops.aten.clone.default,

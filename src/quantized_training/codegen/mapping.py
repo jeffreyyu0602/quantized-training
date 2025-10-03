@@ -16,6 +16,7 @@ from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping_utils import (
     is_addressing_op,
+    is_conv2d,
     is_elementwise_op,
     is_gemm_op,
     is_indexing_or_concatenation_op,
@@ -25,7 +26,6 @@ from .mapping_utils import (
     map_node,
     set_output_field,
     set_tensor_field,
-    save_tensor,
 )
 from .memory import MemoryAllocator, Segment, MemorySpace
 from .param_pb2 import Model, Operation, Tensor
@@ -63,18 +63,22 @@ def eliminate_dead_code(self):
     return changed
 
 
-def propagate_shape(node: Node, module: GraphModule = None):
+def propagate_shape(node: Node, model: GraphModule = None):
     def load_arg(a):
         return torch.fx.graph.map_arg(a, lambda n: getattr(n, "value", n.meta.get("val")))
 
     def fetch_attr(target : str):
         target_atoms = target.split('.')
-        attr_itr = module
+        attr_itr = model
         for i, atom in enumerate(target_atoms):
             if not hasattr(attr_itr, atom):
-                raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
+                raise RuntimeError(
+                    f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}"
+                )
             attr_itr = getattr(attr_itr, atom)
         return attr_itr
+
+    modules = dict(model.named_modules()) if model is not None else {}
 
     if node.op == 'get_attr':
         result = fetch_attr(node.target)
@@ -85,7 +89,7 @@ def propagate_shape(node: Node, module: GraphModule = None):
         kwargs = load_arg(node.kwargs)
         result = getattr(self_obj, node.target)(*args, **kwargs)
     elif node.op == 'call_module':
-        result = module(*load_arg(node.args), **load_arg(node.kwargs))
+        result = modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
     elif node.op == 'output':
         result = load_arg(node.args[0])
 
@@ -109,12 +113,15 @@ def get_parameter_or_buffer(model: torch.nn.Module, name: str):
     raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
 
 
-def replace_node_with_graph_module(self: GraphModule, module: GraphModule, source: Node) -> List[Node]:
+def replace_node_with_graph_module(
+    self: GraphModule, module: GraphModule, source: Node, value_remap=None
+) -> List[Node]:
     args_iter = iter(source.all_input_nodes)
-    value_remap = {}
+    if value_remap is None:
+        value_remap = {}
     for node in list(module.graph.nodes):
         if node.op == 'placeholder':
-            value_remap[node] = next(args_iter)
+            value_remap[node] = next(args_iter, None)
         elif node.op == 'output':
             output_node = node
             if len(node.args[0]) == 1:
@@ -397,7 +404,7 @@ def _create_subgraph(nodes: List[Node]):
     return gm, tuple(new_args)
 
 
-OP_TO_WEIGHT_POS_MAPPINGS = {
+OP_PARAM_ARG_INDEX = {
     torch.ops.aten.conv2d.default: 1,
     torch.ops.aten.linear.default: 1,
     torch.ops.aten.layer_norm.default: 2,
@@ -412,11 +419,17 @@ def get_unique_node_name(node: Node):
     """
     Generate a unique and meaningful name for the node based on its parameter.
     """
-    if (pos := OP_TO_WEIGHT_POS_MAPPINGS.get(node.target)) is not None:
+    if (pos := OP_PARAM_ARG_INDEX.get(node.target)) is not None:
         weight_node = node.args[pos]
-        # TODO there are cases weights are sliced, we should trace up to find
+        # There are cases weights are sliced, we trace up to find
         # the get_attr node and use the name
-        return weight_node.name.split("_weight")[0]
+        while weight_node.target == torch.ops.aten.slice.Tensor:
+            weight_node = weight_node.args[0]
+
+        if weight_node.op == 'get_attr':
+            return weight_node.name.split("_weight")[0]
+
+        return node.target.__name__
 
     return node.name
 
@@ -443,13 +456,15 @@ def get_new_node_name_with_prefix(prefix: str):
 def get_submodule_name(module, nodes: List[Node]):
     from transformers.utils.import_utils import is_torch_greater_or_equal
 
+    prefix = "submodule"
     if is_torch_greater_or_equal("2.5"):
-        node = next((n for n in nodes if is_gemm_op(n)), None)
-        prefix = get_unique_node_name(node) if node is not None else nodes[0].name
+        node = next((
+            n for n in nodes
+            if n.target in OP_PARAM_ARG_INDEX or n.op == "call_function"
+        ), None)
+        prefix = get_unique_node_name(node)
         if len(nodes) > 1:
             prefix += "_fused"
-    else:
-        prefix = "submodule"
 
     get_new_node_name = get_new_node_name_with_prefix(prefix)
     return get_new_node_name(module)
@@ -962,6 +977,11 @@ def fuse_operator(
         ]:
             continue
 
+        dim = node.args[1]
+        ndim = node.args[0].value.ndim
+        if dim == ndim - 1 or dim == -1:
+            continue
+
         if (
             is_nop(node) or
             node.target == torch.ops.aten.select.int and
@@ -1037,14 +1057,19 @@ def fuse_operator(
 
 
 def get_node_bytes(n: Node):
-    if (dtype := n.meta.get('dtype', None)) is not None:
-        return (
-            (dtype_byte_size(t) for t in dtype)
-            if isinstance(dtype, (list, tuple))
-            else dtype_byte_size(dtype)
-        )
+    if (dtype := n.meta.get('dtype', None)) is None:
+        if isinstance(n.value, (list, tuple)):
+            return (dtype_byte_size(t.dtype) for t in (n.value))
+        else:
+            return dtype_byte_size(n.value.dtype)
 
-    return dtype_byte_size(n.value.dtype)
+    if isinstance(dtype, (list, tuple)):
+        dtypes = [
+            t if t is not None else v.dtype for t, v in zip(dtype, n.value)
+        ]
+        return (dtype_byte_size(t) for t in dtypes)
+
+    return dtype_byte_size(dtype if dtype is not None else n.value.dtype)
 
 
 def get_tiled_tensor(arg, tiled_shapes=None):
@@ -1061,8 +1086,40 @@ def get_tiled_tensor(arg, tiled_shapes=None):
     return tensor[tuple(slices)]
 
 
+def conv2d_layout(shape, is_weight=False, do_transpose=False):
+    assert len(shape) == 4, "Conv2d shape must be 4D"
+    if not do_transpose:
+        return shape
+    if is_weight:
+        return (shape[2], shape[3], shape[1], shape[0])
+    else:
+        return (shape[0], shape[2], shape[3], shape[1])
+
+
+def normalize_shape(node, shape):
+    from torch.fx.operator_schemas import normalize_function
+
+    args_and_kwargs = normalize_function(
+        node.target,
+        node.args,
+        node.kwargs,
+        normalize_to_only_use_kwargs=True
+    )
+    node_to_key = {
+        n.meta.get('source_node', n): k
+        for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
+    }
+    node_to_key[node] = "output"
+    shape = {
+        n: shape[k] for n, k in node_to_key.items() if k in shape
+    }
+    return shape
+
+
 def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
-    from .utils import get_valid_tiling, get_tiled_shape, construct_tiled_shape
+    from .utils import (
+        get_arg_or_kwarg, get_valid_tiling, get_tiled_shape, construct_tiled_shape
+    )
 
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
@@ -1070,8 +1127,8 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
     first_node = next(n for n in module.graph.nodes if n.op == "call_function")
 
     if (
-        not is_elementwise_op(first_node) and
         not is_gemm_op(first_node) and
+        not is_elementwise_op(first_node) and
         first_node.target not in [
             torch.ops.aten.softmax.int,
             torch.ops.aten.layer_norm.default,
@@ -1081,28 +1138,35 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
     ):
         return tiled_shapes
 
-    # TODO conv2d tiling is not supported rn
-    if first_node.target in [
-        torch.ops.aten.conv2d.default,
-        torch.ops.quantized_ops.conv2d.default,
-        torch.ops.quantized_ops.conv2d_mx.default,
-    ]:
-        return tiled_shapes
-
     if not tiled_shapes:
         tiled_shapes = {n: n.value.shape for n in node.all_input_nodes}
         if isinstance(node.value, torch.Tensor):
             tiled_shapes[node] = node.value.shape
         else:
             tiled_shapes[node] = tuple(t.shape for t in node.value)
+    else:
+        tiled_shapes = {
+            n: k for n, k in tiled_shapes.items()
+            if n in node.all_input_nodes or n == node
+        }
 
     is_gemm = is_gemm_op(first_node)
-    min_sizes = (1, unroll_dims[-1]) if is_gemm else None
+    min_sizes = None
+    transposed = first_node.meta.get("transposed", False)
 
     if is_gemm:
         args = map_arg(node.args, lambda n: get_tiled_tensor(n, tiled_shapes))
         ShapeProp(module).propagate(*args)
         output_shape = first_node.value.shape
+
+        # We are not doing tiling on Y, X and C dimensions for conv layers here
+        if is_conv2d(first_node):
+            if transposed:
+                min_sizes = output_shape[:-1] + (unroll_dims[0],)
+            else:
+                min_sizes = (unroll_dims[0],) + output_shape[2:]
+        else:
+            min_sizes = (unroll_dims[0],)
     elif isinstance(node.value, torch.Tensor):
         output_shape = tiled_shapes[node]
     else:
@@ -1114,37 +1178,65 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
         new_shapes = {}
 
         if is_gemm:
-            x_tiled = math.prod(tiled_output_shape[:-1])
-            k_tiled = tiled_output_shape[-1]
-            tiling = (math.prod(tiling[:-1]), tiling[-1])
-
-            input_node = first_node.args[0].meta.get('source_node')
-            input_shape = tiled_shapes[input_node]
-            tiled_input_shape = construct_tiled_shape(input_shape, x_tiled, range(len(input_shape) - 1))
-            new_shapes[input_node] = tiled_input_shape[:-1] + (input_shape[-1],)
-
-            weight_node = first_node.args[1].meta.get('source_node')
-            weight_shape = tiled_shapes[weight_node]
-            weight_transposed = first_node.meta.get("transposed", False) or is_matmul(first_node)
-            new_shapes[weight_node] = (
-                weight_shape[:-1] + (k_tiled,) if weight_transposed else (k_tiled,) + weight_shape[1:]
-            )
-
-            if len(first_node.args) > 2:
-                bias_node = first_node.args[2].meta.get('source_node')
-                new_shapes[bias_node] = (k_tiled,)
-
-            if (input_scale_node := first_node.kwargs.get("input_scale")) is not None:
-                input_scale_node = input_scale_node.meta.get('source_node')
-                input_scale_shape = tiled_shapes[input_scale_node]
-                new_shapes[input_scale_node] = tiled_input_shape[:-1] + (input_scale_shape[-1],)
-
-            if (weight_scale_node := first_node.kwargs.get("weight_scale")) is not None:
-                weight_scale_node = weight_scale_node.meta.get('source_node')
-                weight_scale_shape = tiled_shapes[weight_scale_node]
-                new_shapes[weight_scale_node] = (
-                    weight_scale_shape[:-1] + (k_tiled,) if weight_transposed else (k_tiled,) + weight_scale_shape[1:]
+            bs = first_node.kwargs.get("block_size", 1)
+            if is_conv2d(first_node):
+                N, tile_y, tile_x, tile_k = conv2d_layout(
+                    tiled_output_shape, False, not transposed
                 )
+                kH, kW, _, tile_c = conv2d_layout(
+                    first_node.args[1].shape, True, not transposed
+                )
+
+                stride = get_arg_or_kwarg(first_node, 3, "stride", (1, 1))
+                dilation = get_arg_or_kwarg(first_node, 5, "dilation", (1, 1))
+
+                tile_iy = (tile_y - 1) * stride[0] + (kH - 1) * dilation[0] + 1
+                tile_ix = (tile_x - 1) * stride[1] + (kW - 1) * dilation[1] + 1
+
+                new_shapes = {
+                    "input": (N, tile_c, tile_iy, tile_ix),
+                    "weight": (tile_k, tile_c, kH, kW),
+                    "bias": (tile_k,),
+                    "input_scale": (N, tile_c // bs, tile_iy, tile_ix),
+                    "weight_scale": (tile_k, tile_c // bs, kH, kW),
+                }
+
+                new_shapes = {
+                    k: conv2d_layout(v, "weight" in k, transposed) if k != "bias" else v
+                    for k, v in new_shapes.items()
+                }
+            else:
+                x_tiled = math.prod(tiled_output_shape[:-1])
+                k_tiled = tiled_output_shape[-1]
+                c_tiled = first_node.args[0].value.shape[-1]
+
+                input_value = first_node.args[0].value
+                tiled_input_shape = construct_tiled_shape(
+                    input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
+                )
+
+                weight_transposed = is_matmul(first_node) or transposed
+                weight_shape = (
+                    (c_tiled, k_tiled) if weight_transposed else (k_tiled, c_tiled)
+                )
+                weight_scale_shape = (
+                    (c_tiled // bs, k_tiled) if weight_transposed
+                    else (k_tiled, c_tiled // bs)
+                )
+
+                weight_key = "other" if is_matmul(first_node) else "weight"
+
+                new_shapes = {
+                    "input": tiled_input_shape[:-1] + (c_tiled,),
+                    weight_key: weight_shape,
+                    "bias": (k_tiled,),
+                    "input_scale": tiled_input_shape[:-1] + (c_tiled // bs,),
+                    "weight_scale": weight_scale_shape,
+                }
+
+                tiling = (math.prod(tiling[:-1]), tiling[-1])
+
+            new_shapes = normalize_shape(first_node, new_shapes)
 
         for n in node.all_input_nodes:
             if n not in new_shapes and not n.name.startswith("code") and n.value.numel() > 1:
@@ -1157,12 +1249,16 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
             new_shapes[node] = tiled_output_shape
 
         total_size = sum(
-            allocator.get_tensor_size(n, s, True, n == node) for n, s in new_shapes.items()
+            allocator.get_tensor_size(n, s, True, n == node)
+            for n, s in new_shapes.items() if n in node.all_input_nodes or n == node
         )
 
         if total_size <= allocator.total_memory:
             if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
-                assert len(orig_tiling) == len(tiling)
+                assert len(orig_tiling) == len(tiling), (
+                    f"Original tiling {orig_tiling} and new tiling {tiling} "
+                    "have different ranks"
+                )
                 tiling = tuple(a * b for a, b in zip(orig_tiling, tiling))
 
             if math.prod(tiling) == 1:
@@ -1172,7 +1268,7 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
             return new_shapes
 
     logger.warning(f"Failed to adjust tiling for {node}")
-    return tiled_shapes
+    return {}
 
 
 def get_tiled_input_shape(shape1, shape2):
@@ -1191,7 +1287,9 @@ def get_tiled_input_shape(shape1, shape2):
     # For each dim, if shape2 dim is 1 or matches, keep it, else set to 1
     shape2_tiled = []
     for i in range(len(shape2)):
-        shape2_tiled.append(shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i])
+        shape2_tiled.append(
+            shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i]
+        )
     return tuple(shape2_tiled)
 
 
@@ -1276,25 +1374,20 @@ def run_memory_mapping(
         if cache_size is None:
             return
 
+        bank_size = cache_size // num_banks if num_banks is not None else None
+        sp_allocator = MemoryAllocator(
+            cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD
+        )
+
         if node.op == "call_module":
             mod = named_modules[node.target]
             first_node = next(iter(n for n in mod.graph.nodes if n.op == "call_function"))
         else:
             first_node = node
 
-        from torch.fx.operator_schemas import normalize_function
-
-        args_and_kwargs = normalize_function(
-            first_node.target, first_node.args, first_node.kwargs, normalize_to_only_use_kwargs=True
+        tiled_shapes = normalize_shape(
+            first_node, first_node.meta.get("tiled_shapes", {})
         )
-        node_to_key = {
-            n.meta.get('source_node', n): k
-            for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
-        }
-        node_to_key[first_node] = "output"
-
-        tiled_shapes = first_node.meta.get("tiled_shapes", {})
-        tiled_shapes = {n: tiled_shapes[k] for n, k in node_to_key.items() if k in tiled_shapes}
 
         # Calculate tiled shape for other input/output nodes
         if node.op == "call_module" and tiled_shapes:
@@ -1307,14 +1400,15 @@ def run_memory_mapping(
             if isinstance(node.value, torch.Tensor):
                 tiled_shapes[node] = get_tiled_shape(node.shape, l2_tiling)
             else:
-                tiled_shapes[node] = tuple(get_tiled_shape(t.shape, l2_tiling) for t in node.value)
-
-        bank_size = cache_size // num_banks if num_banks is not None else None
-        sp_allocator = MemoryAllocator(cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD)
+                tiled_shapes[node] = tuple(
+                    get_tiled_shape(t.shape, l2_tiling) for t in node.value
+                )
 
         if node.op == "call_module":
             mod = named_modules[node.target]
-            tiled_shapes = run_fused_op_l2_tiling(node, mod, tiled_shapes, sp_allocator, unroll_dims)
+            tiled_shapes = run_fused_op_l2_tiling(
+                node, mod, tiled_shapes, sp_allocator, unroll_dims
+            )
 
             for n in list(mod.graph.nodes):
                 if n != first_node:
@@ -1335,7 +1429,9 @@ def run_memory_mapping(
             )
         elif isinstance(node.value, (tuple, list)):
             output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            tensor_sizes[node] = sp_allocator.get_tensor_size(node, output_shapes, is_scratch_output=True)
+            tensor_sizes[node] = sp_allocator.get_tensor_size(
+                node, output_shapes, is_scratch_output=True
+            )
 
         tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
 
@@ -1366,14 +1462,15 @@ def run_memory_mapping(
 
         if sp_allocator.total_memory != cache_size:
             logger.warning(
-                f"[MEM_ALLOC_FAIL] Memory allocation failed for {node}. "
-                f"Expanding memory from {cache_size} to {sp_allocator.total_memory}."
+                f"[MEM_ALLOC_FAIL] {node}: expanding cache size from "
+                f"{cache_size} to {sp_allocator.total_memory}."
             )
 
         if unaligned_tensors:
             names = ', '.join(unaligned_tensors)
             logger.warning(
-                f"[BANK_ASSIGN_FAIL] {node}: tensors {names} could not be assigned to individual banks"
+                f"[BANK_ASSIGN_FAIL] {node}: tensors {names} could not "
+                f"be assigned to individual banks"
             )
 
         node.meta["scratchpad_mem"] = scratchpad_mem
@@ -1388,7 +1485,10 @@ def run_memory_mapping(
         )
 
         if nodes is not None:
+            # TODO: should not duplicate complex ops like conv2d
             nodes = duplicate_shared_nodes(graph, nodes)
+            for n in nodes:
+                propagate_shape(n, model)
 
             stack_node = nodes[-1]
             if (memory := stack_node.meta.get("memory", None)) is None:
