@@ -641,7 +641,7 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     node.replace_all_uses_with(quantized_node)
     graph.erase_node(node)
 
-    if input_node.op == 'get_attr':
+    if len(input_node.users) == 0:
         graph.erase_node(input_node)
 
     for user in orig_fq_users:
@@ -803,7 +803,7 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
     node.replace_all_uses_with(dequantized_node)
     graph.erase_node(node)
 
-    if input_node.op == 'get_attr':
+    if len(input_node.users) == 0:
         graph.erase_node(input_node)
 
 
@@ -1125,8 +1125,10 @@ def convert_pt2e(model: GraphModule, output_dtype: str = None, eliminate_no_effe
         _eliminate_dequantize_with_no_effect(model)
 
     model.graph.lint()
+    model.graph.eliminate_dead_code(
+        is_impure_node=lambda n: n.op in {'placeholder', 'output'}
+    )
     model.recompile()
-
     model.delete_all_unused_submodules()
 
     return model

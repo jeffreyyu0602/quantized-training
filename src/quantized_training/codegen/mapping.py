@@ -13,6 +13,7 @@ import torch
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
+from transformers.utils.import_utils import is_torch_greater_or_equal
 
 from .mapping_utils import (
     is_addressing_op,
@@ -421,17 +422,15 @@ def get_unique_node_name(node: Node):
     """
     if (pos := OP_PARAM_ARG_INDEX.get(node.target)) is not None:
         weight_node = node.args[pos]
-        # There are cases weights are sliced, we trace up to find
-        # the get_attr node and use the name
+        # There are cases where weights are sliced. Trace up to find the
+        # get_attr node and use the parameter name
         while weight_node.target == torch.ops.aten.slice.Tensor:
             weight_node = weight_node.args[0]
 
         if weight_node.op == 'get_attr':
             return weight_node.name.split("_weight")[0]
 
-        return node.target.__name__
-
-    return node.name
+    return node.target.__name__.split(".")[0]
 
 
 def get_new_node_name_with_prefix(prefix: str):
@@ -454,14 +453,16 @@ def get_new_node_name_with_prefix(prefix: str):
 
 
 def get_submodule_name(module, nodes: List[Node]):
-    from transformers.utils.import_utils import is_torch_greater_or_equal
-
     prefix = "submodule"
     if is_torch_greater_or_equal("2.5"):
-        node = next((
-            n for n in nodes
-            if n.target in OP_PARAM_ARG_INDEX or n.op == "call_function"
-        ), None)
+        node = next((n for n in nodes if (
+            n.target in OP_PARAM_ARG_INDEX or is_gemm_op(n) or (
+                n.op == 'call_function'
+                and not is_nop(n)
+                and not is_indexing_or_concatenation_op(n)
+                and not is_reshape_op(n)
+            )
+        )), None)
         prefix = get_unique_node_name(node)
         if len(nodes) > 1:
             prefix += "_fused"
@@ -470,34 +471,41 @@ def get_submodule_name(module, nodes: List[Node]):
     return get_new_node_name(module)
 
 
-def update_submodule_user(model, node):
+def update_placeholder_meta(model, node):
     """
-    Update the metadata of all the user nodes that consumes the new node
+    Update the metadata of all user nodes that consume the given node.
     """
     named_modules = dict(model.named_modules())
+
     for user in list(node.users):
         if user.op != "call_module":
             continue
 
-        index = user.args.index(node)
+        try:
+            index = user.args.index(node)
+        except ValueError:
+            continue
+
         mod = named_modules[user.target]
         placeholders = [n for n in mod.graph.nodes if n.op == 'placeholder']
-        placeholder = placeholders[index]
+        if index >= len(placeholders):
+            continue
 
+        placeholder = placeholders[index]
         placeholder.name = node.name
         placeholder.meta['source_node'] = node
+
     model.graph.lint()
     model.recompile()
 
 
 def rename_gemm_nodes(model: GraphModule):
-    from transformers.utils.import_utils import is_torch_greater_or_equal
     if not is_torch_greater_or_equal("2.5"):
         return
     for node in list(model.graph.nodes):
         if is_gemm_op(node):
             node.name = get_submodule_name(model, [node])
-            update_submodule_user(model, node)
+            update_placeholder_meta(model, node)
     model.graph.lint()
     model.recompile()
 
@@ -1035,7 +1043,7 @@ def fuse_operator(
             if next(iter(fused_node.users)).op != 'output':
                 n.meta['input_node'] = fused_node.args[0]
 
-        update_submodule_user(model, node)
+        update_placeholder_meta(model, node)
 
         args = map_arg(node.args, lambda n: n.value)
         kwargs = map_arg(node.kwargs, lambda n: n.value)
@@ -1052,7 +1060,6 @@ def fuse_operator(
     graph.lint()
     graph.eliminate_dead_code()
     model.recompile()
-
     return model
 
 
