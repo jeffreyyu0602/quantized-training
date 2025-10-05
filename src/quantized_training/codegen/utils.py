@@ -970,7 +970,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 args = tuple(node_to_treat.args)
                 idx = axis_fix_map[node_to_treat.target]
                 axes = [a + max(order) + 1 if a < 0 else a for a in args[idx]]
-                axes = (order.index(a) for a in axes)
+                axes = tuple(order.index(a) for a in axes)
                 node_to_treat.args = args[:idx] + (axes,) + args[idx + 1 :]
 
             if is_indexing_or_concatenation_op(node_to_treat):

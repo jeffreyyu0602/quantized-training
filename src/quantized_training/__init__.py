@@ -71,6 +71,7 @@ group_wise_affine: qscheme = QScheme.GROUP_WISE_AFFINE
 
 aten = torch.ops.aten
 quantized_ops = torch.ops.quantized_ops
+
 OPERATOR_MAPPINGS = {
     "gemm": [nn.Conv2d, nn.Linear, F.conv2d, F.linear, torch.matmul, operator.matmul],
     "add": ["add", "add_", operator.add, torch.add, operator.iadd, aten.add.Tensor],
@@ -164,9 +165,7 @@ def transform(
         transpose_conv2d_inputs_and_weights(model)
         replace_target(model, TRANSPOSED_OPERATORS)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
-
         ShapeProp(model).propagate(*flatten_args)
-
         eliminate_reshape_with_no_effect(model)
 
     if fuse_operator:
