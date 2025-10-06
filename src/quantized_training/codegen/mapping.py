@@ -430,7 +430,7 @@ def get_unique_node_name(node: Node):
         if weight_node.op == 'get_attr':
             return weight_node.name.split("_weight")[0]
 
-    return node.target.__name__.split(".")[0]
+    return node.name
 
 
 def get_new_node_name_with_prefix(prefix: str):
