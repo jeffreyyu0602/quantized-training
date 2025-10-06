@@ -998,27 +998,30 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 handled.append(conv_node)
                 node_to_treat = conv_node
 
-                if (tiled_shapes := conv_node.meta.get("tiled_shapes")) is not None:
-                    for key, arg in [
-                        ("input", conv_node.args[0]), ("weight", conv_node.args[1])
-                    ]:
-                        order = node_dim_order[arg]
-                        tiled_shapes[key] = tuple(tiled_shapes[key][i] for i in order)
+            tiled_shapes = node_to_treat.meta.get("tiled_shapes")
+            if is_conv2d(node_to_treat) and tiled_shapes is not None:
+                for key, arg in [
+                    ("input", conv_node.args[0]), ("weight", conv_node.args[1])
+                ]:
+                    order = node_dim_order[arg]
+                    tiled_shapes[key] = tuple(tiled_shapes[key][i] for i in order)
 
-                        scale_key = f"{key}_scale"
-                        if scale_key in tiled_shapes:
-                            tiled_shapes[scale_key] = tuple(
-                                tiled_shapes[scale_key][i] for i in order
-                            )
+                    scale_key = f"{key}_scale"
+                    if scale_key in tiled_shapes:
+                        tiled_shapes[scale_key] = tuple(
+                            tiled_shapes[scale_key][i] for i in order
+                        )
 
-                    tiled_shapes["output"] = tuple(
-                        tiled_shapes["output"][i] for i in (0, 2, 3, 1)
-                    )
+                tiled_shapes["output"] = tuple(
+                    tiled_shapes["output"][i] for i in (0, 2, 3, 1)
+                )
 
-                    tiling = conv_node.meta["l2_tiling"]
-                    conv_node.meta["l2_tiling"] = (1, 1, 1, tiling[0])
+                tiling = conv_node.meta["l2_tiling"]
+                conv_node.meta["l2_tiling"] = (1, 1, 1, tiling[0])
 
-            node_dim_order[node_to_treat] = node_dim_order[node_to_treat.all_input_nodes[0]]
+            node_dim_order[node_to_treat] = node_dim_order[
+                node_to_treat.all_input_nodes[0]
+            ]
 
     graph.lint()
     model.recompile()

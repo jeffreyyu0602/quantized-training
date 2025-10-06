@@ -1415,14 +1415,16 @@ def run_memory_mapping(
 
         if node.op == "call_module":
             mod = named_modules[node.target]
-            tiled_shapes = run_fused_op_l2_tiling(
+            new_shapes = run_fused_op_l2_tiling(
                 node, mod, tiled_shapes, sp_allocator, unroll_dims
             )
 
-            if not tiled_shapes:
-                tiled_shapes = run_fused_op_l2_tiling(
+            if not new_shapes:
+                new_shapes = run_fused_op_l2_tiling(
                     node, mod, tiled_shapes, sp_allocator, unroll_dims, False
                 )
+
+            tiled_shapes = new_shapes
 
             for n in list(mod.graph.nodes):
                 if n != first_node:
