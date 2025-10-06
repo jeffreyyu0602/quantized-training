@@ -1123,7 +1123,9 @@ def normalize_shape(node, shape):
     return shape
 
 
-def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
+def run_fused_op_l2_tiling(
+    node, module, tiled_shapes, allocator, unroll_dims, align_banks=True,
+):
     from .utils import (
         get_arg_or_kwarg, get_valid_tiling, get_tiled_shape, construct_tiled_shape
     )
@@ -1256,7 +1258,7 @@ def run_fused_op_l2_tiling(node, module, tiled_shapes, allocator, unroll_dims):
             new_shapes[node] = tiled_output_shape
 
         total_size = sum(
-            allocator.get_tensor_size(n, s, True, n == node)
+            allocator.get_tensor_size(n, s, align_banks, n == node)
             for n, s in new_shapes.items() if n in node.all_input_nodes or n == node
         )
 
@@ -1416,6 +1418,11 @@ def run_memory_mapping(
             tiled_shapes = run_fused_op_l2_tiling(
                 node, mod, tiled_shapes, sp_allocator, unroll_dims
             )
+
+            if not tiled_shapes:
+                tiled_shapes = run_fused_op_l2_tiling(
+                    node, mod, tiled_shapes, sp_allocator, unroll_dims, False
+                )
 
             for n in list(mod.graph.nodes):
                 if n != first_node:
