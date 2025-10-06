@@ -990,13 +990,15 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 logger.debug(f"Replace conv2d node {node_to_treat} with {conv_node}")
 
                 conv_node.meta = node_to_treat.meta
-                conv_node.meta["transposed"] = True
 
                 node_to_treat.replace_all_uses_with(conv_node)
                 graph.erase_node(node_to_treat)
 
                 handled.append(conv_node)
                 node_to_treat = conv_node
+
+            if is_conv2d(node_to_treat):
+                node_to_treat.meta["transposed"] = True
 
             tiled_shapes = node_to_treat.meta.get("tiled_shapes")
             if is_conv2d(node_to_treat) and tiled_shapes is not None:
