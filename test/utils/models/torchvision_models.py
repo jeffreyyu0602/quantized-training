@@ -1,6 +1,6 @@
 import torch
 
-from torchvision import models, transforms
+from torchvision import models
 from tqdm import tqdm
 
 from quantized_training import (
@@ -100,7 +100,10 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
     # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
     if args.activation is not None and "microscaling" in args.activation:
-        qspec = QuantizationSpec.from_str("int8,qs=per_tensor_symmetric")
+        dtype = args.activation.split(".")[0]
+        if dtype == "nf4_6":
+            dtype = "int6"
+        qspec = QuantizationSpec.from_str(f"{dtype},qs=per_tensor_symmetric")
         qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
 
         bias_qspec = DerivedQuantizationSpec(
