@@ -1859,7 +1859,7 @@ def split_gemm_node(model, node, X, C, K, x_tiled, c_tiled, k_tiled):
     else:
         source_fn = node.target
 
-    last_output = None
+    psums = None
     for c in range(0, C, c_tiled):
         c_end = min(c + c_tiled, C)
         scale_c, scale_c_end = int(c / bs), int(c_end / bs)
@@ -1867,62 +1867,41 @@ def split_gemm_node(model, node, X, C, K, x_tiled, c_tiled, k_tiled):
         with graph.inserting_before(node):
             tiled_input = slice_tensor(input_node, -1, c, c_end, model)
             tiled_weight = slice_tensor(weight_node, weight_dim, c, c_end, model)
-
-            if input_scale_node is not None:
-                tiled_input_scale = slice_tensor(
-                    input_scale_node, -1, scale_c, scale_c_end, model
-                )
-            else:
-                tiled_input_scale = None
-
-            if weight_scale_node is not None:
-                tiled_weight_scale = slice_tensor(
-                    weight_scale_node, weight_dim, scale_c, scale_c_end, model
-                )
-            else:
-                tiled_weight_scale = None
-
             kwargs = dict(node.kwargs)
             if input_scale_node is not None:
-                kwargs["input_scale"] = tiled_input_scale
-            if weight_scale_node is not None:
-                kwargs["weight_scale"] = tiled_weight_scale
-
-            tiled_gemm = graph.call_function(
-                node.target, (tiled_input, tiled_weight) + node.args[2:], kwargs
-            )
-            propagate_shape(tiled_gemm)
-            tiled_gemm.meta["dtype"] = node.meta.get("dtype")
-            tiled_gemm.meta["source_fn_stack"] = [(tiled_gemm.name, source_fn)]
-
-            # Accumulate if multiple C-tiles
-            if last_output is not None:
-                last_output = graph.call_function(
-                    torch.ops.aten.add.Tensor, (last_output, tiled_gemm),
+                kwargs["input_scale"] = slice_tensor(
+                    input_scale_node, -1, scale_c, scale_c_end, model
                 )
-                last_output.meta["dtype"] = node.meta.get("dtype")
-                last_output.meta["source_fn_stack"] = [
-                    (last_output.name, last_output.target)
-                ]
-                propagate_shape(last_output)
-            else:
-                last_output = tiled_gemm
-
-        tiled_gemm.meta["tiled_shapes"] = copy.deepcopy(tiled_shapes)
-        tiled_gemm.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
-
-    if bias is not None:
-        with graph.inserting_before(node):
-            last_output = graph.call_function(
-                torch.ops.aten.add.Tensor, (last_output, bias),
+            if weight_scale_node is not None:
+                kwargs["weight_scale"] = slice_tensor(
+                    weight_scale_node, weight_dim, scale_c, scale_c_end, model
+                )
+            tiled_gemm = graph.call_function(
+                node.target,
+                (tiled_input, tiled_weight, bias if c_end == C else None),
+                kwargs,
             )
-        propagate_shape(last_output)
-        last_output.meta["dtype"] = node.meta.get("dtype")
-        last_output.meta["source_fn_stack"] = [
-            (last_output.name, last_output.target)
-        ]
 
-    node.replace_all_uses_with(last_output)
+        propagate_shape(tiled_gemm)
+        tiled_gemm.meta.update({
+            "tiled_shapes": copy.deepcopy(tiled_shapes),
+            "l2_tiling": (num_x_tiles, num_k_tiles),
+            "dtype": node.meta.get("dtype"),
+            "source_fn_stack": [(tiled_gemm.name, source_fn)],
+        })
+
+        if psums is not None:
+            with graph.inserting_before(node):
+                psums = graph.call_function(
+                    torch.ops.aten.add.Tensor, (psums, tiled_gemm),
+                )
+            psums.meta["dtype"] = node.meta.get("dtype")
+            psums.meta["source_fn_stack"] = [(psums.name, psums.target)]
+            propagate_shape(psums)
+        else:
+            psums = tiled_gemm
+
+    node.replace_all_uses_with(psums)
     graph.erase_node(node)
 
 
