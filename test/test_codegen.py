@@ -8,38 +8,37 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torchvision import models, transforms
 from transformers import (
-    AutoModelForSequenceClassification,
-    AutoModelForSemanticSegmentation,
     AutoImageProcessor,
     AutoTokenizer,
     StaticCache,
-    default_data_collator,
 )
 from tqdm import tqdm
 
 from quantized_training import (
-    DerivedQuantizationSpec,
-    FusedAmaxObsFakeQuantize,
     QuantizationConfig,
     QuantizationSpec,
     add_qspec_args,
+    compile,
+    convert_and_export_with_split_cache,
     convert_pt2e,
-    export_model,
+    extract_input_preprocessor,
+    fold_param_ops,
     fuse,
     get_default_quantizer,
     prepare_pt2e,
+    sink_obs_or_fq,
+    swap_llama_attention,
     transform,
-    compile,
-    derive_bias_qparams_fn,
-    extract_input_preprocessor,
 )
+
 from quantized_training.codegen.utils import (
-    get_conv_bn_layers,
-    pad_vit_embeddings_output,
-    replace_interpolate,
+    remove_autocast_nodes,
     replace_rmsnorm_with_layer_norm,
     strip_softmax_dtype,
 )
+
+from quantized_training.llm_utils import fuse_dequantize_quantize
+
 
 from utils.models import (
     bert,
@@ -47,10 +46,8 @@ from utils.models import (
     torchvision_models,
     vit
 )
-from utils.dataset import (
-    glue,
-    imagenet
-)
+from utils.dataset import glue, imagenet
+
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 target_path = os.path.join(script_dir, '../examples/language_modeling')
@@ -458,6 +455,114 @@ if __name__ == "__main__":
         old_output = gm(*example_args, **example_kwargs)
 
         transform(gm, example_args, example_kwargs=example_kwargs, **transform_args)
+        gm.graph.print_tabular()
+
+        new_output = gm(*example_args, *list(example_kwargs.values()))
+
+        compile(gm, example_args, **compile_args)
+    elif args.model == "llm_kivi":
+        from transformers import AutoModelForCausalLM
+
+        if args.model_name_or_path is None:
+            args.model_name_or_path = "meta-llama/Llama-3.2-1B"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="eager", # turn off flash attention
+        ).eval()
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+
+        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+
+        max_length = args.context_length
+        bs = 64 if args.hardware_unrolling is None else args.hardware_unrolling[0]
+
+        swap_llama_attention(model)
+
+        gm = convert_and_export_with_split_cache(
+            model, max_len=max_length, max_new_tokens=bs
+        ).module()
+
+        hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
+        example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
+        replace_rmsnorm_with_layer_norm(
+            gm, model.model.layers[0].input_layernorm, (example_input,)
+        )
+
+        remove_autocast_nodes(gm)
+        fold_param_ops(gm)
+        strip_softmax_dtype(gm)
+
+        quantizer = get_default_quantizer(
+            input_activation="int6,qs=microscaling,bs=64",
+            weight="nf4_6,qs=microscaling,bs=64",
+        )
+
+        quantizer.set_module_name_object_type_order(
+            "model.model.rotary_emb", torch.ops.aten.matmul.default, 0, None
+        )
+
+        act0 = QuantizationSpec.from_str("int6,qs=microscaling,bs=64,ax=-1,scale=fp8_e5m3")
+        act1 = QuantizationSpec.from_str("int6,qs=microscaling,bs=64,ax=(-2,-1),scale=fp8_e5m3")
+        matmul_qconfig = QuantizationConfig(act0, None, act1, None)
+
+        for layer_idx in range(model.config.num_hidden_layers):
+            module_name = f'model.model.layers.slice(None, 32, None)._modules.{layer_idx}.self_attn'
+
+            # Perform full cache matmul in MXINT6
+            quantizer.set_module_name_object_type_order(
+                module_name, torch.ops.aten.matmul.default, 0, matmul_qconfig
+            )
+            quantizer.set_module_name_object_type_order(
+                module_name, torch.ops.aten.matmul.default, 2, matmul_qconfig
+            )
+
+            # Perform residual cache matmul in full precision
+            quantizer.set_module_name_object_type_order(
+                module_name, torch.ops.aten.matmul.default, 1, None
+            )
+            quantizer.set_module_name_object_type_order(
+                module_name, torch.ops.aten.matmul.default, 3, None
+            )
+
+        import re
+        from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
+
+        # if transpose key cache, quantize along the last axis.
+        key_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-1,scale=fp8_e5m3")
+        value_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-1,scale=fp8_e5m3")
+
+        for node in gm.graph.nodes:
+            match = re.match(r"^(key|value)_cache_(\d+)$", str(node.target))
+            if node.op == "get_attr" and match is not None:
+                _annotate_output_qspec(node, key_qspec if match.group(1) == "key" else value_qspec)
+
+        gm = prepare_pt2e(gm, quantizer)
+        sink_obs_or_fq(gm)
+        convert_pt2e(gm, eliminate_no_effect=False)
+
+        gm.graph.print_tabular()
+
+        example_input_ids = torch.tensor([[1]], dtype=torch.long)
+        example_cache_position = torch.tensor([0], dtype=torch.long)
+        example_cache_position_residual = torch.tensor([0], dtype=torch.long)
+        example_attention_mask = torch.ones((1, max_length + bs), dtype=torch_dtype)[None, None, :, :]
+        example_args = (
+            example_input_ids,
+            example_cache_position,
+            example_cache_position_residual,
+            example_attention_mask,
+        )
+        example_kwargs = {}
+
+        old_output = gm(*example_args, **example_kwargs)
+
+        fuse_dequantize_quantize(gm)
+
+        transform(gm, example_args, example_kwargs, **transform_args)
         gm.graph.print_tabular()
 
         new_output = gm(*example_args, *list(example_kwargs.values()))

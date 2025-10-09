@@ -12,10 +12,15 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb, repeat_kv
 
+from .decomposed import expand
+from .quantize_pt2e import create_getattr_from_value
+from .codegen.utils import get_arg_or_kwarg
+
 
 __all__ = [
     "TorchExportableModuleWithStaticCache",
     "convert_and_export_with_split_cache",
+    "fuse_dequantize_quantize",
     "generate",
     "swap_llama_attention",
 ]
@@ -706,3 +711,121 @@ def convert_and_export_with_split_cache(
         )
 
         return exported_program
+
+
+def fuse_dequantize_quantize(model: torch.fx.GraphModule):
+    """
+    Fuses consecutive dequantize -> quantize operations in a quantized model
+    for optimization.
+
+    Args:
+        model (GraphModule): The FX-traced model to optimize.
+
+    Returns:
+        GraphModule: The optimized model with fused operations.
+    """
+    graph = model.graph
+    for node in list(graph.nodes):
+        if node.target not in (
+            torch.ops.quantized_ops.quantize.default,
+            torch.ops.quantized_ops.quantize_mx.default,
+        ):
+            continue
+
+        dq_node = node.args[0]
+        if dq_node.target != torch.ops.quantized_ops.dequantize.default:
+            continue
+
+        dq_input = dq_node.args[0]
+        dq_scale = model.get_buffer(dq_node.args[1].target)
+
+        # For quantize_mx, qparam is the first getitem node
+        if node.target == torch.ops.quantized_ops.quantize_mx.default:
+            qparam_node = node.users[0]
+        else:
+            qparam_node = node.args[2]
+
+        # Handle dynamic quantization and only fuse if input is a constant
+        if (
+            node.target == torch.ops.quantized_ops.quantize_mx.default
+            or qparam_node.op != 'get_attr'
+        ):
+            if dq_input.op != 'get_attr':
+                continue
+
+            env = {dq_input: model.get_buffer(dq_input.target)}
+
+            def map_node(n):
+                return env[n] if n in env else model.get_buffer(n.target)
+
+            def load_arg(a):
+                return torch.fx.graph.map_arg(a, map_node)
+
+            env[dq_node] = dq_node.target(
+                *load_arg(dq_node.args), **load_arg(dq_node.kwargs)
+            )
+
+            if qparam_node.op != 'get_attr':
+                env[qparam_node] = qparam_node.target(
+                    *load_arg(qparam_node.args), **load_arg(qparam_node.kwargs)
+                )
+                q_scale = node.target(
+                    *load_arg(node.args), **load_arg(node.kwargs)
+                )
+            else:
+                q_scale, _ = node.target(
+                    *load_arg(node.args), **load_arg(node.kwargs)
+                )
+        else:
+            q_scale = model.get_buffer(node.args[2])
+
+        # Check block size compatibility
+        if node.target == torch.ops.quantized_ops.quantize_mx.default:
+            block_size = node.args[3]
+        else:
+            block_size = get_arg_or_kwarg(node, 4, "block_size", 1)
+
+        dq_block_size = get_arg_or_kwarg(dq_node, 3, "block_size", 1)
+
+        if block_size != dq_block_size:
+            continue
+
+        # Broadcast scales to the same shape
+        nd = max(dq_scale.ndim, q_scale.ndim)
+        while dq_scale.ndim < nd:
+            dq_scale = dq_scale.unsqueeze(0)
+        while q_scale.ndim < nd:
+            q_scale = q_scale.unsqueeze(0)
+        shape = list(max(a, b) for a, b in zip(q_scale.shape, dq_scale.shape))
+
+        q_scale = expand(q_scale, shape, block_size)
+        dq_scale = expand(dq_scale, shape, block_size)
+        fused_scale = dq_scale / q_scale
+
+        # Update the dequantize scale in place
+        dq_scale.resize_(fused_scale.shape).copy_(fused_scale)
+
+        output_code = node.args[1]
+        if output_code is not None:
+            with graph.inserting_before(dq_node):
+                output_code = graph.node_copy(output_code, lambda n: n)
+        dq_node.args = (
+            dq_node.args + (None,) * (5 - len(dq_node.args)) + (output_code,)
+        )
+        dq_node.meta["dtype"] = node.meta["dtype"]
+
+        # create new scale node and update users
+        with graph.inserting_before(qparam_node):
+            new_qparam_node = create_getattr_from_value(
+                model, model.graph, dq_input.name + "_scale", q_scale
+            )
+        for user in list(qparam_node.users):
+            user.replace_input_with(qparam_node, new_qparam_node)
+
+        node.replace_all_uses_with(dq_node)
+        graph.erase_node(node)
+
+    graph.lint()
+    graph.eliminate_dead_code()
+    model.recompile()
+    return model
