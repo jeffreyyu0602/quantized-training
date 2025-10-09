@@ -25,6 +25,7 @@ from quantized_training import (
     add_qspec_args,
     convert_pt2e,
     export_model,
+    fuse,
     get_default_quantizer,
     prepare_pt2e,
     transform,
@@ -492,9 +493,16 @@ if __name__ == "__main__":
         import sys
         sys.path.append("libraries/yolov5-face")
 
+        # Clear any previously loaded modules to avoid conflicts
+        if 'utils' in sys.modules:
+            del sys.modules['utils']
+
         from models.experimental import attempt_load
 
         model = attempt_load(args.model_name_or_path, map_location="cpu").eval()
+
+        if args.bf16:
+            model.bfloat16()
 
         example_args = (torch.randn(1, 3, 640, 640, dtype=torch_dtype),)
         output = model(*example_args)
@@ -520,7 +528,7 @@ if __name__ == "__main__":
 
         old_output = gm(*example_args)[0]
 
-        transform(gm, example_args, patterns=vector_stages)
+        transform(gm, example_args, **transform_args)
         gm.graph.print_tabular()
 
         new_output = gm(*example_args)[0]
@@ -535,6 +543,9 @@ if __name__ == "__main__":
 
         set_fused_attn(False)
         model = timm.create_model("hf-hub:timm/mobilevit_xxs.cvnets_in1k", pretrained=True).eval()
+
+        if args.bf16:
+            model.bfloat16()
 
         example_args = (torch.randn(1, 3, 224, 224, dtype=torch_dtype),)
         gm = prepare_pt2e(model, quantizer, example_args)
@@ -552,7 +563,13 @@ if __name__ == "__main__":
 
         old_output = gm(*example_args)
 
-        transform(gm, example_args, patterns=vector_stages)
+        transform(gm, example_args, **transform_args, fuse_operator=False)
+
+        gm, preprocess_fn = extract_input_preprocessor(gm)
+        example_args = (preprocess_fn(example_args[0]),)
+
+        fuse(gm, vector_stages, example_args)
+
         gm.graph.print_tabular()
 
         new_output = gm(*example_args)
