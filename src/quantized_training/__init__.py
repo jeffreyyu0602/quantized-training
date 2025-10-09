@@ -14,7 +14,7 @@ from .training_args import *
 from .utils import *
 from .histogram import *
 from .quantize_pt2e import fuse_quantize_dequantize_with_previous_op
-from .codegen.mapping import rename_gemm_nodes
+from .codegen.mapping import rename_nodes_with_param_names
 from google.protobuf import text_format
 import operator
 import torch.nn as nn
@@ -171,7 +171,7 @@ def transform(
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
 
-    rename_gemm_nodes(model)
+    rename_nodes_with_param_names(model)
 
 
 def compile(

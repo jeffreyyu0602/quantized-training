@@ -117,30 +117,33 @@ def get_parameter_or_buffer(model: torch.nn.Module, name: str):
 def replace_node_with_graph_module(
     self: GraphModule, module: GraphModule, source: Node, value_remap=None
 ) -> List[Node]:
-    args_iter = iter(source.all_input_nodes)
     if value_remap is None:
         value_remap = {}
+    output = None
+    args_iter = iter(source.all_input_nodes)
     for node in list(module.graph.nodes):
         if node.op == 'placeholder':
             value_remap[node] = next(args_iter, None)
         elif node.op == 'output':
-            output_node = node
-            if len(node.args[0]) == 1:
-                source.replace_all_uses_with(value_remap[node.args[0][0]])
+            output = node.args[0]
+            if len(output) == 1:
+                source.replace_all_uses_with(value_remap[output[0]])
             else:
                 for user in list(source.users):
                     assert user.target == operator.getitem
                     select_idx = user.args[1]
-                    user.replace_all_uses_with(value_remap[node.args[0][select_idx]])
+                    user.replace_all_uses_with(value_remap[output[select_idx]])
         else:
             with self.graph.inserting_before(source):
                 if node.op == 'get_attr':
                     param = get_parameter_or_buffer(module, node.target)
-                    get_attr_node = create_getattr_from_value(
-                        self, self.graph, "_tensor_constant_", param)
-                    value_remap[node] = get_attr_node
+                    value_remap[node] = create_getattr_from_value(
+                        self, self.graph, "_tensor_constant_", param
+                    )
                 else:
-                    value_remap[node] = self.graph.node_copy(node, lambda n: value_remap[n])
+                    value_remap[node] = self.graph.node_copy(
+                        node, lambda n: value_remap[n]
+                    )
 
             if (source_fn_st := node.meta.get('source_fn_stack', None)) is not None:
                 source_fn = source_fn_st[-1]
@@ -148,10 +151,9 @@ def replace_node_with_graph_module(
                     (value_remap[node].name, source_fn[1])
                 ]
 
-        if node.op not in ['placeholder', 'get_attr', 'output']:
-            propagate_shape(value_remap[node])
+            propagate_shape(value_remap[node], self)
 
-    return [value_remap[n] for n in output_node.args[0]]
+    return [value_remap[n] for n in output]
 
 
 def _decompose_bmm(model: GraphModule, node: Node):
@@ -435,20 +437,25 @@ def get_unique_node_name(node: Node):
 
 def get_new_node_name_with_prefix(prefix: str):
     """
-    Generate a new attribute name with a given prefix that is not already used in the module's graph.
+    Generate a new attribute name with a given prefix that is not already used
+    in the module's graph.
     """
     prefix = prefix.replace(".", "_")
 
     def get_new_node_name(module: torch.nn.Module):
-        def get_node_name(i: int):
-            return f"{prefix}_{i}" if i > 0 else prefix
-        i = 0
-        node_name = get_node_name(i)
-        while any(n.name == node_name for n in module.graph.nodes):
+        existing_names = {n.name for n in module.graph.nodes}
+
+        if prefix not in existing_names:
+            return prefix
+
+        i = 1
+        while f"{prefix}_{i}" in existing_names:
             i += 1
-            node_name = get_node_name(i)
-            logger.debug(f"Node name {node_name} already exists, trying a new one...")
+
+        node_name = f"{prefix}_{i}"
+        logger.debug(f"Generated new unique node name: {node_name}")
         return node_name
+
     return get_new_node_name
 
 
@@ -471,11 +478,12 @@ def get_submodule_name(module, nodes: List[Node]):
     return get_new_node_name(module)
 
 
-def update_placeholder_meta(model, node):
+def update_placeholder_meta(model, node, named_modules=None):
     """
     Update the metadata of all user nodes that consume the given node.
     """
-    named_modules = dict(model.named_modules())
+    if named_modules is None:
+        named_modules = dict(model.named_modules())
 
     for user in list(node.users):
         if user.op != "call_module":
@@ -495,18 +503,17 @@ def update_placeholder_meta(model, node):
         placeholder.name = node.name
         placeholder.meta['source_node'] = node
 
-    model.graph.lint()
-    model.recompile()
 
-
-def rename_gemm_nodes(model: GraphModule):
+def rename_nodes_with_param_names(model: GraphModule):
     if not is_torch_greater_or_equal("2.5"):
         return
-    for node in list(model.graph.nodes):
-        if is_gemm_op(node):
+    graph = model.graph
+    named_modules = dict(model.named_modules())
+    for node in list(graph.nodes):
+        if node.target in OP_PARAM_ARG_INDEX:
             node.name = get_submodule_name(model, [node])
-            update_placeholder_meta(model, node)
-    model.graph.lint()
+            update_placeholder_meta(model, node, named_modules)
+    graph.lint()
     model.recompile()
 
 
@@ -1436,7 +1443,10 @@ def run_memory_mapping(
         tensor_sizes = {
             n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
             for n in node.all_input_nodes
-            if not n.name.startswith("code") and (n.value.numel() > 1 or n.op != "get_attr")
+            if not n.name.startswith("code") and (
+                isinstance(n.value, torch.Tensor) and n.value.numel() > 1
+                or n.op != "get_attr"
+            )
         }
 
         if isinstance(node.value, torch.Tensor):
