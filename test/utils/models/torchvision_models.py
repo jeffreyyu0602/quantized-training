@@ -100,7 +100,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
     # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
     if args.activation is not None and "microscaling" in args.activation:
-        dtype = args.activation.split(".")[0]
+        dtype = args.activation.split(",")[0]
         if dtype == "nf4_6":
             dtype = "int6"
         qspec = QuantizationSpec.from_str(f"{dtype},qs=per_tensor_symmetric")
