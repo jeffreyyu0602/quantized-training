@@ -56,7 +56,6 @@ __all__ = [
     "replace_target_with_vmap",
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",
-    "replace_target",
     "rewrite_fx_graph",
     "run_matrix_op_l2_tiling",
     "run_vector_op_l2_tiling",
@@ -823,10 +822,10 @@ def conv2d_transposed(
     return output.permute(0, 2, 3, 1)
 
 
-def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited: Set[Node]) -> Set[Node]:
+def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) -> Set[Node]:
     """DFS downstream traversal to find conv2d nodes connected through elementwise ops."""
     stack = [start]
-    chain = set()
+    nodes_in_graph = set()
 
     while stack:
         node = stack.pop()
@@ -834,9 +833,17 @@ def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited:
             continue
         visited.add(node)
 
-        chain.add(node)
+        nodes_in_graph.add(node)
 
         for user in list(node.users.keys()) + node.all_input_nodes:
+            # Stack op cannot be fused because it creates a new dimension
+            if user.target == torch.ops.aten.stack.default:
+                continue
+
+            # Only include reshape if it is a 4D tensor
+            if is_reshape_op(user) and len(user.shape) == 4:
+                stack.append(user)
+
             if (
                 is_conv2d(user) or
                 is_pooling(user) or
@@ -852,11 +859,13 @@ def dfs_collect_connected_conv2d_chain(model: GraphModule, start: Node, visited:
                 stack.append(user)
 
     order = {n: i for i, n in enumerate(model.graph.nodes)}
-    chain = sorted(chain, key=lambda n: order[n])
-    return chain
+    nodes_in_graph = sorted(nodes_in_graph, key=lambda n: order[n])
+    return nodes_in_graph
 
 
-def remap_pad_after_permute(pad: Tuple[int, ...], order: Tuple[int, ...], ndim: int) -> Tuple[int, ...]:
+def remap_pad_after_permute(
+    pad: Tuple[int, ...], order: Tuple[int, ...], ndim: int
+) -> Tuple[int, ...]:
     """
     Remap padding after permuting a tensor.
 
@@ -893,6 +902,13 @@ def remap_pad_after_permute(pad: Tuple[int, ...], order: Tuple[int, ...], ndim: 
     return tuple(new_pad)
 
 
+TRANSPOSED_OPERATORS = {
+    torch.ops.aten.conv2d.default: torch.ops.quantized_ops.conv2d.default,
+    torch.ops.aten.max_pool2d.default: torch.ops.quantized_ops.max_pool2d.default,
+    torch.ops.aten.adaptive_avg_pool2d.default: torch.ops.quantized_ops.adaptive_avg_pool2d.default,
+}
+
+
 def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
@@ -921,12 +937,12 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
         if node in visited or not (is_conv2d(node) or is_pooling(node)):
             continue
 
-        conv_chain = dfs_collect_connected_conv2d_chain(model, node, visited)
+        conv2d_graph = extract_conv2d_graph(model, node, visited)
         handled = []
 
-        for node_to_treat in conv_chain:
+        for node_to_treat in conv2d_graph:
             for arg in node_to_treat.all_input_nodes:
-                if arg in conv_chain or arg in handled:
+                if arg in conv2d_graph or arg in handled:
                     continue
 
                 path = get_path_to_conv2d(arg)
@@ -955,7 +971,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
                     dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
 
-                    logger.debug(f"Insert permute before {arg} with dims {dims}")
+                    logger.debug(f"Insert permute after {arg} with dims {dims}")
                     with graph.inserting_after(arg):
                         permute_node = graph.call_function(
                             torch.ops.aten.permute.default, (arg, dims),
@@ -965,9 +981,9 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     node_dim_order[permute_node] = dims
 
             for user in list(node_to_treat.users.keys()):
-                if user in conv_chain or user in handled:
+                if user in conv2d_graph or user in handled:
                     continue
-                logger.debug(f"Insert permute after {user} with dims (0, 3, 1, 2)")
+                logger.debug(f"Insert permute before {user} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
                         torch.ops.aten.permute.default, (node_to_treat, (0, 3, 1, 2)),
@@ -1001,26 +1017,33 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
             if is_indexing_or_concatenation_op(node_to_treat):
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]
                 args = tuple(node_to_treat.args)
-                axis = args[1] + max(order) + 1 if args[1] < 0 else args[1]
-                node_to_treat.args = args[:1] + (order.index(axis),) + args[2:]
+                dims = args[1] + max(order) + 1 if args[1] < 0 else args[1]
+                node_to_treat.args = args[:1] + (order.index(dims),) + args[2:]
 
-            if node_to_treat.target == torch.ops.aten.conv2d.default:
+            if is_reshape_op(node_to_treat):
+                order = node_dim_order[node_to_treat.all_input_nodes[0]]
+                args = tuple(node_to_treat.args)
+                if node_to_treat.target == torch.ops.aten.transpose.int:
+                    dims = (args[1], args[2])
+                else:
+                    dims = args[1]
+                dims = [d + max(order) + 1 if d < 0 else d for d in dims]
+                dims = tuple(order.index(d) for d in dims)
+                node_to_treat.args = args[:1] + (order.index(dims),) + args[2:]
+
+            if node_to_treat.target in TRANSPOSED_OPERATORS:
                 with graph.inserting_before(node_to_treat):
-                    conv_node = graph.call_function(
-                        torch.ops.quantized_ops.conv2d.default,
-                        args=node_to_treat.args,
-                        kwargs=node_to_treat.kwargs,
+                    new_node = graph.call_function(
+                        TRANSPOSED_OPERATORS[node_to_treat.target],
+                        node_to_treat.args,
+                        node_to_treat.kwargs,
                     )
-
-                logger.debug(f"Replace conv2d node {node_to_treat} with {conv_node}")
-
-                conv_node.meta = node_to_treat.meta
-
-                node_to_treat.replace_all_uses_with(conv_node)
+                logger.debug(f"Replace node {node_to_treat} with {new_node}")
+                new_node.meta = node_to_treat.meta
+                node_to_treat.replace_all_uses_with(new_node)
                 graph.erase_node(node_to_treat)
-
-                handled.append(conv_node)
-                node_to_treat = conv_node
+                handled.append(new_node)
+                node_to_treat = new_node
 
             if is_conv2d(node_to_treat):
                 node_to_treat.meta["transposed"] = True
@@ -1189,23 +1212,6 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     model.graph.lint()
     model.recompile()
     return model
-
-
-def replace_target(model, decomposition_table):
-    graph = model.graph
-    for node in graph.nodes:
-        if (target := decomposition_table.get(node.target)) is None:
-            continue
-
-        with graph.inserting_after(node):
-            new_node = graph.call_function(target, node.args)
-        propagate_shape(new_node)
-        new_node.meta = node.meta
-        node.replace_all_uses_with(new_node)
-        graph.erase_node(node)
-    graph.lint()
-    graph.eliminate_dead_code()
-    model.recompile()
 
 
 def replace_conv2d_with_im2col(model: GraphModule, unroll=16):

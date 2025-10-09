@@ -22,7 +22,6 @@ __all__ = [
     "replace_target_with_vmap",
     "replace_interpolate",
     "replace_rmsnorm_with_layer_norm",
-    "replace_target",
     "rewrite_fx_graph",
     "run_memory_mapping",
     "run_matrix_op_l2_tiling",

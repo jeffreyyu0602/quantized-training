@@ -427,6 +427,7 @@ def is_elementwise_op(node: Node) -> bool:
         torch.ops.quantized_ops.vmap.default,
         # Not in the core aten operator set. Will be removed in the future.
         torch.ops.aten.silu.default,
+        torch.ops.aten.silu_.default,
     ]
 
 

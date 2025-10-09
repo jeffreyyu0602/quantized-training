@@ -90,12 +90,6 @@ OPERATOR_MAPPINGS = {
     "dequantize": [quantized_ops.dequantize.default],
 }
 
-TRANSPOSED_OPERATORS = {
-    aten.max_pool2d.default: quantized_ops.max_pool2d.default,
-    aten.adaptive_avg_pool2d.default: quantized_ops.adaptive_avg_pool2d.default
-}
-
-
 def fuse(model, patterns, example_args, example_kwargs=None, fuse_reshape=True):
     if example_kwargs is None:
         example_kwargs = {}
@@ -163,7 +157,6 @@ def transform(
 
     if transpose_weight:
         transpose_conv2d_inputs_and_weights(model)
-        replace_target(model, TRANSPOSED_OPERATORS)
         transpose_linear_weights(model, transpose_fc=transpose_fc)
         ShapeProp(model).propagate(*flatten_args)
         eliminate_reshape_with_no_effect(model)
@@ -216,4 +209,5 @@ def compile(
     with open(os.path.join(output_dir, 'layers.txt'), 'w') as f:
         f.write('\n'.join(operations))
 
-    gen_compute_graph(model, os.path.join(output_dir, output_file))
+    if len(model.graph.nodes) < 10000:
+        gen_compute_graph(model, os.path.join(output_dir, output_file))
