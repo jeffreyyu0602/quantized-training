@@ -496,11 +496,6 @@ if __name__ == "__main__":
         fold_param_ops(gm)
         strip_softmax_dtype(gm)
 
-        quantizer = get_default_quantizer(
-            input_activation="int6,qs=microscaling,bs=64",
-            weight="nf4_6,qs=microscaling,bs=64",
-        )
-
         quantizer.set_module_name_object_type_order(
             "model.model.rotary_emb", torch.ops.aten.matmul.default, 0, None
         )

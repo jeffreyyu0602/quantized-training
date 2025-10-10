@@ -16,7 +16,6 @@ from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 from transformers.utils.import_utils import is_torch_greater_or_equal
 
 from .mapping_utils import (
-    is_addressing_op,
     is_conv2d,
     is_elementwise_op,
     is_gemm_op,
@@ -1378,7 +1377,7 @@ def run_memory_mapping(
             if user.target in targets:
                 return [node, user]
 
-            if is_nop(user) or is_addressing_op(user):
+            if is_nop(user):
                 path = get_path_to_target(user, targets)
                 if path is not None:
                     return [node] + path
@@ -1510,8 +1509,7 @@ def run_memory_mapping(
             node, [torch.ops.aten.stack.default, torch.ops.aten.cat.default]
         )
 
-        if nodes is not None:
-            # TODO: should not duplicate complex ops like conv2d
+        if len(node.users) == 1 and nodes is not None:
             nodes = duplicate_shared_nodes(graph, nodes)
             for n in nodes:
                 propagate_shape(n, model)
@@ -1538,13 +1536,10 @@ def run_memory_mapping(
                     copy_node = graph.call_function(
                         torch.ops.aten.add.Scalar, (input_node, 0)
                     )
-
+                propagate_shape(copy_node, model)
                 node.replace_input_with(input_node, copy_node)
                 register_last_uses(copy_node, node)
-
                 copy_node.meta["memory"] = segment
-                copy_node.value, copy_node.shape = input_node.value, input_node.shape
-
                 allocate_scratchpad(copy_node)
         elif node.target in [torch.ops.aten.stack.default, torch.ops.aten.cat.default]:
             node.meta["memory"] = allocator.allocate_memory(node)
