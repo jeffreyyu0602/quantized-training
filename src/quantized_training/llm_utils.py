@@ -805,6 +805,7 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
         # Update the dequantize scale in place
         dq_scale.resize_(fused_scale.shape).copy_(fused_scale)
 
+        # output_code is used to re-quantize the dequantized tensor
         output_code = node.args[1]
         if output_code is not None:
             with graph.inserting_before(dq_node):
@@ -812,13 +813,14 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
         dq_node.args = (
             dq_node.args + (None,) * (5 - len(dq_node.args)) + (output_code,)
         )
-        dq_node.meta["dtype"] = node.meta["dtype"]
+        dq_node.meta["dtype"] = node.meta.get("dtype")
 
         # create new scale node and update users
         with graph.inserting_before(qparam_node):
             new_qparam_node = create_getattr_from_value(
                 model, model.graph, dq_input.name + "_scale", q_scale
             )
+        new_qparam_node.meta["dtype"] = qparam_node.meta.get("dtype")
         for user in list(qparam_node.users):
             user.replace_input_with(qparam_node, new_qparam_node)
 

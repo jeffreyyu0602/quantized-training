@@ -486,12 +486,6 @@ if __name__ == "__main__":
             model, max_len=max_length, max_new_tokens=bs
         ).module()
 
-        hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
-        example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
-        replace_rmsnorm_with_layer_norm(
-            gm, model.model.layers[0].input_layernorm, (example_input,)
-        )
-
         remove_autocast_nodes(gm)
         fold_param_ops(gm)
         strip_softmax_dtype(gm)
@@ -505,7 +499,10 @@ if __name__ == "__main__":
         matmul_qconfig = QuantizationConfig(act0, None, act1, None)
 
         for layer_idx in range(model.config.num_hidden_layers):
-            module_name = f'model.model.layers.slice(None, 32, None)._modules.{layer_idx}.self_attn'
+            module_name = (
+                f"model.model.layers.slice(None, {model.config.num_hidden_layers}, None)"
+                f"._modules.{layer_idx}.self_attn"
+            )
 
             # Perform full cache matmul in MXINT6
             quantizer.set_module_name_object_type_order(
@@ -536,10 +533,15 @@ if __name__ == "__main__":
                 _annotate_output_qspec(node, key_qspec if match.group(1) == "key" else value_qspec)
 
         gm = prepare_pt2e(gm, quantizer)
+
+        hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
+        example_input = torch.randn(1, 1, hidden_size, dtype=torch.bfloat16)
+        replace_rmsnorm_with_layer_norm(
+            gm, model.model.layers[0].input_layernorm, (example_input,)
+        )
+
         sink_obs_or_fq(gm)
         convert_pt2e(gm, eliminate_no_effect=False)
-
-        gm.graph.print_tabular()
 
         example_input_ids = torch.tensor([[1]], dtype=torch.long)
         example_cache_position = torch.tensor([0], dtype=torch.long)
@@ -563,6 +565,7 @@ if __name__ == "__main__":
         new_output = gm(*example_args, *list(example_kwargs.values()))
 
         compile(gm, example_args, **compile_args)
+        gm.graph.print_tabular()
     elif args.model == "vit":
         model = vit.load_model(args) 
 

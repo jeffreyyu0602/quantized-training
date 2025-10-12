@@ -225,26 +225,43 @@ def fold_param_ops(model):
     return model
 
 
-def sink_obs_or_fq(gm: GraphModule) -> GraphModule:
-    graph = gm.graph
+def sink_obs_or_fq(model: GraphModule) -> GraphModule:
+    graph = model.graph
+
+    def is_obs_or_fq(node):
+        return (
+            node.op == "call_module"
+            and "activation_post_process" in node.target
+        )
+
     for node in reversed(graph.nodes):
-        # Match FakeQuant / Observer nodes
-        if node.op == "call_module" and "activation_post_process" in node.target:
-            input_node = node.args[0]
-            users = list(node.users.keys())
+        if not is_obs_or_fq(node):
+            continue
 
-            # Re-insert the fake quant right before each consumer
-            for user in users:
-                with graph.inserting_before(user):
-                    new_fq = graph.call_module(node.target, (input_node,))
-                user.replace_input_with(node, new_fq)
+        input_node = node.args[0]
 
-            # Remove the original early fake quant
-            graph.erase_node(node)
+        # Handle double quantization case where input is also an obs or fq
+        if is_obs_or_fq(input_node):
+            input_node = input_node.args[0]
+
+        if input_node.op != "get_attr":
+            continue
+
+        order = {n: i for i, n in enumerate(graph.nodes)}
+        users = list(node.users.keys())
+        first_user = min(users, key=lambda n: order[n])
+
+        with graph.inserting_before(first_user):
+            new_fq = graph.node_copy(node, lambda x: x)
+
+        logger.info(f"Replacing {node} with {new_fq} before {first_user}")
+
+        node.replace_all_uses_with(new_fq)
+        graph.erase_node(node)
 
     graph.lint()
-    gm.recompile()
-    return gm
+    model.recompile()
+    return model
 
 
 @torch.no_grad()
