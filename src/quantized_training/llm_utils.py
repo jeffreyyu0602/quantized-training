@@ -13,7 +13,9 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb, repeat_kv
 
 from .decomposed import expand
+from .pt2e_utils import fetch_attr
 from .quantize_pt2e import create_getattr_from_value
+from .codegen.mapping_utils import is_nop, is_reshape_op
 from .codegen.utils import get_arg_or_kwarg
 
 
@@ -535,9 +537,9 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
             activation_post_process(input)
             input = torch.ops.quantized_ops.quantize(
                 input,
-                activation_post_process.code,
                 activation_post_process.scale,
                 block_size=activation_post_process.block_size,
+                code=activation_post_process.code,
             )
             return input, activation_post_process.scale
 
@@ -713,6 +715,154 @@ def convert_and_export_with_split_cache(
         return exported_program
 
 
+def run_through_ops(model, input, nodes):
+    env = {nodes[0].args[0]: input}
+    def map_node(n):
+        if n in env:
+            return env[n]
+        if n.op == "get_attr":
+            return fetch_attr(model, n.target)
+        return n
+
+    def load_arg(a):
+        return torch.fx.graph.map_arg(a, map_node)
+
+    for n in nodes:
+        env[n] = n.target(*load_arg(n.args), **load_arg(n.kwargs))
+    return env[nodes[-1]]
+
+
+def validate_and_map_group_axes_for_reshape(old_shape, new_shape, dims):
+    """
+    Check if a reshape preserves group membership for arbitrary group axes.
+    Returns True if safe, else False.
+    """
+    dims = tuple(sorted(dims))
+    groups = [old_shape[i:j] for i, j in zip((0,) + dims, dims + (len(old_shape),))]
+    group_size = [math.prod(g) for g in groups]
+
+    numel = 1
+    idx = 0
+    new_dims = []
+    for i, s in enumerate(new_shape):
+        numel *= s
+        if numel == group_size[idx]:
+            numel = 1
+            idx += 1
+            new_dims.append(i + 1)
+            if idx == len(group_size):
+                if i < len(new_shape) - 1 and math.prod(new_shape[i+1:]) != 1:
+                    logger.warning("Extra trailing dimensions after last group")
+                    return None
+                break
+        elif numel > group_size[idx]:
+            logger.warning(f"Overshot group {idx} at new axis {i}")
+            return None
+
+    if idx != len(group_size):
+        logger.warning("Not all groups matched")
+        return None
+
+    return new_dims[:-1]
+
+
+def propagate_group_axes_through_op(node, input, dims, group_size):
+    """
+    Track which axes correspond to group-wise quantization through layout ops.
+
+    Args:
+        dims (tuple[int]): axes where grouping/quantization is performed
+        nodes_on_path (list[torch.fx.Node]): layout ops between dq and q
+        input_shape (tuple[int]): shape of tensor before ops
+
+    Returns:
+        tuple[int]: new axes for grouping after transformations
+    Raises:
+        RuntimeError: if reshape or any op makes grouping ambiguous
+    """
+    dims = list(dims)
+    tgt = node.target
+
+    if tgt == torch.ops.aten.unsqueeze.default:
+        dim = int(node.args[1])
+        dims = [g + 1 if g >= dim else g for g in dims]
+        output = tgt(input, dim)
+    elif tgt == torch.ops.aten.slice.Tensor:
+        default = [0, 0, 9223372036854775807, 1]
+        dim, start, end, step = list(node.args[1:]) + default[len(node.args) - 1:]
+        if dim in dims:
+            start, end = int(start / group_size), int(end / group_size)
+        args = (dim, start, end, step)
+        output = tgt(input, *args)
+    elif tgt == torch.ops.aten.expand.default:
+        size = [
+            math.ceil(s / group_size) if d in dims else s
+            for d, s in enumerate(node.args[1])
+        ]
+        output = tgt(input, size)
+    elif tgt == torch.ops.aten.transpose.int:
+        d0, d1 = node.args[1:3]
+        dims = [
+            d1 if d == d0 else d0 if d == d1 else d for d in dims
+        ]
+        output = tgt(input, d0, d1)
+    elif tgt == torch.ops.aten.permute.default:
+        perm = node.args[1]
+        dims = [perm.index(d + input.ndim if d < 0 else d) for d in dims]
+        output = tgt(input, perm)
+    elif tgt in (torch.ops.aten.reshape.default, torch.ops.aten.view.default):
+        orig_shape = [
+            s * group_size if d in dims else s for d, s in enumerate(input.shape)
+        ]
+        dims = validate_and_map_group_axes_for_reshape(
+            orig_shape, node.args[1], dims
+        )
+        if dims is None:
+            raise RuntimeError("Invalid reshape")
+        shape = [
+            math.ceil(s / group_size) if d in dims else s
+            for d, s in enumerate(node.args[1])
+        ]
+        output = tgt(input, shape)
+    else:
+        raise RuntimeError(f"Unsupported layout op: {tgt}")
+
+    return output, tuple(dims)
+
+
+LAYOUT_OPS = {
+    torch.ops.aten.unsqueeze.default,
+    torch.ops.aten.slice.Tensor,
+    torch.ops.aten.expand.default,
+    torch.ops.aten.transpose.int,
+    torch.ops.aten.permute.default,
+    torch.ops.aten.reshape.default,
+    torch.ops.aten.view.default,
+}
+
+
+def run_qparam_through_nodes(model, input, nodes, dims, group_size):
+    env = {nodes[0].args[0]: input}
+    def map_node(n):
+        if n in env:
+            return env[n]
+        if n.op == "get_attr":
+            return fetch_attr(model, n.target)
+        return n
+
+    def load_arg(a):
+        return torch.fx.graph.map_arg(a, map_node)
+
+    for n in nodes:
+        if n.target in LAYOUT_OPS:
+            env[n], dims = propagate_group_axes_through_op(
+                n, env[n.args[0]], dims, group_size
+            )
+        else:
+            env[n] = n.target(*load_arg(n.args), **load_arg(n.kwargs))
+    return env[nodes[-1]]
+
+
 def fuse_dequantize_quantize(model: torch.fx.GraphModule):
     """
     Fuses consecutive dequantize -> quantize operations in a quantized model
@@ -732,63 +882,83 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
         ):
             continue
 
-        dq_node = node.args[0]
-        if dq_node.target != torch.ops.quantized_ops.dequantize.default:
+        # For quantize_mx, qparam is the first user node
+        if node.target == torch.ops.quantized_ops.quantize_mx.default:
+            scale_node = next(iter(node.users))
+        else:
+            scale_node = node.args[1]
+
+        is_microscaling_quant = (
+            scale_node.target == torch.ops.quantized_ops.calculate_mx_qparam.default
+        )
+
+        prev_node = node.args[0]
+        nodes_on_path = [node]
+
+        while (
+            len(prev_node.users) == 1
+            or (
+                prev_node == node.args[0]
+                and len(prev_node.users) == 2
+                and is_microscaling_quant
+                and prev_node == scale_node.args[0]
+            )
+        ):
+            target = prev_node.target
+            if not (
+                is_nop(prev_node)
+                or is_reshape_op(prev_node)
+                or target in (torch.ops.aten.expand.default, torch.ops.aten.slice.Tensor)
+            ):
+                break
+
+            nodes_on_path.append(prev_node)
+            prev_node = prev_node.args[0]
+
+        # Only support fusing get_attr -> dq -> ops -> q pattern
+        if (
+            prev_node.target != torch.ops.quantized_ops.dequantize.default
+            or prev_node.args[0].op != 'get_attr'
+        ):
             continue
 
-        dq_input = dq_node.args[0]
-        dq_scale = model.get_buffer(dq_node.args[1].target)
-
-        # For quantize_mx, qparam is the first getitem node
-        if node.target == torch.ops.quantized_ops.quantize_mx.default:
-            qparam_node = node.users[0]
-        else:
-            qparam_node = node.args[2]
-
-        # Handle dynamic quantization and only fuse if input is a constant
-        if (
-            node.target == torch.ops.quantized_ops.quantize_mx.default
-            or qparam_node.op != 'get_attr'
-        ):
-            if dq_input.op != 'get_attr':
-                continue
-
-            env = {dq_input: model.get_buffer(dq_input.target)}
-
-            def map_node(n):
-                return env[n] if n in env else model.get_buffer(n.target)
-
-            def load_arg(a):
-                return torch.fx.graph.map_arg(a, map_node)
-
-            env[dq_node] = dq_node.target(
-                *load_arg(dq_node.args), **load_arg(dq_node.kwargs)
-            )
-
-            if qparam_node.op != 'get_attr':
-                env[qparam_node] = qparam_node.target(
-                    *load_arg(qparam_node.args), **load_arg(qparam_node.kwargs)
-                )
-                q_scale = node.target(
-                    *load_arg(node.args), **load_arg(node.kwargs)
-                )
-            else:
-                q_scale, _ = node.target(
-                    *load_arg(node.args), **load_arg(node.kwargs)
-                )
-        else:
-            q_scale = model.get_buffer(node.args[2])
+        dq_node = prev_node
+        nodes_on_path = [dq_node] + list(reversed(nodes_on_path))
 
         # Check block size compatibility
         if node.target == torch.ops.quantized_ops.quantize_mx.default:
             block_size = node.args[3]
         else:
-            block_size = get_arg_or_kwarg(node, 4, "block_size", 1)
-
+            block_size = get_arg_or_kwarg(node, 3, "block_size", 1)
         dq_block_size = get_arg_or_kwarg(dq_node, 3, "block_size", 1)
-
         if block_size != dq_block_size:
             continue
+
+        dq_input = fetch_attr(model, dq_node.args[0].target)
+        dq_scale = fetch_attr(model, dq_node.args[1].target)
+
+        axes = tuple(
+            i for i , (s1, s2) in enumerate(zip(dq_scale.shape, dq_input.shape))
+            if s1 != s2
+        )
+        dq_scale = run_qparam_through_nodes(
+            model, dq_scale, nodes_on_path[1:-1], axes, block_size
+        )
+
+        if len(dq_node.args) > 2:
+            zero_point = fetch_attr(model, dq_node.args[2].target)
+            zero_point = run_qparam_through_nodes(
+                model, zero_point, nodes_on_path[1:-1], axes, block_size
+            )
+
+        # Handle dynamic quantization
+        if node.target == torch.ops.quantized_ops.quantize_mx.default:
+            q_scale = run_through_ops(model, dq_input, nodes_on_path)[0]
+        elif is_microscaling_quant:
+            nodes_on_path[-1] = scale_node
+            q_scale = run_through_ops(model, dq_input, nodes_on_path)
+        else:
+            q_scale = fetch_attr(model, scale_node.target)
 
         # Broadcast scales to the same shape
         nd = max(dq_scale.ndim, q_scale.ndim)
@@ -798,34 +968,52 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
             q_scale = q_scale.unsqueeze(0)
         shape = list(max(a, b) for a, b in zip(q_scale.shape, dq_scale.shape))
 
-        q_scale = expand(q_scale, shape, block_size)
-        dq_scale = expand(dq_scale, shape, block_size)
-        fused_scale = dq_scale / q_scale
+        q_scale_expanded = expand(q_scale, shape, block_size)
+        dq_scale_expanded = expand(dq_scale, shape, block_size)
+        fused_scale = dq_scale_expanded / q_scale_expanded
 
-        # Update the dequantize scale in place
-        dq_scale.resize_(fused_scale.shape).copy_(fused_scale)
-
-        # output_code is used to re-quantize the dequantized tensor
-        output_code = node.args[1]
-        if output_code is not None:
-            with graph.inserting_before(dq_node):
-                output_code = graph.node_copy(output_code, lambda n: n)
-        dq_node.args = (
-            dq_node.args + (None,) * (5 - len(dq_node.args)) + (output_code,)
-        )
-        dq_node.meta["dtype"] = node.meta.get("dtype")
-
-        # create new scale node and update users
-        with graph.inserting_before(qparam_node):
-            new_qparam_node = create_getattr_from_value(
-                model, model.graph, dq_input.name + "_scale", q_scale
+        input_node = dq_node.args[0]
+        with graph.inserting_before(node):
+            new_scale = create_getattr_from_value(
+                model, graph, input_node.name + "_scale", fused_scale
             )
-        new_qparam_node.meta["dtype"] = qparam_node.meta.get("dtype")
-        for user in list(qparam_node.users):
-            user.replace_input_with(qparam_node, new_qparam_node)
+            if len(dq_node.args) > 2:
+                new_zero_point = create_getattr_from_value(
+                    model, graph, input_node.name + "_zero_point", zero_point
+                )
+            else:
+                new_zero_point = None
+            output_code = graph.node_copy(node.args[4])
+            new_dq = graph.call_function(
+                torch.ops.quantized_ops.dequantize.default,
+                (
+                    node.args[0],
+                    new_scale,
+                    new_zero_point,
+                    block_size,
+                    None,
+                    output_code,
+                ),
+            )
 
-        node.replace_all_uses_with(dq_node)
+        if is_microscaling_quant:
+            with graph.inserting_before(node):
+                mx_scale = create_getattr_from_value(
+                    model, graph, input_node.name + "_scale", q_scale
+                )
+            scale_node.replace_all_uses_with(mx_scale)
+            mx_scale.meta["dtype"] = scale_node.meta.get("dtype")
+
+        node.replace_all_uses_with(new_dq)
+        dq_node.replace_all_uses_with(input_node)
         graph.erase_node(node)
+        graph.erase_node(dq_node)
+        new_dq.meta["dtype"] = node.meta.get("dtype")
+        new_scale.meta["dtype"] = scale_node.meta.get("dtype")
+        if new_zero_point is not None:
+            new_zero_point.meta["dtype"] = scale_node.meta.get("dtype")
+        for n in nodes_on_path[1:-1]:
+            n.meta["dtype"] = input_node.meta.get("dtype")
 
     graph.lint()
     graph.eliminate_dead_code()

@@ -20,7 +20,6 @@ __all__ = [
     "deduplicate_nodes",
     "dispatch_model",
     "dtype_byte_size",
-    "fold_param_ops",
     "get_device_map",
     "get_aten_graph_module",
     "get_node_name_to_scope",
@@ -192,37 +191,6 @@ def deduplicate_nodes(graph: torch.fx.Graph):
 
     graph.lint()
     return mapping
-
-
-def fold_param_ops(model):
-    """
-    Normalizes parameters in an FX GraphModule by folding simple
-    single-user operations directly into the parameter tensors.
-    """
-    for node in list(model.graph.nodes):
-        if node.op != "get_attr":
-            continue
-
-        param = fetch_attr(model, node.target)
-
-        def load_arg(a):
-            return torch.fx.graph.map_arg(a, lambda n: param if n is node else n)
-
-        while len(node.users) == 1:
-            user = next(iter(node.users), None)
-            if user.op != 'call_function' or len(user.all_input_nodes) != 1:
-                break
-
-            logger.info(f"Folding op {user.target} into parameter {node.target}")
-
-            param.data = user.target(*load_arg(user.args), **load_arg(user.kwargs))
-
-            user.replace_all_uses_with(node)
-            model.graph.erase_node(user)
-
-    model.graph.lint()
-    model.recompile()
-    return model
 
 
 def sink_obs_or_fq(model: GraphModule) -> GraphModule:

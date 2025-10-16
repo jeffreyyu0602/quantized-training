@@ -1628,8 +1628,8 @@ class Tensor final :
     kDtypeFieldNumber = 3,
     kMemoryFieldNumber = 4,
     kScratchpadFieldNumber = 6,
+    kDequantFieldNumber = 7,
     kReshapeFieldNumber = 8,
-    kScaleFieldNumber = 7,
     kIsNoneFieldNumber = 9,
   };
   // repeated int32 shape = 2;
@@ -1730,6 +1730,21 @@ class Tensor final :
   ::codegen::Memory* _internal_mutable_scratchpad();
 
   public:
+  // optional .codegen.OpOverload dequant = 7;
+  bool has_dequant() const;
+  void clear_dequant() ;
+  const ::codegen::OpOverload& dequant() const;
+  PROTOBUF_NODISCARD ::codegen::OpOverload* release_dequant();
+  ::codegen::OpOverload* mutable_dequant();
+  void set_allocated_dequant(::codegen::OpOverload* value);
+  void unsafe_arena_set_allocated_dequant(::codegen::OpOverload* value);
+  ::codegen::OpOverload* unsafe_arena_release_dequant();
+
+  private:
+  const ::codegen::OpOverload& _internal_dequant() const;
+  ::codegen::OpOverload* _internal_mutable_dequant();
+
+  public:
   // optional .codegen.OpOverload reshape = 8;
   bool has_reshape() const;
   void clear_reshape() ;
@@ -1743,17 +1758,6 @@ class Tensor final :
   private:
   const ::codegen::OpOverload& _internal_reshape() const;
   ::codegen::OpOverload* _internal_mutable_reshape();
-
-  public:
-  // optional double scale = 7;
-  bool has_scale() const;
-  void clear_scale() ;
-  double scale() const;
-  void set_scale(double value);
-
-  private:
-  double _internal_scale() const;
-  void _internal_set_scale(double value);
 
   public:
   // bool is_none = 9;
@@ -1772,7 +1776,7 @@ class Tensor final :
 
   friend class ::google::protobuf::internal::TcParser;
   static const ::google::protobuf::internal::TcParseTable<
-      4, 9, 3,
+      4, 9, 4,
       40, 2>
       _table_;
   friend class ::google::protobuf::MessageLite;
@@ -1799,8 +1803,8 @@ class Tensor final :
     ::google::protobuf::internal::ArenaStringPtr dtype_;
     ::codegen::Memory* memory_;
     ::codegen::Memory* scratchpad_;
+    ::codegen::OpOverload* dequant_;
     ::codegen::OpOverload* reshape_;
-    double scale_;
     bool is_none_;
     PROTOBUF_TSAN_DECLARE_MEMBER
   };
@@ -3152,44 +3156,112 @@ inline void Tensor::set_allocated_scratchpad(::codegen::Memory* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.scratchpad)
 }
 
-// optional double scale = 7;
-inline bool Tensor::has_scale() const {
-  bool value = (_impl_._has_bits_[0] & 0x00000008u) != 0;
+// optional .codegen.OpOverload dequant = 7;
+inline bool Tensor::has_dequant() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
+  PROTOBUF_ASSUME(!value || _impl_.dequant_ != nullptr);
   return value;
 }
-inline void Tensor::clear_scale() {
+inline void Tensor::clear_dequant() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
-  _impl_.scale_ = 0;
-  _impl_._has_bits_[0] &= ~0x00000008u;
+  if (_impl_.dequant_ != nullptr) _impl_.dequant_->Clear();
+  _impl_._has_bits_[0] &= ~0x00000004u;
 }
-inline double Tensor::scale() const {
-  // @@protoc_insertion_point(field_get:codegen.Tensor.scale)
-  return _internal_scale();
-}
-inline void Tensor::set_scale(double value) {
-  _internal_set_scale(value);
-  // @@protoc_insertion_point(field_set:codegen.Tensor.scale)
-}
-inline double Tensor::_internal_scale() const {
+inline const ::codegen::OpOverload& Tensor::_internal_dequant() const {
   PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
-  return _impl_.scale_;
+  const ::codegen::OpOverload* p = _impl_.dequant_;
+  return p != nullptr ? *p : reinterpret_cast<const ::codegen::OpOverload&>(::codegen::_OpOverload_default_instance_);
 }
-inline void Tensor::_internal_set_scale(double value) {
+inline const ::codegen::OpOverload& Tensor::dequant() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:codegen.Tensor.dequant)
+  return _internal_dequant();
+}
+inline void Tensor::unsafe_arena_set_allocated_dequant(::codegen::OpOverload* value) {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
-  _impl_._has_bits_[0] |= 0x00000008u;
-  _impl_.scale_ = value;
+  if (GetArena() == nullptr) {
+    delete reinterpret_cast<::google::protobuf::MessageLite*>(_impl_.dequant_);
+  }
+  _impl_.dequant_ = reinterpret_cast<::codegen::OpOverload*>(value);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000004u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000004u;
+  }
+  // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Tensor.dequant)
+}
+inline ::codegen::OpOverload* Tensor::release_dequant() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+
+  _impl_._has_bits_[0] &= ~0x00000004u;
+  ::codegen::OpOverload* released = _impl_.dequant_;
+  _impl_.dequant_ = nullptr;
+#ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
+  auto* old = reinterpret_cast<::google::protobuf::MessageLite*>(released);
+  released = ::google::protobuf::internal::DuplicateIfNonNull(released);
+  if (GetArena() == nullptr) {
+    delete old;
+  }
+#else   // PROTOBUF_FORCE_COPY_IN_RELEASE
+  if (GetArena() != nullptr) {
+    released = ::google::protobuf::internal::DuplicateIfNonNull(released);
+  }
+#endif  // !PROTOBUF_FORCE_COPY_IN_RELEASE
+  return released;
+}
+inline ::codegen::OpOverload* Tensor::unsafe_arena_release_dequant() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  // @@protoc_insertion_point(field_release:codegen.Tensor.dequant)
+
+  _impl_._has_bits_[0] &= ~0x00000004u;
+  ::codegen::OpOverload* temp = _impl_.dequant_;
+  _impl_.dequant_ = nullptr;
+  return temp;
+}
+inline ::codegen::OpOverload* Tensor::_internal_mutable_dequant() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  if (_impl_.dequant_ == nullptr) {
+    auto* p = CreateMaybeMessage<::codegen::OpOverload>(GetArena());
+    _impl_.dequant_ = reinterpret_cast<::codegen::OpOverload*>(p);
+  }
+  return _impl_.dequant_;
+}
+inline ::codegen::OpOverload* Tensor::mutable_dequant() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::codegen::OpOverload* _msg = _internal_mutable_dequant();
+  // @@protoc_insertion_point(field_mutable:codegen.Tensor.dequant)
+  return _msg;
+}
+inline void Tensor::set_allocated_dequant(::codegen::OpOverload* value) {
+  ::google::protobuf::Arena* message_arena = GetArena();
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  if (message_arena == nullptr) {
+    delete reinterpret_cast<::codegen::OpOverload*>(_impl_.dequant_);
+  }
+
+  if (value != nullptr) {
+    ::google::protobuf::Arena* submessage_arena = reinterpret_cast<::codegen::OpOverload*>(value)->GetArena();
+    if (message_arena != submessage_arena) {
+      value = ::google::protobuf::internal::GetOwnedMessage(message_arena, value, submessage_arena);
+    }
+    _impl_._has_bits_[0] |= 0x00000004u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000004u;
+  }
+
+  _impl_.dequant_ = reinterpret_cast<::codegen::OpOverload*>(value);
+  // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.dequant)
 }
 
 // optional .codegen.OpOverload reshape = 8;
 inline bool Tensor::has_reshape() const {
-  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
+  bool value = (_impl_._has_bits_[0] & 0x00000008u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.reshape_ != nullptr);
   return value;
 }
 inline void Tensor::clear_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   if (_impl_.reshape_ != nullptr) _impl_.reshape_->Clear();
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000008u;
 }
 inline const ::codegen::OpOverload& Tensor::_internal_reshape() const {
   PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
@@ -3207,16 +3279,16 @@ inline void Tensor::unsafe_arena_set_allocated_reshape(::codegen::OpOverload* va
   }
   _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(value);
   if (value != nullptr) {
-    _impl_._has_bits_[0] |= 0x00000004u;
+    _impl_._has_bits_[0] |= 0x00000008u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000004u;
+    _impl_._has_bits_[0] &= ~0x00000008u;
   }
   // @@protoc_insertion_point(field_unsafe_arena_set_allocated:codegen.Tensor.reshape)
 }
 inline ::codegen::OpOverload* Tensor::release_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
 
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000008u;
   ::codegen::OpOverload* released = _impl_.reshape_;
   _impl_.reshape_ = nullptr;
 #ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
@@ -3236,14 +3308,14 @@ inline ::codegen::OpOverload* Tensor::unsafe_arena_release_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   // @@protoc_insertion_point(field_release:codegen.Tensor.reshape)
 
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000008u;
   ::codegen::OpOverload* temp = _impl_.reshape_;
   _impl_.reshape_ = nullptr;
   return temp;
 }
 inline ::codegen::OpOverload* Tensor::_internal_mutable_reshape() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
-  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_._has_bits_[0] |= 0x00000008u;
   if (_impl_.reshape_ == nullptr) {
     auto* p = CreateMaybeMessage<::codegen::OpOverload>(GetArena());
     _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(p);
@@ -3267,9 +3339,9 @@ inline void Tensor::set_allocated_reshape(::codegen::OpOverload* value) {
     if (message_arena != submessage_arena) {
       value = ::google::protobuf::internal::GetOwnedMessage(message_arena, value, submessage_arena);
     }
-    _impl_._has_bits_[0] |= 0x00000004u;
+    _impl_._has_bits_[0] |= 0x00000008u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000004u;
+    _impl_._has_bits_[0] &= ~0x00000008u;
   }
 
   _impl_.reshape_ = reinterpret_cast<::codegen::OpOverload*>(value);

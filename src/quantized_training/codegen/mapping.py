@@ -980,6 +980,7 @@ def move_op_after_select(graph: torch.fx.Graph, nodes: List[Node]):
                     torch.ops.aten.select.int, (arg,) + sel_node.args[1:],
                 )
             propagate_shape(arg)
+            arg.meta['dtype'] = arg.args[0].meta.get('dtype', None)
         return arg
 
     with graph.inserting_before(user_node):
@@ -993,6 +994,7 @@ def move_op_after_select(graph: torch.fx.Graph, nodes: List[Node]):
 
     for n in select_nodes + [new_node]:
         propagate_shape(n)
+        n.meta['dtype'] = n.args[0].meta.get('dtype', None)
 
     # Respect the order of nodes appearing in the graph
     nodes = [n for n in nodes if n not in select_nodes and n != node_to_move]
@@ -1099,9 +1101,7 @@ def fuse_operator(
                 n.meta['slicing'] = fused_node
 
             if fused_node.target == torch.ops.quantized_ops.dequantize.default:
-                scale_n = fused_node.args[1]
-                if scale_n.op == "get_attr" and math.prod(scale_n.shape) == 1:
-                    n.meta['dq_scale'] = named_buffers[scale_n.target]
+                n.meta['dequantize'] = fused_node
 
             if next(iter(fused_node.users)).op != 'output':
                 n.meta['input_node'] = fused_node.args[0]
@@ -1283,7 +1283,7 @@ def run_fused_op_l2_tiling(
                     input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
                 )
 
-                weight_transposed = is_matmul(first_node) or transposed
+                weight_transposed = is_matmul(first_node) ^ transposed
                 weight_shape = (
                     (c_tiled, k_tiled) if weight_transposed else (k_tiled, c_tiled)
                 )

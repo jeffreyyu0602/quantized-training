@@ -175,6 +175,7 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
         # Quantize the scale using the codebook
         if scale_code is not None:
             sf = vmap(sf, scale_code)
+            zp = vmap(zp, scale_code)
 
         scale.resize_(sf.shape).copy_(sf)
         zero_point.resize_(zp.shape).copy_(zp)

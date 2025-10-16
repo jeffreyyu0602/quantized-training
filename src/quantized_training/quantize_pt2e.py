@@ -329,7 +329,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
         # Quantize weight and remove the fq module
         param = model.get_parameter(input_node.target)
         param.data = torch.ops.quantized_ops.quantize(
-            param.data, activation_post_process.code, scale
+            param.data, scale, code=activation_post_process.code,
         )
         node.replace_all_uses_with(input_node)
 
@@ -352,8 +352,7 @@ def _replace_observer_with_quantize_dequantize_node_decomposed(
                 model, graph, "code", activation_post_process.code)
             quantized_node = graph.call_function(
                 torch.ops.quantized_ops.quantize.default,
-                (node.args[0], get_attr_node, qparam_node),
-                {}
+                (node.args[0], qparam_node, None, None, get_attr_node),
             )
 
         # source_fn_stack is used by get_source_partitions to find nodes with a given op
@@ -538,9 +537,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
         weight = torch.ops.quantized_ops.quantize(
             param.data,
-            activation_post_process.code,
             scale,
             block_size=activation_post_process.block_size,
+            code=activation_post_process.code,
         )
 
         with graph.inserting_before(node):
@@ -617,10 +616,10 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 torch.ops.quantized_ops.quantize.default,
                 (
                     input_node,
-                    get_attr_node,
                     scale_node,
                     None,
                     activation_post_process.block_size,
+                    get_attr_node,
                     quant_code
                 ),
             )
@@ -766,10 +765,10 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
 
         weight = torch.ops.quantized_ops.quantize(
             param.data,
-            activation_post_process.code,
             scale,
             zero_point,
             activation_post_process.block_size,
+            activation_post_process.code,
         )
 
         with graph.inserting_before(node):
@@ -783,6 +782,10 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
         raise NotImplementedError
 
     quantized_node.meta["dtype"] = activation_post_process.dtype
+
+    if activation_post_process.scale_dtype is not None:
+        scale_node.meta["dtype"] = activation_post_process.scale_dtype
+        zero_point_node.meta["dtype"] = activation_post_process.scale_dtype
 
     # Insert a dequantize node after the quantize node
     with graph.inserting_before(node):
@@ -856,7 +859,6 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
 
             # stack and cat are handled above, so we can safely assume that
             # they won't appear here and there is only one input node
-            # TODO: group-wise Q and DQ cannot be moved past reshape ops
             if (
                 not is_nop(prev_node)
                 and not is_reshape_op(prev_node)
@@ -882,16 +884,15 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         value_remap = {node.args[0]: prev_node}
         with graph.inserting_before(prev_node.next):
             for n in node.all_input_nodes:
-                if n.op == "get_attr" and n.target not in value_remap:
+                if n not in value_remap:
                     value_remap[n] = graph.node_copy(n)
             new_node = graph.node_copy(node, lambda n: value_remap[n])
 
-        for n in value_remap.values():
-            propagate_shape(n, model)
-        propagate_shape(new_node, model)
-
         prev_node.replace_all_uses_with(new_node)
         new_node.replace_input_with(new_node, prev_node)
+
+        for n in list(value_remap.values()) + [new_node]:
+            propagate_shape(n, model)
 
         # Copy meta data from the original node, specifically dtype and source_fn_stack
         new_node.meta = {
@@ -904,10 +905,6 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
         target = source_fn_stack[-1][1] if len(source_fn_stack) > 0 else new_node.target
         source_fn_stack.append((new_node.name, target))
 
-        if hasattr(node, "shape"):
-            new_node.shape = node.shape
-            new_node.value = node.value
-
         return nodes_on_path
 
     # First, move the dequantize nodes before the stack and view nodes that
@@ -916,8 +913,13 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     for node in list(model.graph.nodes):
         if node.target not in [
             torch.ops.quantized_ops.dequantize.default,
-            torch.ops.quantized_ops.quantize.default
+            torch.ops.quantized_ops.quantize.default,
         ]:
+            continue
+
+        # Only handle per-tensor quantization for now
+        block_size = node.args[3]
+        if block_size is not None and block_size != 1:
             continue
 
         output_node = node
@@ -1028,8 +1030,7 @@ def fuse_quantize_with_dequantize(model: GraphModule, output_dtype: str = None):
                         model, graph, "code", get_quantization_map(output_dtype, device))
                     quantized_node = graph.call_function(
                         torch.ops.quantized_ops.quantize.default,
-                        (node_to_remove.args[0], get_attr_node, qparam_node),
-                        {}
+                        (node_to_remove.args[0], qparam_node, None, None, get_attr_node),
                     )
                 node_to_remove.replace_all_uses_with(quantized_node)
 

@@ -16,8 +16,8 @@ message Tensor {
   repeated int32 tiled_shape = 5;
   optional Memory scratchpad = 6;  // Optional scratchpad info
 
-  optional double scale = 7;       // Optional scale for quantization
-  optional OpOverload reshape = 8; // Optional fused reshape/slicing
+  optional OpOverload dequant = 7; // Optional fused dequantization op
+  optional OpOverload reshape = 8; // Optional fused reshape/slicing op
   bool is_none = 9;
 }
 

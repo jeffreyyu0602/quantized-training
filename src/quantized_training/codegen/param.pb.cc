@@ -176,8 +176,8 @@ inline constexpr Tensor::Impl_::Impl_(
             ::_pbi::ConstantInitialized()),
         memory_{nullptr},
         scratchpad_{nullptr},
+        dequant_{nullptr},
         reshape_{nullptr},
-        scale_{0},
         is_none_{false} {}
 
 template <typename>
@@ -308,7 +308,7 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.memory_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.tiled_shape_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.scratchpad_),
-    PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.scale_),
+    PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.dequant_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.reshape_),
     PROTOBUF_FIELD_OFFSET(::codegen::Tensor, _impl_.is_none_),
     ~0u,
@@ -317,8 +317,8 @@ const ::uint32_t TableStruct_param_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(
     0,
     ~0u,
     1,
-    3,
     2,
+    3,
     ~0u,
     ~0u,  // no _has_bits_
     PROTOBUF_FIELD_OFFSET(::codegen::TensorList, _internal_metadata_),
@@ -468,46 +468,47 @@ static const ::_pb::Message* const file_default_instances[] = {
 };
 const char descriptor_table_protodef_param_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
     "\n\013param.proto\022\007codegen\",\n\006Memory\022\021\n\tpart"
-    "ition\030\001 \001(\005\022\017\n\007address\030\002 \001(\004\"\231\002\n\006Tensor\022"
+    "ition\030\001 \001(\005\022\017\n\007address\030\002 \001(\004\"\262\002\n\006Tensor\022"
     "\014\n\004node\030\001 \001(\t\022\r\n\005shape\030\002 \003(\005\022\r\n\005dtype\030\003 "
     "\001(\t\022$\n\006memory\030\004 \001(\0132\017.codegen.MemoryH\000\210\001"
     "\001\022\023\n\013tiled_shape\030\005 \003(\005\022(\n\nscratchpad\030\006 \001"
-    "(\0132\017.codegen.MemoryH\001\210\001\001\022\022\n\005scale\030\007 \001(\001H"
-    "\002\210\001\001\022)\n\007reshape\030\010 \001(\0132\023.codegen.OpOverlo"
-    "adH\003\210\001\001\022\017\n\007is_none\030\t \001(\010B\t\n\007_memoryB\r\n\013_"
-    "scratchpadB\010\n\006_scaleB\n\n\010_reshape\".\n\nTens"
-    "orList\022 \n\007tensors\030\001 \003(\0132\017.codegen.Tensor"
-    "\"\031\n\007IntList\022\016\n\006values\030\001 \003(\003\"\032\n\010BoolList\022"
-    "\016\n\006values\030\001 \003(\010\"\034\n\nScalarList\022\016\n\006values\030"
-    "\001 \003(\001\"\266\002\n\010Argument\022!\n\006tensor\030\001 \001(\0132\017.cod"
-    "egen.TensorH\000\022*\n\013tensor_list\030\002 \001(\0132\023.cod"
-    "egen.TensorListH\000\022$\n\010int_list\030\003 \001(\0132\020.co"
-    "degen.IntListH\000\022\023\n\tint_value\030\004 \001(\003H\000\022\025\n\013"
-    "float_value\030\005 \001(\001H\000\022\024\n\nbool_value\030\006 \001(\010H"
-    "\000\022\023\n\tstr_value\030\007 \001(\tH\000\022&\n\tbool_list\030\010 \001("
-    "\0132\021.codegen.BoolListH\000\022*\n\013scalar_list\030\t "
-    "\001(\0132\023.codegen.ScalarListH\000B\n\n\010arg_type\"\312"
-    "\001\n\nOpOverload\022\014\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001(\t\022"
-    "\016\n\006target\030\003 \001(\t\022\037\n\004args\030\004 \003(\0132\021.codegen."
-    "Argument\022/\n\006kwargs\030\005 \003(\0132\037.codegen.OpOve"
-    "rload.KwargsEntry\032@\n\013KwargsEntry\022\013\n\003key\030"
-    "\001 \001(\t\022 \n\005value\030\002 \001(\0132\021.codegen.Argument:"
-    "\0028\001\"D\n\016OpOverloadList\022\014\n\004name\030\001 \001(\t\022$\n\007o"
-    "p_list\030\002 \003(\0132\023.codegen.OpOverload\"\300\001\n\tOp"
-    "eration\022!\n\002op\030\002 \001(\0132\023.codegen.OpOverload"
-    "H\000\022+\n\010fused_op\030\003 \001(\0132\027.codegen.OpOverloa"
-    "dListH\000\022!\n\006output\030\004 \001(\0132\017.codegen.Tensor"
-    "H\001\022&\n\007outputs\030\005 \001(\0132\023.codegen.TensorList"
-    "H\001B\t\n\007op_typeB\r\n\013return_type\"n\n\005Model\022\037\n"
-    "\006inputs\030\001 \003(\0132\017.codegen.Tensor\022#\n\nparame"
-    "ters\030\002 \003(\0132\017.codegen.Tensor\022\037\n\003ops\030\003 \003(\013"
-    "2\022.codegen.Operationb\006proto3"
+    "(\0132\017.codegen.MemoryH\001\210\001\001\022)\n\007dequant\030\007 \001("
+    "\0132\023.codegen.OpOverloadH\002\210\001\001\022)\n\007reshape\030\010"
+    " \001(\0132\023.codegen.OpOverloadH\003\210\001\001\022\017\n\007is_non"
+    "e\030\t \001(\010B\t\n\007_memoryB\r\n\013_scratchpadB\n\n\010_de"
+    "quantB\n\n\010_reshape\".\n\nTensorList\022 \n\007tenso"
+    "rs\030\001 \003(\0132\017.codegen.Tensor\"\031\n\007IntList\022\016\n\006"
+    "values\030\001 \003(\003\"\032\n\010BoolList\022\016\n\006values\030\001 \003(\010"
+    "\"\034\n\nScalarList\022\016\n\006values\030\001 \003(\001\"\266\002\n\010Argum"
+    "ent\022!\n\006tensor\030\001 \001(\0132\017.codegen.TensorH\000\022*"
+    "\n\013tensor_list\030\002 \001(\0132\023.codegen.TensorList"
+    "H\000\022$\n\010int_list\030\003 \001(\0132\020.codegen.IntListH\000"
+    "\022\023\n\tint_value\030\004 \001(\003H\000\022\025\n\013float_value\030\005 \001"
+    "(\001H\000\022\024\n\nbool_value\030\006 \001(\010H\000\022\023\n\tstr_value\030"
+    "\007 \001(\tH\000\022&\n\tbool_list\030\010 \001(\0132\021.codegen.Boo"
+    "lListH\000\022*\n\013scalar_list\030\t \001(\0132\023.codegen.S"
+    "calarListH\000B\n\n\010arg_type\"\312\001\n\nOpOverload\022\014"
+    "\n\004name\030\001 \001(\t\022\n\n\002op\030\002 \001(\t\022\016\n\006target\030\003 \001(\t"
+    "\022\037\n\004args\030\004 \003(\0132\021.codegen.Argument\022/\n\006kwa"
+    "rgs\030\005 \003(\0132\037.codegen.OpOverload.KwargsEnt"
+    "ry\032@\n\013KwargsEntry\022\013\n\003key\030\001 \001(\t\022 \n\005value\030"
+    "\002 \001(\0132\021.codegen.Argument:\0028\001\"D\n\016OpOverlo"
+    "adList\022\014\n\004name\030\001 \001(\t\022$\n\007op_list\030\002 \003(\0132\023."
+    "codegen.OpOverload\"\300\001\n\tOperation\022!\n\002op\030\002"
+    " \001(\0132\023.codegen.OpOverloadH\000\022+\n\010fused_op\030"
+    "\003 \001(\0132\027.codegen.OpOverloadListH\000\022!\n\006outp"
+    "ut\030\004 \001(\0132\017.codegen.TensorH\001\022&\n\007outputs\030\005"
+    " \001(\0132\023.codegen.TensorListH\001B\t\n\007op_typeB\r"
+    "\n\013return_type\"n\n\005Model\022\037\n\006inputs\030\001 \003(\0132\017"
+    ".codegen.Tensor\022#\n\nparameters\030\002 \003(\0132\017.co"
+    "degen.Tensor\022\037\n\003ops\030\003 \003(\0132\022.codegen.Oper"
+    "ationb\006proto3"
 };
 static ::absl::once_flag descriptor_table_param_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_param_2eproto = {
     false,
     false,
-    1388,
+    1413,
     descriptor_table_protodef_param_2eproto,
     "param.proto",
     &descriptor_table_param_2eproto_once,
@@ -759,12 +760,13 @@ class Tensor::_Internal {
   static void set_has_scratchpad(HasBits* has_bits) {
     (*has_bits)[0] |= 2u;
   }
-  static void set_has_scale(HasBits* has_bits) {
-    (*has_bits)[0] |= 8u;
+  static const ::codegen::OpOverload& dequant(const Tensor* msg);
+  static void set_has_dequant(HasBits* has_bits) {
+    (*has_bits)[0] |= 4u;
   }
   static const ::codegen::OpOverload& reshape(const Tensor* msg);
   static void set_has_reshape(HasBits* has_bits) {
-    (*has_bits)[0] |= 4u;
+    (*has_bits)[0] |= 8u;
   }
 };
 
@@ -773,6 +775,9 @@ const ::codegen::Memory& Tensor::_Internal::memory(const Tensor* msg) {
 }
 const ::codegen::Memory& Tensor::_Internal::scratchpad(const Tensor* msg) {
   return *msg->_impl_.scratchpad_;
+}
+const ::codegen::OpOverload& Tensor::_Internal::dequant(const Tensor* msg) {
+  return *msg->_impl_.dequant_;
 }
 const ::codegen::OpOverload& Tensor::_Internal::reshape(const Tensor* msg) {
   return *msg->_impl_.reshape_;
@@ -810,16 +815,13 @@ Tensor::Tensor(
   _impl_.scratchpad_ = (cached_has_bits & 0x00000002u)
                 ? CreateMaybeMessage<::codegen::Memory>(arena, *from._impl_.scratchpad_)
                 : nullptr;
-  _impl_.reshape_ = (cached_has_bits & 0x00000004u)
+  _impl_.dequant_ = (cached_has_bits & 0x00000004u)
+                ? CreateMaybeMessage<::codegen::OpOverload>(arena, *from._impl_.dequant_)
+                : nullptr;
+  _impl_.reshape_ = (cached_has_bits & 0x00000008u)
                 ? CreateMaybeMessage<::codegen::OpOverload>(arena, *from._impl_.reshape_)
                 : nullptr;
-  ::memcpy(reinterpret_cast<char *>(&_impl_) +
-               offsetof(Impl_, scale_),
-           reinterpret_cast<const char *>(&from._impl_) +
-               offsetof(Impl_, scale_),
-           offsetof(Impl_, is_none_) -
-               offsetof(Impl_, scale_) +
-               sizeof(Impl_::is_none_));
+  _impl_.is_none_ = from._impl_.is_none_;
 
   // @@protoc_insertion_point(copy_constructor:codegen.Tensor)
 }
@@ -854,6 +856,7 @@ inline void Tensor::SharedDtor() {
   _impl_.dtype_.Destroy();
   delete _impl_.memory_;
   delete _impl_.scratchpad_;
+  delete _impl_.dequant_;
   delete _impl_.reshape_;
   _impl_.~Impl_();
 }
@@ -870,7 +873,7 @@ PROTOBUF_NOINLINE void Tensor::Clear() {
   _impl_.node_.ClearToEmpty();
   _impl_.dtype_.ClearToEmpty();
   cached_has_bits = _impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000007u) {
+  if (cached_has_bits & 0x0000000fu) {
     if (cached_has_bits & 0x00000001u) {
       ABSL_DCHECK(_impl_.memory_ != nullptr);
       _impl_.memory_->Clear();
@@ -880,11 +883,14 @@ PROTOBUF_NOINLINE void Tensor::Clear() {
       _impl_.scratchpad_->Clear();
     }
     if (cached_has_bits & 0x00000004u) {
+      ABSL_DCHECK(_impl_.dequant_ != nullptr);
+      _impl_.dequant_->Clear();
+    }
+    if (cached_has_bits & 0x00000008u) {
       ABSL_DCHECK(_impl_.reshape_ != nullptr);
       _impl_.reshape_->Clear();
     }
   }
-  _impl_.scale_ = 0;
   _impl_.is_none_ = false;
   _impl_._has_bits_.Clear();
   _internal_metadata_.Clear<::google::protobuf::UnknownFieldSet>();
@@ -898,7 +904,7 @@ const char* Tensor::_InternalParse(
 
 
 PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1
-const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
+const ::_pbi::TcParseTable<4, 9, 4, 40, 2> Tensor::_table_ = {
   {
     PROTOBUF_FIELD_OFFSET(Tensor, _impl_._has_bits_),
     0, // no _extensions_
@@ -907,7 +913,7 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
     4294966784,  // skipmap
     offsetof(decltype(_table_), field_entries),
     9,  // num_field_entries
-    3,  // num_aux_entries
+    4,  // num_aux_entries
     offsetof(decltype(_table_), aux_entries),
     &_Tensor_default_instance_._instance,
     ::_pbi::TcParser::GenericFallback,  // fallback
@@ -931,12 +937,12 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
     // optional .codegen.Memory scratchpad = 6;
     {::_pbi::TcParser::FastMtS1,
      {50, 1, 1, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scratchpad_)}},
-    // optional double scale = 7;
-    {::_pbi::TcParser::FastF64S1,
-     {57, 3, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_)}},
+    // optional .codegen.OpOverload dequant = 7;
+    {::_pbi::TcParser::FastMtS1,
+     {58, 2, 2, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.dequant_)}},
     // optional .codegen.OpOverload reshape = 8;
     {::_pbi::TcParser::FastMtS1,
-     {66, 2, 2, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_)}},
+     {66, 3, 3, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_)}},
     // bool is_none = 9;
     {::_pbi::TcParser::SingularVarintNoZag1<bool, offsetof(Tensor, _impl_.is_none_), 63>(),
      {72, 63, 0, PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_)}},
@@ -967,11 +973,11 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
     // optional .codegen.Memory scratchpad = 6;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scratchpad_), _Internal::kHasBitsOffset + 1, 1,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
-    // optional double scale = 7;
-    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.scale_), _Internal::kHasBitsOffset + 3, 0,
-    (0 | ::_fl::kFcOptional | ::_fl::kDouble)},
+    // optional .codegen.OpOverload dequant = 7;
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.dequant_), _Internal::kHasBitsOffset + 2, 2,
+    (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
     // optional .codegen.OpOverload reshape = 8;
-    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_), _Internal::kHasBitsOffset + 2, 2,
+    {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.reshape_), _Internal::kHasBitsOffset + 3, 3,
     (0 | ::_fl::kFcOptional | ::_fl::kMessage | ::_fl::kTvTable)},
     // bool is_none = 9;
     {PROTOBUF_FIELD_OFFSET(Tensor, _impl_.is_none_), -1, 0,
@@ -979,6 +985,7 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
   }}, {{
     {::_pbi::TcParser::GetTable<::codegen::Memory>()},
     {::_pbi::TcParser::GetTable<::codegen::Memory>()},
+    {::_pbi::TcParser::GetTable<::codegen::OpOverload>()},
     {::_pbi::TcParser::GetTable<::codegen::OpOverload>()},
   }}, {{
     "\16\4\0\5\0\0\0\0\0\0\0\0\0\0\0\0"
@@ -1044,15 +1051,15 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
         _Internal::scratchpad(this).GetCachedSize(), target, stream);
   }
 
-  // optional double scale = 7;
-  if (cached_has_bits & 0x00000008u) {
-    target = stream->EnsureSpace(target);
-    target = ::_pbi::WireFormatLite::WriteDoubleToArray(
-        7, this->_internal_scale(), target);
+  // optional .codegen.OpOverload dequant = 7;
+  if (cached_has_bits & 0x00000004u) {
+    target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
+        7, _Internal::dequant(this),
+        _Internal::dequant(this).GetCachedSize(), target, stream);
   }
 
   // optional .codegen.OpOverload reshape = 8;
-  if (cached_has_bits & 0x00000004u) {
+  if (cached_has_bits & 0x00000008u) {
     target = ::google::protobuf::internal::WireFormatLite::InternalWriteMessage(
         8, _Internal::reshape(this),
         _Internal::reshape(this).GetCachedSize(), target, stream);
@@ -1134,15 +1141,16 @@ const ::_pbi::TcParseTable<4, 9, 3, 40, 2> Tensor::_table_ = {
           1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.scratchpad_);
     }
 
-    // optional .codegen.OpOverload reshape = 8;
+    // optional .codegen.OpOverload dequant = 7;
     if (cached_has_bits & 0x00000004u) {
       total_size +=
-          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.reshape_);
+          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.dequant_);
     }
 
-    // optional double scale = 7;
+    // optional .codegen.OpOverload reshape = 8;
     if (cached_has_bits & 0x00000008u) {
-      total_size += 9;
+      total_size +=
+          1 + ::google::protobuf::internal::WireFormatLite::MessageSize(*_impl_.reshape_);
     }
 
   }
@@ -1189,13 +1197,13 @@ void Tensor::MergeImpl(::google::protobuf::Message& to_msg, const ::google::prot
           from._internal_scratchpad());
     }
     if (cached_has_bits & 0x00000004u) {
+      _this->_internal_mutable_dequant()->::codegen::OpOverload::MergeFrom(
+          from._internal_dequant());
+    }
+    if (cached_has_bits & 0x00000008u) {
       _this->_internal_mutable_reshape()->::codegen::OpOverload::MergeFrom(
           from._internal_reshape());
     }
-    if (cached_has_bits & 0x00000008u) {
-      _this->_impl_.scale_ = from._impl_.scale_;
-    }
-    _this->_impl_._has_bits_[0] |= cached_has_bits;
   }
   if (from._internal_is_none() != 0) {
     _this->_internal_set_is_none(from._internal_is_none());

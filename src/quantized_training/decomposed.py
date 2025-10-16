@@ -32,14 +32,6 @@ def conv2d(
     )
 
 quantized_decomposed_lib.define(
-    "linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor"
-)
-
-@impl(quantized_decomposed_lib, "linear", "CompositeExplicitAutograd")
-def linear(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
-    return F.linear(input, weight, bias)
-
-quantized_decomposed_lib.define(
     "max_pool2d(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, "
     "int[2] dilation=1, bool ceil_mode=False) -> Tensor"
 )
@@ -52,14 +44,16 @@ def max_pool2d(
     padding: Union[int, Tuple[int]] = 0,
     dilation: Union[int, Tuple[int]] = 1,
     ceil_mode: bool = False,
+    return_indices: bool = False
 ) -> torch.Tensor:
     return F.max_pool2d(
         self.permute(0, 3, 1, 2),
         kernel_size,
-        stride=stride,
-        padding=padding,
-        dilation=dilation,
+        stride,
+        padding,
+        dilation,
         ceil_mode=ceil_mode,
+        return_indices=return_indices,
     ).permute(0, 2, 3, 1)
 
 quantized_decomposed_lib.define(
@@ -69,6 +63,22 @@ quantized_decomposed_lib.define(
 @impl(quantized_decomposed_lib, "adaptive_avg_pool2d", "CompositeExplicitAutograd")
 def adaptive_avg_pool2d(self: torch.Tensor, output_size: Union[int, Tuple[int]] = 1) -> torch.Tensor:
     return F.adaptive_avg_pool2d(self.permute(0, 3, 1, 2), output_size).permute(0, 2, 3, 1)
+
+quantized_decomposed_lib.define(
+    "linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "linear", "CompositeExplicitAutograd")
+def linear(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None) -> torch.Tensor:
+    return F.linear(input, weight, bias)
+
+quantized_decomposed_lib.define(
+    "matmul(Tensor self, Tensor other) -> Tensor"
+)
+
+@impl(quantized_decomposed_lib, "matmul", "CompositeExplicitAutograd")
+def matmul(self: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
+    return torch.matmul(self, other)
 
 def expand(input, shape, block_size):
     while input.ndim < len(shape):
@@ -110,17 +120,17 @@ def vmap(input: torch.Tensor, code: torch.Tensor, chunk_size=65536) -> torch.Ten
 
 
 quantized_decomposed_lib.define(
-    "quantize(Tensor input, Tensor code, Tensor scale, Tensor? zero_point=None, int? block_size=None, Tensor quant_code=None) -> Tensor"
+    "quantize(Tensor input, Tensor scale, Tensor? zero_point=None, int? block_size=None, Tensor? code=None, Tensor? quant_code=None) -> Tensor"
 )
 
 
 @impl(quantized_decomposed_lib, "quantize", "CompositeExplicitAutograd")
 def quantize(
     input: torch.Tensor,
-    code: torch.Tensor,
     scale: torch.Tensor,
     zero_point: Optional[torch.Tensor] = None,
     block_size: Optional[int] = None,
+    code: torch.Tensor = None,
     quant_code: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """ Quantization for the Tensor using scales and zero points to map
@@ -138,6 +148,7 @@ def quantize(
         Tensor with requested dtype (e.g. int8), note the quantization parameters
         are not stored in the Tensor, we are storing them in function arguments instead
     """
+    assert code is not None, "code must be provided for quantization"
 
     if block_size is not None:
         scale = expand(scale, input.shape, block_size)
@@ -383,7 +394,7 @@ def quantize_mx(
         force_scale_power_of_two=force_scale_power_of_two,
         code=scale_code,
     )
-    input = quantize(input, code, scale, block_size=block_size)
+    input = quantize(input, scale, block_size=block_size, code=code)
     return scale, input
 
 

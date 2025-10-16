@@ -5,7 +5,7 @@ import logging
 import math
 import operator
 from itertools import repeat
-from typing import Callable, List, Set, Tuple, Union, Optional
+from typing import Callable, List, Set, Tuple, Union, Optional, Dict
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +15,7 @@ from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
 from .mapping import (
+    duplicate_shared_nodes,
     get_parameter_or_buffer,
     get_tiled_input_shape,
     propagate_shape,
@@ -1124,25 +1125,285 @@ def eliminate_reshape_with_no_effect(model: GraphModule):
     return model
 
 
-def linear_transposed(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor = None
-) -> torch.Tensor:
-    return torch.ops.aten.linear.default(input, weight.T, bias)
+def make_linear_wrapper(transpose=False, skip_fc=False):
+    """
+    Returns a function that wraps torch.nn.functional.linear with optional
+    weight transposition.
+    """
+    def wrapped_linear(input, weight, bias=None):
+        is_fc = math.prod(input.shape[:-1]) == 1
+        do_transpose = transpose and not (skip_fc and is_fc)
+        return torch.ops.aten.linear.default(
+            input, weight.T if do_transpose else weight, bias
+        )
+    return wrapped_linear
 
 
-def linear_transposed_without_fc(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor = None
-) -> torch.Tensor:
-    if math.prod(input.shape[:-1]) == 1:
-        return torch.ops.aten.linear.default(input, weight, bias)
-    return torch.ops.aten.linear.default(input, weight.T, bias)
+def make_matmul_wrapper(transpose=False, skip_fc=False):
+    """
+    Returns a function that wraps torch.matmul with optional transposition of
+    the second argument.
+    """
+    def wrapped_matmul(input, other):
+        is_fc = math.prod(input.shape[:-1]) == 1
+        do_transpose = transpose and not (skip_fc and is_fc)
+        return torch.ops.aten.matmul.default(
+            input, other if do_transpose else other.T
+        )
+    return wrapped_matmul
 
 
-def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
+def find_upstream_matching_transpose(
+    tnode: Node,
+    *,
+    max_hops: int = 64,
+) -> Tuple[Optional[Node], List[Node]]:
+    """
+    Given a transpose node `tnode` that must be aten.transpose.int(-2, -1),
+    walk upstream through a small, explicit set of allowed ops to find an
+    earlier/matching transpose(-2, -1). Returns (found_transpose, path).
+
+    The search explores all input edges recursively (up to `max_hops`).
+    `path` is the sequence of nodes from `tnode` to the match (inclusive).
+    """
+    if tnode.target != torch.ops.aten.transpose.int:
+        return None
+
+    allowed_targets = {
+        torch.ops.aten.select.int,
+        torch.ops.quantized_ops.calculate_mx_qparam.default,
+        torch.ops.quantized_ops.dequantize.default,
+        torch.ops.quantized_ops.quantize.default,
+        torch.ops.quantized_ops.quantize_mx.default,
+    }
+
+    def dfs(cur: Node, hops: int) -> Optional[List[Node]]:
+        if hops >= max_hops:
+            return None
+        path = [cur]
+
+        # Found a matching transpose(-2, -1) or a graph input
+        if cur.target == torch.ops.aten.transpose.int:
+            return path
+        if cur.op == "get_attr":
+            return path
+
+        if is_nop(cur) or cur.target in allowed_targets:
+            for inp in cur.all_input_nodes:
+                path.extend(dfs(inp, hops + 1) or [])
+        return path
+
+    found_path = dfs(tnode.args[0], 0)
+    if not found_path:
+        return None
+    return list(set([tnode] + found_path))
+
+
+def _rank(n: Node) -> int:
+    return len(n.shape)
+
+
+def _norm_axes(args, r: int) -> set:
+    """Convert negative dims to positive indices."""
+    axes = []
+    for a in args[1:]:
+        if isinstance(a, int):
+            axes.append(a if a >= 0 else r + a)
+    return set(axes)
+
+
+def _insert_transposed_input(arg: Node, model: GraphModule):
+    with model.graph.inserting_after(arg):
+        if arg.op == "get_attr":
+            transposed = create_getattr_from_value(
+                model, model.graph, arg.name + "_T", arg.value.mT
+            )
+        else:
+            transposed = model.graph.call_function(
+                torch.ops.aten.transpose.int, (arg, -2, -1)
+            )
+    transposed.meta["dtype"] = arg.meta.get("dtype")
+    return transposed
+
+
+def process_double_transpose_chain(
+    model: GraphModule, chain: List[Node], transposed_nodes: Dict[Node, Node] = None
+) -> bool:
+    """
+    Optimizes a chain like [select_3, select_2, quantize_default_1, transpose_3]
+    when there's a matching matmul-side transpose (user of chain[0]).
+
+    Steps:
+      1. Check if the two transposes cancel (considering selects).
+      2. If yes, detach intermediate nodes and remove the redundant transpose.
+
+    Returns:
+        bool: True if optimization was applied, else False.
+    """
+    graph = model.graph
+
+    if transposed_nodes is None:
+        transposed_nodes = {}
+
+    chain = [n for n in chain if n.op == "call_function"]
+    if not chain or len(chain) < 2:
+        return False
+
+    up_t = chain[0]
+    down_t = chain[-1]
+
+    if up_t.target != torch.ops.aten.transpose.int:
+        return False
+
+    # Validate transpose axes
+    down_rank = _rank(down_t)
+    if _norm_axes(down_t.args, down_rank) != {down_rank - 2, down_rank - 1}:
+        return False
+
+    up_rank = _rank(up_t)
+    if _norm_axes(up_t.args, up_rank) != {up_rank - 2, up_rank - 1}:
+        return False
+
+    # Ensure selects are on first dimension only
+    selects = [n for n in chain if n.target == torch.ops.aten.select.int]
+    if up_rank < len(selects) + 2 or any(n.args[1] != 0 for n in selects):
+        return False
+
+    # We don't need to duplicate the upstream transpose node
+    chain = duplicate_shared_nodes(graph, chain[1:])
+
+    # Rewrite graph to remove cancelling transposes
+    for n in chain:
+        for arg in n.all_input_nodes:
+            if arg == up_t:
+                n.replace_input_with(up_t, up_t.args[0])
+                continue
+            if arg in chain or arg.value.ndim < 2:
+                continue
+            if arg not in transposed_nodes:
+                transposed_nodes[arg] = _insert_transposed_input(arg, model)
+            n.replace_input_with(arg, transposed_nodes[arg])
+
+    down_t.replace_all_uses_with(down_t.args[0])
+    graph.erase_node(down_t)
+
+    if not up_t.users:
+        graph.erase_node(up_t)
+
+    return True
+
+
+def move_transpose_before_dq(
+    model: GraphModule, chain: List[Node], transposed_nodes: Dict[Node, Node] = None
+) -> bool:
+    """
+    Optimizes a chain like [dequantize_default, select_3, select_2, transpose_3].
+
+    Steps:
+      1. Check if there's a dequantize operation in the chain.
+      2. If yes, move the transpose before the dequantize.
+
+    Returns:
+        bool: True if optimization was applied, else False.
+    """
+    graph = model.graph
+
+    if transposed_nodes is None:
+        transposed_nodes = {}
+
+    chain = [n for n in chain if n.op == "call_function"]
+    for i, n in enumerate(chain):
+        if n.target == torch.ops.quantized_ops.dequantize.default:
+            break
+
+    chain = chain[i:]  # Keep only from dequantize to end
+
+    if not chain or len(chain) < 2:
+        return False
+
+    down_t = chain[-1]
+
+    # Validate transpose axes
+    down_rank = len(down_t.shape)
+    if _norm_axes(down_t.args, down_rank) != {down_rank - 2, down_rank - 1}:
+        return False
+
+    # Ensure selects are on first dimension only
+    selects = [n for n in chain if n.target == torch.ops.aten.select.int]
+    if any(n.args[1] != 0 for n in selects):
+        return False
+
+    chain = duplicate_shared_nodes(graph, chain)
+    dequantize_node = chain[0]
+
+    # Insert transpose before dequantize
+    with graph.inserting_before(dequantize_node):
+        up_t = graph.call_function(
+            torch.ops.aten.transpose.int, (dequantize_node.args[0], -2, -1)
+        )
+    up_t.meta["dtype"] = dequantize_node.args[0].meta.get("dtype")
+    dequantize_node.replace_input_with(dequantize_node.args[0], up_t)
+    propagate_shape(up_t)
+
+    for n in chain:
+        for arg in n.all_input_nodes:
+            if arg in chain or arg.value.ndim < 2 or arg == up_t:
+                continue
+            if arg not in transposed_nodes:
+                transposed_nodes[arg] = _insert_transposed_input(arg, model)
+            n.replace_input_with(arg, transposed_nodes[arg])
+
+    down_t.replace_all_uses_with(down_t.args[0])
+    graph.erase_node(down_t)
+
+    return True
+
+
+def fold_transpose_into_constant(
+    model: GraphModule, chain: List[Node], transposed_nodes: Dict[Node, Node] = None
+) -> bool:
+    graph = model.graph
+    if not chain or len(chain) < 2:
+        return False
+
+    if transposed_nodes is None:
+        transposed_nodes = {}
+
+    attr_node = chain[0]
+    down_t = chain[-1]
+
+    if attr_node.op != "get_attr":
+        return False
+
+    # Ensure selects are on first dimension only
+    up_rank = _rank(attr_node)
+    selects = [n for n in chain if n.target == torch.ops.aten.select.int]
+    if up_rank < len(selects) + 2 or any(n.args[1] != 0 for n in selects):
+        return False
+
+    # We don't need to duplicate the transpose node
+    chain = duplicate_shared_nodes(model.graph, chain[1:])
+
+    for n in chain:
+        for arg in n.all_input_nodes:
+            if arg in chain or arg.value.ndim < 2:
+                continue
+            if arg not in transposed_nodes:
+                transposed_nodes[arg] = _insert_transposed_input(arg, model)
+            n.replace_input_with(arg, transposed_nodes[arg])
+
+    down_t.replace_all_uses_with(down_t.args[0])
+    graph.erase_node(down_t)
+
+    if not attr_node.users:
+        graph.erase_node(attr_node)
+
+    return True
+
+
+def transpose_linear_weights(
+    model: GraphModule, transpose_weight, transpose_fc: bool = False
+):
     """
     Transpose the weights of linear layers in the given FX graph module.
 
@@ -1153,61 +1414,114 @@ def transpose_linear_weights(model: GraphModule, transpose_fc: bool = False):
     Returns:
         GraphModule: The transformed FX graph module with transposed weights.
     """
-    torch.nn.functional.linear = (
-        linear_transposed if transpose_fc else linear_transposed_without_fc
-    )
+    skip_fc = not transpose_fc
+    torch.nn.functional.linear = make_linear_wrapper(transpose_weight, skip_fc)
+    torch.matmul = make_matmul_wrapper(transpose_weight, skip_fc)
 
-    for node in model.graph.nodes: 
-        if node.target not in [
-            torch.ops.aten.linear.default,
-            torch.ops.quantized_ops.linear_mx.default,
-        ]:
+    transposed_nodes = {}
+
+    for node in list(model.graph.nodes):
+        if not is_gemm_op(node):
             continue
 
         input_node = node.args[0]
         input_shape = input_node.value.shape
-
-        # TODO: handle torch.matmul second operand when not transposing FC
-        if not transpose_fc and math.prod(input_shape[:-1]) == 1:
-            continue
-
-        node.meta["transposed"] = True
+        is_fc = math.prod(input_shape[:-1]) == 1
 
         weight_node = node.args[1]
-        weight = get_parameter_or_buffer(model, weight_node.target)
-        weight.data = weight.data.T
+        scale_node = node.kwargs.get("weight_scale")
 
-        for user in list(weight_node.users):
-            if user.target == torch.ops.quantized_ops.spmm_csr.default:
-                user.kwargs = {
-                    **user.kwargs,
-                    "weight_transposed": True
-                }
+        if is_linear(node):
+            if (is_fc and not transpose_fc) or (not is_fc and not transpose_weight):
+                continue
 
-        if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
-            shape = tiled_shapes["weight"]
-            tiled_shapes["weight"] = (shape[1], shape[0])
+            weight = get_parameter_or_buffer(model, weight_node.target)
+            weight.data = weight.data.T
 
-            if "weight_scale" in tiled_shapes:
-                scale_shape = tiled_shapes["weight_scale"]
-                tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
+            if scale_node is not None:
+                scale = get_parameter_or_buffer(model, scale_node.target)
+                scale.data = scale.data.T
 
-        if node.target == torch.ops.quantized_ops.linear_mx.default:
-            scale_node = node.kwargs.get("weight_scale")
-            scale = get_parameter_or_buffer(model, scale_node.target)
-            scale.data = scale.data.T
-            continue
+            for user in list(weight_node.users):
+                if user.target == torch.ops.quantized_ops.spmm_csr.default:
+                    user.kwargs = {
+                        **user.kwargs,
+                        "weight_transposed": True
+                    }
 
-        with model.graph.inserting_before(node):
-            linear_node = model.graph.call_function(
-                torch.ops.quantized_ops.linear.default, args=node.args
-            )
+            node.meta["transposed"] = True
 
-        linear_node.meta = node.meta
-        linear_node.meta["transposed"] = True
+            if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
+                shape = tiled_shapes["weight"]
+                tiled_shapes["weight"] = (shape[1], shape[0])
 
-        node.replace_all_uses_with(linear_node)
-        model.graph.erase_node(node)
+                if "weight_scale" in tiled_shapes:
+                    scale_shape = tiled_shapes["weight_scale"]
+                    tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
+
+            if node.target == torch.ops.aten.linear.default:
+                with model.graph.inserting_before(node):
+                    linear_transposed = model.graph.call_function(
+                        torch.ops.quantized_ops.linear.default, node.args
+                    )
+                node.replace_all_uses_with(linear_transposed)
+                model.graph.erase_node(node)
+                linear_transposed.meta = node.meta
+
+        # Matmul is already transposed by default
+        if is_matmul(node):
+            if (is_fc and transpose_fc) or (not is_fc and transpose_weight):
+                continue
+
+            with model.graph.inserting_before(node):
+                weight_transposed = model.graph.call_function(
+                    torch.ops.aten.transpose.int, (weight_node, -2, -1)
+                )
+            weight_transposed.meta["dtype"] = weight_node.meta.get("dtype")
+            propagate_shape(weight_transposed, model)
+
+            if scale_node is not None:
+                with model.graph.inserting_before(node):
+                    scale_transposed = model.graph.call_function(
+                        torch.ops.aten.transpose.int, (scale_node, -2, -1)
+                    )
+                scale_transposed.meta["dtype"] = scale_node.meta.get("dtype")
+                propagate_shape(scale_transposed, model)
+
+            if (tiled_shapes := node.meta.get("tiled_shapes")) is not None:
+                shape = tiled_shapes["weight"]
+                tiled_shapes["weight"] = (shape[1], shape[0])
+
+                if "weight_scale" in tiled_shapes:
+                    scale_shape = tiled_shapes["weight_scale"]
+                    tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
+
+            node.meta["transposed"] = True
+
+            if node.target == torch.ops.aten.matmul.default:
+                with model.graph.inserting_before(node):
+                    matmul_transposed = model.graph.call_function(
+                        torch.ops.quantized_ops.matmul.default,
+                        (input_node, weight_transposed),
+                    )
+                node.replace_all_uses_with(matmul_transposed)
+                model.graph.erase_node(node)
+                matmul_transposed.meta = node.meta
+            else:
+                node.args = (input_node, weight_transposed)
+                node.kwargs = {**node.kwargs, "weight_scale": scale_transposed}
+
+            node_order = {n: i for i, n in enumerate(model.graph.nodes)}
+            path = find_upstream_matching_transpose(weight_transposed)
+            sorted_path = sorted(path, key=lambda n: node_order[n])
+            success = process_double_transpose_chain(model, sorted_path, transposed_nodes)
+            if not success:
+                move_transpose_before_dq(model, sorted_path, transposed_nodes)
+
+            if scale_node is not None:
+                scale_path = find_upstream_matching_transpose(scale_transposed)
+                sorted_path = sorted(scale_path, key=lambda n: node_order[n])
+                fold_transpose_into_constant(model, sorted_path, transposed_nodes)
 
     model.graph.lint()
     model.recompile()

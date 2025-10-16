@@ -22,7 +22,6 @@ from quantized_training import (
     convert_and_export_with_split_cache,
     convert_pt2e,
     extract_input_preprocessor,
-    fold_param_ops,
     fuse,
     get_default_quantizer,
     prepare_pt2e,
@@ -149,6 +148,11 @@ if __name__ == "__main__":
         help="Whether to dump the dataset to disk for later use."
     )
     parser.add_argument(
+        "--dump_verification_file",
+        action="store_true",
+        help="Whether to save tensors for verification."
+    )
+    parser.add_argument(
         "--dataset_output_dir",
         help="Output directory for dataset files"
     )
@@ -267,6 +271,7 @@ if __name__ == "__main__":
         "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
+        "dump_verification_file": args.dump_verification_file,
     }
 
     if args.model in models.__dict__:
@@ -487,7 +492,6 @@ if __name__ == "__main__":
         ).module()
 
         remove_autocast_nodes(gm)
-        fold_param_ops(gm)
         strip_softmax_dtype(gm)
 
         quantizer.set_module_name_object_type_order(

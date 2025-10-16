@@ -1,7 +1,9 @@
+import copy
 import logging
+import numpy as np
 import operator
 import os
-import struct
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from torch.fx import Node
@@ -28,12 +30,23 @@ def register_save_function(custom_function):
     return custom_function
 
 
-def _save_tensor(tensor, filename):
-    t = tensor.float().flatten()
-    packed_data = struct.pack(f'{t.numel()}f', *t.tolist())
-    with open(filename, 'wb') as f:
-        f.write(packed_data)
-    print(f"Writing tensor with shape {tuple(tensor.shape)} to {filename}")
+_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+
+
+def _write_numpy(np_array: np.ndarray, filename: str, shape: tuple):
+    """Worker function: write the tensor and log when done."""
+    try:
+        np_array.tofile(filename)
+        logger.info(f"✅ Saved tensor {shape} -> {filename}")
+    except Exception as e:
+        logger.error(f"❌ Failed to save tensor {shape} -> {filename}: {e}")
+
+
+def _save_tensor(tensor: torch.Tensor, filename: str):
+    """Asynchronously save tensor to a binary file."""
+    t = tensor.detach().cpu().contiguous().to(torch.float32)
+    np_array = t.numpy()
+    _executor.submit(_write_numpy, np_array, filename, tuple(t.shape))
 
 
 def save_tensor(tensor, filename):
@@ -47,40 +60,41 @@ def save_tensor(tensor, filename):
         _save_tensor(tensor, filename)
 
 
+def _apply_transform(node, key, field):
+    if (fused_op := node.meta.get(key)) is not None:
+        field.CopyFrom(map_node(fused_op))
+        field.kwargs["output_shape"].int_list.values.extend(node.shape)
+        return fused_op.args[0]
+    return node
+
+
+def _set_meminfo(field, segment):
+    field.partition = int(segment.memory_space)
+    field.address = int(segment.start)
+
+
 def set_tensor_field(field, node, output_dir=None, is_output=False):
-    assert isinstance(node, Node) and hasattr(node, 'value'), (
-        f"Expected node {node} has value attribute."
-    )
+    if not isinstance(node, Node) or not hasattr(node, 'value'):
+        raise TypeError(f"Expected node with value attribute, got {node!r}")
 
+    # Set L2 tiling meta
     if (tiled_shape := node.meta.get("tiled_shape")) is not None:
-        field.tiled_shape.extend(list(tiled_shape))
-
+        field.tiled_shape.extend(tiled_shape)
     if (scratchpad := node.meta.get("scratchpad")) is not None:
-        field.scratchpad.partition = scratchpad.memory_space
-        field.scratchpad.address = scratchpad.start
+        _set_meminfo(field.scratchpad, scratchpad)
 
-    if (
-        (reshape_node := node.meta.get("reshape")) is not None and
-        not (node.op == "call_module" and not is_output)
-    ):
-        field.reshape.CopyFrom(map_node(reshape_node))
-        field.reshape.kwargs["output_shape"].int_list.values.extend(node.shape)
-        node = reshape_node.args[0] if not is_output else node
-
-    if (getitem_node := node.meta.get("slicing")) is not None:
-        field.reshape.CopyFrom(map_node(getitem_node))
-        field.reshape.kwargs["output_shape"].int_list.values.extend(node.shape)
-        node = getitem_node.args[0]
-
-    if (dequantize_scale := node.meta.get("dq_scale")) is not None:
-        field.scale = dequantize_scale
-        node = node.args[0]
+    # Apply transformations
+    if node.op != "call_module" or is_output:
+        node = _apply_transform(node, "reshape", field.reshape)
+    node = _apply_transform(node, "slicing", field.reshape)
+    node = _apply_transform(node, "dequantize", field.dequant)
 
     if (source_node := node.meta.get("source_node")) is not None:
         node = source_node
 
+    # Tensor properties
     field.node = node.name
-    field.shape.extend(list(node.shape) or [1])
+    field.shape.extend(node.shape or [1])
 
     if (dtype := node.meta.get("dtype")) is not None:
         field.dtype = dtype
@@ -88,8 +102,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         field.dtype = str(node.value.dtype).split(".")[1]
 
     if (memory := node.meta.get("memory")) is not None:
-        field.memory.partition = memory.memory_space
-        field.memory.address = memory.start
+        _set_meminfo(field.memory, memory)
 
     if output_dir is not None:
         save_tensor(node.value, os.path.join(output_dir, f"{node.name}.bin"))
@@ -109,12 +122,12 @@ def set_output_field(param, node, output_dir):
         node.meta.pop("scratchpad", None)
     elif isinstance(node.value, (tuple, list)):
         if (memory := node.meta.get("memory")) is not None:
-            partition = memory.memory_space
-            address = memory.start
+            memory_copy = copy.copy(memory)
+            output_sizes = node.meta["output_sizes"]
 
         if (scratchpad_mem := node.meta.get("scratchpad_mem")) is not None:
-            scratch_space = scratchpad_mem[node].memory_space
-            scratch_addr = scratchpad_mem[node].start
+            scratchpad_copy = copy.copy(scratchpad_mem[node])
+            tiled_output_sizes = node.meta["tiled_output_sizes"]
 
         if (tiled_shape := node.meta.get("tiled_shapes")) is not None:
             shapes = tiled_shape[node]
@@ -129,14 +142,12 @@ def set_output_field(param, node, output_dir):
             )
 
             if memory is not None:
-                tensor.memory.partition = partition
-                tensor.memory.address = int(address)
-                address += node.meta["output_sizes"][i]
+                _set_meminfo(tensor.memory, memory_copy)
+                memory_copy.start += output_sizes[i]
 
             if scratchpad_mem is not None:
-                tensor.scratchpad.partition = scratch_space
-                tensor.scratchpad.address = int(scratch_addr)
-                scratch_addr += node.meta["tiled_output_sizes"][i]
+                _set_meminfo(tensor.scratchpad, scratchpad_copy)
+                scratchpad_copy.start += tiled_output_sizes[i]
 
             if tiled_shape is not None:
                 tensor.tiled_shape.extend(shapes[i])
@@ -234,7 +245,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
 
     # Convert keyword arguments
     for key, value in kwargs.items():
-        if key in ["code", "scale_code"] or value is None:
+        if key in ["code", "scale_code", "output_code"] or value is None:
             continue
 
         if isinstance(value, torch.fx.Node):

@@ -35,7 +35,6 @@ __all__ = [
     "dispatch_model",
     "dtype_byte_size",
     "export_model",
-    "fold_param_ops",
     "generate",
     "get_aten_graph_module",
     "get_device_map",
@@ -134,12 +133,15 @@ def transform(
     # Turn batched matmul into multiple matmuls
     split_multi_head_attention(model)
 
-    # Convert torch.expand to memory copy
-    convert_expand_to_memory_copy(model)
+    # TODO Turned off for large model now. This will be removed in the future
+    # once we can handle them on the C compiler side.
+    if len(model.graph.nodes) < 10000:
+        # Convert torch.expand to memory copy
+        convert_expand_to_memory_copy(model)
 
-    # Perform transformations to the model
-    convert_cat_and_stack_as_stack_on_dim0(model)
-    convert_cat_with_mismatched_shapes_to_stack(model)
+        # Perform transformations to the model
+        convert_cat_and_stack_as_stack_on_dim0(model)
+        convert_cat_with_mismatched_shapes_to_stack(model)
 
     # Move quantize and dequantize ops to the end of last compute op
     fuse_quantize_dequantize_with_previous_op(model)
@@ -155,11 +157,11 @@ def transform(
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
         run_vector_op_l2_tiling(model, unroll_dims, cache_size)
 
+    transpose_linear_weights(model, transpose_weight, transpose_fc)
     if transpose_weight:
         transpose_conv2d_inputs_and_weights(model)
-        transpose_linear_weights(model, transpose_fc=transpose_fc)
-        ShapeProp(model).propagate(*flatten_args)
-        eliminate_reshape_with_no_effect(model)
+    ShapeProp(model).propagate(*flatten_args)
+    eliminate_reshape_with_no_effect(model)
 
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
@@ -178,7 +180,8 @@ def compile(
     unroll_dims=None,
     output_dir=None,
     output_file="compute_graph",
-    dump_snapshop=False,
+    dump_snapshot=False,
+    dump_verification_file=True,
 ):
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
 
@@ -191,12 +194,11 @@ def compile(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    if dump_snapshop:
+    if dump_snapshot:
         allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
-    params = gen_code(
-        model, flatten_args, os.path.join(output_dir, "tensor_files")
-    )
+    path = os.path.join(output_dir, "tensor_files") if dump_verification_file else None
+    params = gen_code(model, flatten_args, path)
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:
         f.write(text_format.MessageToString(params))
