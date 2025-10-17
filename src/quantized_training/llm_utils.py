@@ -500,7 +500,7 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
         max_new_tokens: int,
         min_length: int = 0,
         eos_token_id: Union[int, List[int]] = None,
-        model_decode: torch.nn.Module = None,
+        model_decode: torch.fx.GraphModule = None,
         key_quantizer=None,
         value_quantizer=None,
     ):
@@ -587,13 +587,12 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
             else:
                 model_decode.get_buffer(f"value_cache_{i}")[:, :, : layer.values.shape[2], :] = layer.values
 
-        device = model_decode.device
-
         for step in range(1, max_new_tokens):
             with torch.no_grad():
                 cache_len = model_decode.get_buffer("value_cache_0").shape[2]
                 residual_len = model_decode.get_buffer("value_cache_residual_0").shape[2]
 
+                # TODO: create causal mask only once and update it incrementally
                 causal_mask = create_causal_mask_residual(
                     target_length=cache_len + residual_len,
                     prefill_length=seq_length,

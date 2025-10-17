@@ -1,11 +1,11 @@
 import argparse
 import logging
 import os
+import re
 import sys
 
 import torch
 from datasets import load_dataset
-from torch.utils.data import DataLoader
 from torchvision import models, transforms
 from transformers import (
     AutoImageProcessor,
@@ -15,6 +15,7 @@ from transformers import (
 from tqdm import tqdm
 
 from quantized_training import (
+    TorchExportableModuleWithStaticCache,
     QuantizationConfig,
     QuantizationSpec,
     add_qspec_args,
@@ -29,22 +30,14 @@ from quantized_training import (
     swap_llama_attention,
     transform,
 )
-
 from quantized_training.codegen.utils import (
     remove_autocast_nodes,
     replace_rmsnorm_with_layer_norm,
     strip_softmax_dtype,
 )
-
 from quantized_training.llm_utils import fuse_dequantize_quantize
 
-
-from utils.models import (
-    bert,
-    mobilebert,
-    torchvision_models,
-    vit
-)
+from utils.models import bert, mobilebert, torchvision_models, vit
 from utils.dataset import glue, imagenet
 
 
@@ -473,7 +466,7 @@ if __name__ == "__main__":
 
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
             attn_implementation="eager", # turn off flash attention
         ).eval()
 
@@ -481,6 +474,8 @@ if __name__ == "__main__":
 
         test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+
+        input_ids = encodings.input_ids[:,:args.context_length]
 
         max_length = args.context_length
         bs = 64 if args.hardware_unrolling is None else args.hardware_unrolling[0]
@@ -490,6 +485,16 @@ if __name__ == "__main__":
         gm = convert_and_export_with_split_cache(
             model, max_len=max_length, max_new_tokens=bs
         ).module()
+
+        # Run decode once to fill in the KV caches
+        output = TorchExportableModuleWithStaticCache.generate(
+            model,
+            prompt_token_ids=input_ids,
+            max_new_tokens=bs,
+            min_length=max_length+1,
+            eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+            model_decode=gm,
+        )[0]
 
         remove_autocast_nodes(gm)
         strip_softmax_dtype(gm)
@@ -524,7 +529,6 @@ if __name__ == "__main__":
                 module_name, torch.ops.aten.matmul.default, 3, None
             )
 
-        import re
         from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
 
         # if transpose key cache, quantize along the last axis.
