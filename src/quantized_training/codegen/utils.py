@@ -1336,14 +1336,21 @@ def move_transpose_before_dq(
     chain = duplicate_shared_nodes(graph, chain)
     dequantize_node = chain[0]
 
-    # Insert transpose before dequantize
-    with graph.inserting_before(dequantize_node):
-        up_t = graph.call_function(
-            torch.ops.aten.transpose.int, (dequantize_node.args[0], -2, -1)
-        )
-    up_t.meta["dtype"] = dequantize_node.args[0].meta.get("dtype")
-    dequantize_node.replace_input_with(dequantize_node.args[0], up_t)
-    propagate_shape(up_t)
+    # Insert transpose after dequantize input
+    dq_input = dequantize_node.args[0]
+    up_t = next((
+        n for n in dq_input.users if n.target == torch.ops.aten.transpose.int
+    ), None)
+    if up_t is not None and up_t.meta.get("dtype") == dq_input.meta.get("dtype"):
+        dequantize_node.replace_input_with(dq_input, up_t)
+    else:
+        with graph.inserting_after(dq_input):
+            up_t = graph.call_function(
+                torch.ops.aten.transpose.int, (dq_input, -2, -1)
+            )
+        up_t.meta["dtype"] = dq_input.meta.get("dtype")
+        dequantize_node.replace_input_with(dq_input, up_t)
+        propagate_shape(up_t)
 
     for n in chain:
         for arg in n.all_input_nodes:
