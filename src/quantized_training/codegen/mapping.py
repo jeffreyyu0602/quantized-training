@@ -872,47 +872,6 @@ def fuse_reshape_with_output(
     return True
 
 
-def fuse_op_with_input(
-    graph: torch.fx.Graph,
-    candidates: List[List[Node]],
-    nodes_map: Dict[Node, Node],
-    node_to_fuse: Node,
-    current_node: Node = None,
-    fused_nodes: Dict[Node, Node] = None,
-):
-    if current_node is None:
-        current_node = node_to_fuse
-
-    if fused_nodes is None:
-        fused_nodes = []
-
-    fused_nodes.append(current_node)
-
-    if id(current_node) != id(node_to_fuse) and is_elementwise_op(current_node):
-        # Only address generator 0 support slicing op
-        group = search_group(current_node, candidates)
-        if group is not None and current_node.prev in group:
-            logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
-            return
-
-        fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
-        nodes_map[fused_nodes[0]] = fused_nodes[-2]
-        if group is not None:
-            group.extend(n for n in fused_nodes if n not in group)
-        else:
-            candidates.append(fused_nodes)
-        return
-
-    if id(current_node) != id(node_to_fuse) and not is_nop(current_node):
-        logger.info(f"Cannot fuse {node_to_fuse} with {current_node}")
-        return
-
-    for user in list(current_node.users):
-        fuse_op_with_input(
-            graph, candidates, nodes_map, node_to_fuse, user, list(fused_nodes)
-        )
-
-
 def fuse_dequantize_with_gemm_or_elementwise(
     graph, candidates, nodes_map, node_to_fuse
 ):
@@ -1041,22 +1000,6 @@ def fuse_operator(
                 fuse_reshape_with_input(
                     graph, fused_nodes_list, nodes_map, node
                 )
-
-    for node in list(graph.nodes):
-        if node.target not in [
-            torch.ops.aten.slice.Tensor, torch.ops.aten.select.int
-        ]:
-            continue
-
-        # Slicing on last dim has poor support on hardware
-        dim = node.args[1]
-        if dim == node.args[0].value.ndim - 1 or dim == -1:
-            continue
-
-        if is_nop(node) or is_addressing_op(node):
-            continue
-
-        fuse_op_with_input(graph, fused_nodes_list, nodes_map, node)
 
     for node in list(graph.nodes):
         if node.target != torch.ops.quantized_ops.dequantize.default:
