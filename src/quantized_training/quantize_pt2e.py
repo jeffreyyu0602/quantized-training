@@ -104,9 +104,10 @@ def get_microscaling_quantizer(
     act1_qspec = _set_ch_axis(activation, -2)
     qconfig_matmul = QuantizationConfig(act0_qspec, None, act1_qspec, None)
 
-    return (XNNPACKQuantizer()
-        .set_module_type(torch.nn.Conv2d, qconfig_conv2d)
-        .set_module_type(torch.nn.Linear, qconfig_linear)
+    return (
+        XNNPACKQuantizer()
+        .set_object_type(torch.ops.aten.conv2d.default, qconfig_conv2d)
+        .set_object_type(torch.ops.aten.linear.default, qconfig_linear)
         .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
     )
 
@@ -129,9 +130,10 @@ def get_per_channel_act_quantizer(
     act1_qspec = replace(input_activation, ch_axis=-1)
     qconfig_matmul = QuantizationConfig(act0_qspec, output_activation, act1_qspec, None)
 
-    return (XNNPACKQuantizer()
-        .set_module_type(torch.nn.Conv2d, qconfig_conv2d)
-        .set_module_type(torch.nn.Linear, qconfig_linear)
+    return (
+        XNNPACKQuantizer()
+        .set_object_type(torch.ops.aten.conv2d.default, qconfig_conv2d)
+        .set_object_type(torch.ops.aten.linear.default, qconfig_linear)
         .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
     )
 
@@ -220,8 +222,11 @@ def get_default_quantizer(
 
     qconfig = QuantizationConfig(input_activation, output_activation, weight, bias)
     qconfig_matmul = QuantizationConfig(input_activation, output_activation, input_activation, None)
-    return XNNPACKQuantizer().set_global(qconfig) \
+    return (
+        XNNPACKQuantizer()
+        .set_global(qconfig)
         .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
+    )
 
 
 def export_model(
@@ -501,23 +506,21 @@ def _replace_observer_with_quantize_mx_node_decomposed(
     dequant_code, quant_code = None, None
 
     if isinstance(quant_map, tuple):
-        numbers = re.findall(r'\d+', activation_post_process.dtype)
-        N = int(numbers[0])
-        activation_post_process.dtype = f"int{N}"
+        matches = re.findall(r'\d+', activation_post_process.dtype)
+        activation_post_process.dtype = f"int{matches[0]}"
 
         indices, values = quant_map
         activation_post_process.qmap = indices
 
         with graph.inserting_before(node):
-            dequant_code = create_getattr_from_value(model, graph, "qmap", values)
-
+            dequant_code = create_getattr_from_value(model, graph, "code", values)
             if input_node.op != 'get_attr':
                 midpoints = (values[:-1] + values[1:]) / 2
-                quant_code = create_getattr_from_value(model, graph, "qmap", midpoints)
+                quant_code = create_getattr_from_value(model, graph, "code", midpoints)
 
         # NF4_[B] means approximate NormalFloat4 with B-bit integer
-        if len(numbers) > 1:
-            dequant_code.meta["dtype"] = f"int{numbers[1]}"
+        if len(matches) > 1:
+            dequant_code.meta["dtype"] = f"int{matches[1]}"
 
     if input_node.op == 'get_attr':
         # quantize model parameter and remove the fq module

@@ -127,6 +127,11 @@ def eager_attention_forward(
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
+    # HACK manually add a slice nop to prevent compiler from folding the scale
+    # computation into the param
+    if module.num_key_value_groups == 1:
+        value_states = value_states[:]
+
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
 
     if key_residual is not None:
@@ -236,7 +241,7 @@ class LlamaAttentionKIVI(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
-    
+
 
 def swap_llama_attention(model: PreTrainedModel) -> PreTrainedModel:
     """
@@ -437,7 +442,7 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
         else:
             # Returned the `last_hidden_state` from `BaseModelOutputWithPast`
             return outs.last_hidden_state
-        
+
     @staticmethod
     def _prepare_4d_causal_attention_mask_with_cache_position(
         attention_mask: torch.Tensor,
@@ -533,60 +538,19 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
         seq_length = past_key_values.get_seq_length()
         # print(f"Prompt length: {seq_length}")
 
-        def get_quantized_value_and_scale(input, activation_post_process):
-            activation_post_process(input)
-            input = torch.ops.quantized_ops.quantize(
-                input,
-                activation_post_process.scale,
-                axes=activation_post_process.ch_axis,
-                block_size=activation_post_process.block_size,
-                qmap=activation_post_process.qmap,
-            )
-            return input, activation_post_process.scale
-
         for i, layer in enumerate(past_key_values.layers):
             cache_len = model_decode.get_buffer(f"value_cache_{i}").shape[2]
             assert seq_length <= cache_len, f"seq_length {seq_length} exceeds cache size {cache_len}"
 
-            # transpose key cache if needed
-            key_cache_len = model_decode.get_buffer(f"key_cache_{i}").shape[2]
-            if key_cache_len != cache_len:
-                key_state = layer.keys.transpose(2, 3)
-                slices = (slice(None), slice(None), slice(None), slice(0, key_state.shape[3]))
-            else:
-                key_state = layer.keys
-                slices = (slice(None), slice(None), slice(0, key_state.shape[2]), slice(None))
-
+            key_state = layer.keys
             if key_quantizer is not None:
-                for quantizer in key_quantizer[:-1]:
-                    key_state = quantizer(key_state)
+                key_state = key_quantizer(key_state)
+            model_decode.get_buffer(f"key_cache_{i}")[:, :, : key_state.shape[2], :] = key_state
 
-                if f"key_cache_{i}_scale" in model_decode._buffers:
-                    key_state, key_scale = get_quantized_value_and_scale(key_state, key_quantizer[-1])
-                    model_decode.get_buffer(f"key_cache_{i}_{key_quantizer[-1].dtype}")[slices] = key_state
-
-                    slices = (slice(None), slice(None), slice(0, key_scale.shape[2]), slice(0, key_scale.shape[3]))
-                    model_decode.get_buffer(f"key_cache_{i}_scale")[slices] = key_scale
-                else:
-                    key_state = key_quantizer[-1](key_state)
-                    model_decode.get_buffer(f"key_cache_{i}")[slices] = key_state
-            else:
-                model_decode.get_buffer(f"key_cache_{i}")[slices] = key_state
-
+            value_state = layer.values
             if value_quantizer is not None:
-                value_state = layer.values
-                for quantizer in value_quantizer[:-1]:
-                    value_state = quantizer(value_state)
-
-                if f"value_cache_{i}_scale" in model_decode._buffers:
-                    value_state, value_scale = get_quantized_value_and_scale(value_state, value_quantizer[-1])
-                    model_decode.get_buffer(f"value_cache_{i}_{value_quantizer[-1].dtype}")[:, :, : value_state.shape[2], :] = value_state
-                    model_decode.get_buffer(f"value_cache_{i}_scale")[:, :, : value_scale.shape[2], :] = value_scale
-                else:
-                    value_state = value_quantizer[-1](value_state)
-                    model_decode.get_buffer(f"value_cache_{i}")[:, :, : value_state.shape[2], :] = value_state
-            else:
-                model_decode.get_buffer(f"value_cache_{i}")[:, :, : layer.values.shape[2], :] = layer.values
+                value_state = value_quantizer(value_state)
+            model_decode.get_buffer(f"value_cache_{i}")[:, :, : value_state.shape[2], :] = value_state
 
         for step in range(1, max_new_tokens):
             with torch.no_grad():

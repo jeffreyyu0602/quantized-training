@@ -115,7 +115,6 @@ class MXFakeQuantFunction(torch.autograd.Function):
     ):
         if fake_quant_enabled[0] == 0:
             return input
-
         sf, input = quantize_mx(
             input,
             qmap,
@@ -125,9 +124,8 @@ class MXFakeQuantFunction(torch.autograd.Function):
             force_scale_power_of_two,
             scale_qmap=scale_qmap
         )
-
         scale.resize_(sf.shape).copy_(sf)
-
+        input = input * expand(sf, input.shape, block_size)
         return input
 
     @staticmethod
