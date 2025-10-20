@@ -15,7 +15,7 @@ from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotar
 from .decomposed import expand
 from .pt2e_utils import fetch_attr
 from .quantize_pt2e import create_getattr_from_value
-from .codegen.mapping_utils import is_nop, is_reshape_op
+from .codegen.mapping_utils import is_gemm_op, is_nop, is_reshape_op
 from .codegen.utils import get_arg_or_kwarg
 
 
@@ -964,7 +964,15 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
                 ),
             )
 
-        if is_dynamic_scale:
+        if scale_node.op != "get_attr":
+            if (
+                any(is_gemm_op(n) for n in scale_node.users)
+                and q_scale.shape[-1] != output.shape[-1]
+            ):
+                q_scale = torch.repeat_interleave(
+                    q_scale, repeats=output.shape[-1] // q_scale.shape[-1], dim=-1
+                )
+
             with graph.inserting_before(node):
                 mx_scale = create_getattr_from_value(
                     model, graph, input_node.name + "_scale", q_scale

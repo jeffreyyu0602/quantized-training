@@ -713,13 +713,10 @@ def duplicate_shared_nodes(graph: torch.fx.Graph, nodes: List[Node]) -> List[Nod
 def move_transpose_after_select(graph: torch.fx.Graph, nodes: List[Node]):
     transpose_node = nodes[0]
 
-    select_nodes = [
-        n for n in nodes
-        if n.target == torch.ops.aten.select.int and n.args[1] == 0
-    ]
+    select_nodes = [n for n in nodes if n.target == torch.ops.aten.select.int]
     chain = [transpose_node] + select_nodes
     for n, next_n in zip(chain[:-1], chain[1:]):
-        if next_n not in n.users:
+        if next_n not in n.users or next_n.args[1] != 0:
             return nodes
 
     if len(select_nodes) == 0:
