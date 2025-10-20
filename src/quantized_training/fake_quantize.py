@@ -106,24 +106,24 @@ class MXFakeQuantFunction(torch.autograd.Function):
         input: torch.Tensor,
         fake_quant_enabled: torch.Tensor,
         scale: torch.Tensor,
-        code: torch.Tensor,
+        qmap: torch.Tensor,
         axes: Union[int, List[int]],
         block_size: Union[int, List[int]],
         quant_max: float,
         force_scale_power_of_two=False,
-        scale_code=None,
+        scale_qmap=None,
     ):
         if fake_quant_enabled[0] == 0:
             return input
 
         sf, input = quantize_mx(
             input,
-            code,
+            qmap,
             axes,
             block_size,
             quant_max,
             force_scale_power_of_two,
-            scale_code=scale_code
+            scale_qmap=scale_qmap
         )
 
         scale.resize_(sf.shape).copy_(sf)
@@ -147,7 +147,7 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
         block_size: Union[int, List[int]],
         quant_min: float,
         quant_max: float,
-        scale_code=None,
+        scale_qmap=None,
     ):
         if fake_quant_enabled[0] == 0:
             return input
@@ -173,9 +173,9 @@ class GroupWiseAffineFakeQuantFunction(torch.autograd.Function):
         zp = -min / sf + quant_min
 
         # Quantize the scale using the codebook
-        if scale_code is not None:
-            sf = vmap(sf, scale_code)
-            zp = vmap(zp, scale_code)
+        if scale_qmap is not None:
+            sf = vmap(sf, scale_qmap)
+            zp = vmap(zp, scale_qmap)
 
         scale.resize_(sf.shape).copy_(sf)
         zero_point.resize_(zp.shape).copy_(zp)
@@ -207,7 +207,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
         input: torch.Tensor,
         observer_enabled: torch.Tensor,
         fake_quant_enabled: torch.Tensor,
-        code: torch.Tensor,
+        qmap: torch.Tensor,
         amax_history: torch.Tensor,
         scale: torch.Tensor,
         amax_history_len: int,
@@ -245,7 +245,7 @@ class FusedAmaxObsFakeQuantFunction(torch.autograd.Function):
 
         if fake_quant_enabled[0] == 1:
             scale = scale.to(input.dtype)
-            input = vmap(input / scale, code) * scale
+            input = vmap(input / scale, qmap) * scale
 
         return input
 
@@ -265,8 +265,8 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
     tensors, and uses this statistic to compute the quantization parameters.
     """
 
-    code: torch.Tensor
-    scale_code: Optional[torch.Tensor]
+    qmap: torch.Tensor
+    scale_qmap: Optional[torch.Tensor]
     amax_history: torch.Tensor
     scale: torch.Tensor
     zero_point: torch.Tensor
@@ -303,9 +303,9 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         if isinstance(quant_map, tuple):
             indices, values = quant_map
             quant_map = values[indices]
-        self.register_buffer("code", quant_map, persistent=False)
+        self.register_buffer("qmap", quant_map, persistent=False)
         scale_map = get_quantization_map(self.scale_dtype, device) if self.scale_dtype is not None else None
-        self.register_buffer("scale_code", scale_map, persistent=False)
+        self.register_buffer("scale_qmap", scale_map, persistent=False)
         # Create amax history and scale buffers
         factory_kwargs = {'device': device, 'dtype': torch.float}
         self.register_buffer("amax_history", torch.tensor([], **factory_kwargs))
@@ -365,12 +365,12 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 X,
                 self.fake_quant_enabled,
                 self.scale,
-                self.code,
+                self.qmap,
                 self.ch_axis,
                 self.block_size,
                 self.quant_max,
                 self.force_scale_power_of_two,
-                self.scale_code,
+                self.scale_qmap,
             )
         elif self.qscheme == qt.group_wise_affine:
             X = GroupWiseAffineFakeQuantFunction.apply(
@@ -382,14 +382,14 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
                 self.block_size,
                 self.quant_min,
                 self.quant_max,
-                self.scale_code,
+                self.scale_qmap,
             )
         else:
             X = FusedAmaxObsFakeQuantFunction.apply(
                 X,
                 self.observer_enabled,
                 self.fake_quant_enabled,
-                self.code,
+                self.qmap,
                 self.amax_history,
                 self.scale,
                 self.amax_history_len,
@@ -451,7 +451,7 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
         super().__init__()
         self.obs_or_fqs = obs_or_fqs
         self.derive_qparams_fn = derive_qparams_fn
-        self.register_buffer("code", get_quantization_map(dtype), persistent=False)
+        self.register_buffer("qmap", get_quantization_map(dtype), persistent=False)
         self.observer_enabled[0] = 0
         self.dtype = dtype
         self.qscheme = obs_or_fqs[1].qscheme
@@ -465,7 +465,7 @@ class _DerivedObserverOrFakeQuantize(FakeQuantizeBase):
             x,
             self.observer_enabled,
             self.fake_quant_enabled,
-            self.code,
+            self.qmap,
             None,
             self.calculate_qparams(),
             None,

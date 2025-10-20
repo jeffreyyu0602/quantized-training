@@ -538,8 +538,9 @@ class TorchExportableModuleWithStaticCache(torch.nn.Module):
             input = torch.ops.quantized_ops.quantize(
                 input,
                 activation_post_process.scale,
+                axes=activation_post_process.ch_axis,
                 block_size=activation_post_process.block_size,
-                code=activation_post_process.code,
+                qmap=activation_post_process.qmap,
             )
             return input, activation_post_process.scale
 
@@ -717,11 +718,9 @@ def convert_and_export_with_split_cache(
 def run_through_ops(model, input, nodes):
     env = {nodes[0].args[0]: input}
     def map_node(n):
-        if n in env:
-            return env[n]
         if n.op == "get_attr":
             return fetch_attr(model, n.target)
-        return n
+        return env[n]
 
     def load_arg(a):
         return torch.fx.graph.map_arg(a, map_node)
@@ -731,102 +730,103 @@ def run_through_ops(model, input, nodes):
     return env[nodes[-1]]
 
 
-def validate_and_map_group_axes_for_reshape(old_shape, new_shape, dims):
+def validate_and_map_group_axes_for_reshape(old_shape, new_shape, axes):
     """
     Check if a reshape preserves group membership for arbitrary group axes.
     Returns True if safe, else False.
     """
-    dims = tuple(sorted(dims))
-    groups = [old_shape[i:j] for i, j in zip((0,) + dims, dims + (len(old_shape),))]
-    group_size = [math.prod(g) for g in groups]
+    axes = tuple(sorted(axes))
+    groups = [old_shape[i:j] for i, j in zip((0,) + axes, axes + (len(old_shape),))]
+    block_size = [math.prod(g) for g in groups]
 
     numel = 1
     idx = 0
     new_dims = []
     for i, s in enumerate(new_shape):
         numel *= s
-        if numel == group_size[idx]:
+        if numel == block_size[idx]:
             numel = 1
             idx += 1
             new_dims.append(i + 1)
-            if idx == len(group_size):
+            if idx == len(block_size):
                 if i < len(new_shape) - 1 and math.prod(new_shape[i+1:]) != 1:
                     logger.warning("Extra trailing dimensions after last group")
                     return None
                 break
-        elif numel > group_size[idx]:
+        elif numel > block_size[idx]:
             logger.warning(f"Overshot group {idx} at new axis {i}")
             return None
 
-    if idx != len(group_size):
+    if idx != len(block_size):
         logger.warning("Not all groups matched")
         return None
 
     return new_dims[:-1]
 
 
-def propagate_group_axes_through_op(node, input, dims, group_size):
+def propagate_group_axes_through_op(node, input, axes, block_size):
     """
     Track which axes correspond to group-wise quantization through layout ops.
 
     Args:
-        dims (tuple[int]): axes where grouping/quantization is performed
-        nodes_on_path (list[torch.fx.Node]): layout ops between dq and q
-        input_shape (tuple[int]): shape of tensor before ops
+        node (torch.fx.Node): layout op node
+        input (torch.Tensor): tensor before layout op
+        axes (tuple[int]): axes where grouping/quantization is performed
+        block_size (int): size of quantization blocks along grouped axes
 
     Returns:
         tuple[int]: new axes for grouping after transformations
     Raises:
         RuntimeError: if reshape or any op makes grouping ambiguous
     """
-    dims = list(dims)
+    axes = list(axes)
     tgt = node.target
 
     if tgt == torch.ops.aten.unsqueeze.default:
         dim = int(node.args[1])
-        dims = [g + 1 if g >= dim else g for g in dims]
+        axes = [a + 1 if a >= dim else a for a in axes]
         output = tgt(input, dim)
     elif tgt == torch.ops.aten.slice.Tensor:
         default = [0, 0, 9223372036854775807, 1]
         dim, start, end, step = list(node.args[1:]) + default[len(node.args) - 1:]
-        if dim in dims:
-            start, end = int(start / group_size), int(end / group_size)
+        if dim in axes:
+            start, end = int(start / block_size), int(end / block_size)
         args = (dim, start, end, step)
         output = tgt(input, *args)
     elif tgt == torch.ops.aten.expand.default:
         size = [
-            math.ceil(s / group_size) if d in dims else s
+            math.ceil(s / block_size) if d in axes else s
             for d, s in enumerate(node.args[1])
         ]
         output = tgt(input, size)
     elif tgt == torch.ops.aten.transpose.int:
-        d0, d1 = node.args[1:3]
-        dims = [
-            d1 if d == d0 else d0 if d == d1 else d for d in dims
+        a0, a1 = node.args[1:3]
+        axes = [
+            a1 if a == a0 else a0 if a == a1 else a for a in axes
         ]
-        output = tgt(input, d0, d1)
+        output = tgt(input, a0, a1)
     elif tgt == torch.ops.aten.permute.default:
         perm = node.args[1]
-        dims = [perm.index(d + input.ndim if d < 0 else d) for d in dims]
+        axes = [perm.index(a + input.ndim if a < 0 else a) for a in axes]
         output = tgt(input, perm)
     elif tgt in (torch.ops.aten.reshape.default, torch.ops.aten.view.default):
         orig_shape = [
-            s * group_size if d in dims else s for d, s in enumerate(input.shape)
+            s * block_size if i in axes else s for i, s in enumerate(input.shape)
         ]
-        dims = validate_and_map_group_axes_for_reshape(
-            orig_shape, node.args[1], dims
+        axes = validate_and_map_group_axes_for_reshape(
+            orig_shape, node.args[1], axes
         )
-        if dims is None:
+        if axes is None:
             raise RuntimeError("Invalid reshape")
-        shape = [
-            math.ceil(s / group_size) if d in dims else s
+        new_shape = [
+            math.ceil(s / block_size) if d in axes else s
             for d, s in enumerate(node.args[1])
         ]
-        output = tgt(input, shape)
+        output = tgt(input, new_shape)
     else:
         raise RuntimeError(f"Unsupported layout op: {tgt}")
 
-    return output, tuple(dims)
+    return output, tuple(axes)
 
 
 LAYOUT_OPS = {
@@ -840,26 +840,26 @@ LAYOUT_OPS = {
 }
 
 
-def run_qparam_through_nodes(model, input, nodes, dims, group_size):
+def run_qparam_through_nodes(model, input, nodes, axes, block_size):
     env = {nodes[0].args[0]: input}
     def map_node(n):
-        if n in env:
-            return env[n]
         if n.op == "get_attr":
             return fetch_attr(model, n.target)
-        return n
+        return env[n]
 
     def load_arg(a):
         return torch.fx.graph.map_arg(a, map_node)
 
+    axes = tuple(a + input.ndim if a < 0 else a for a in axes)
+
     for n in nodes:
         if n.target in LAYOUT_OPS:
-            env[n], dims = propagate_group_axes_through_op(
-                n, env[n.args[0]], dims, group_size
+            env[n], axes = propagate_group_axes_through_op(
+                n, env[n.args[0]], axes, block_size
             )
         else:
             env[n] = n.target(*load_arg(n.args), **load_arg(n.kwargs))
-    return env[nodes[-1]]
+    return env[nodes[-1]], axes
 
 
 def fuse_dequantize_quantize(model: torch.fx.GraphModule):
@@ -887,7 +887,7 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
         else:
             scale_node = node.args[1]
 
-        is_microscaling_quant = (
+        is_dynamic_scale = (
             scale_node.target == torch.ops.quantized_ops.calculate_mx_qparam.default
         )
 
@@ -899,7 +899,7 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
             or (
                 prev_node == node.args[0]
                 and len(prev_node.users) == 2
-                and is_microscaling_quant
+                and is_dynamic_scale
                 and prev_node == scale_node.args[0]
             )
         ):
@@ -928,36 +928,40 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
         if node.target == torch.ops.quantized_ops.quantize_mx.default:
             block_size = node.args[3]
         else:
-            block_size = get_arg_or_kwarg(node, 3, "block_size", 1)
-        dq_block_size = get_arg_or_kwarg(dq_node, 3, "block_size", 1)
+            block_size = get_arg_or_kwarg(node, 4, "block_size", 1)
+        dq_block_size = get_arg_or_kwarg(dq_node, 4, "block_size", 1)
         if block_size != dq_block_size:
             continue
 
+        # Pre-compute the transformed scales and zero points
         dq_input = fetch_attr(model, dq_node.args[0].target)
-        dq_scale = fetch_attr(model, dq_node.args[1].target)
-
-        axes = tuple(
-            i for i , (s1, s2) in enumerate(zip(dq_scale.shape, dq_input.shape))
-            if s1 != s2
-        )
-        dq_scale = run_qparam_through_nodes(
-            model, dq_scale, nodes_on_path[1:-1], axes, block_size
-        )
-
-        if len(dq_node.args) > 2:
-            zero_point = fetch_attr(model, dq_node.args[2].target)
-            zero_point = run_qparam_through_nodes(
-                model, zero_point, nodes_on_path[1:-1], axes, block_size
-            )
-
-        # Handle dynamic quantization
         if node.target == torch.ops.quantized_ops.quantize_mx.default:
             q_scale = run_through_ops(model, dq_input, nodes_on_path)[0]
-        elif is_microscaling_quant:
+        elif is_dynamic_scale:
             nodes_on_path[-1] = scale_node
             q_scale = run_through_ops(model, dq_input, nodes_on_path)
         else:
             q_scale = fetch_attr(model, scale_node.target)
+
+        dq_axes = get_arg_or_kwarg(dq_node, 3, "axes")
+        dq_scale = fetch_attr(model, dq_node.args[1].target)
+        dq_scale, new_dq_axes = run_qparam_through_nodes(
+            model, dq_scale, nodes_on_path[1:-1], dq_axes, block_size
+        )
+
+        if len(dq_node.args) > 2:
+            zero_point = fetch_attr(model, dq_node.args[2].target)
+            zero_point, _ = run_qparam_through_nodes(
+                model, zero_point, nodes_on_path[1:-1], dq_axes, block_size
+            )
+
+        output = run_through_ops(model, dq_input, nodes_on_path[:-1])
+        rank = output.ndim
+        dq_axes = tuple((a + rank) % rank for a in new_dq_axes)
+
+        q_axes = get_arg_or_kwarg(node, 3, "axes")
+        q_axes = tuple((a + rank) % rank for a in q_axes)
+        new_axes = tuple(set(q_axes) & set(dq_axes))
 
         # Broadcast scales to the same shape
         nd = max(dq_scale.ndim, q_scale.ndim)
@@ -982,20 +986,21 @@ def fuse_dequantize_quantize(model: torch.fx.GraphModule):
                 )
             else:
                 new_zero_point = None
-            output_code = graph.node_copy(node.args[4])
+            output_qmap = graph.node_copy(node.args[5])
             new_dq = graph.call_function(
                 torch.ops.quantized_ops.dequantize.default,
                 (
                     node.args[0],
                     new_scale,
                     new_zero_point,
+                    new_axes,
                     block_size,
                     None,
-                    output_code,
+                    output_qmap,
                 ),
             )
 
-        if is_microscaling_quant:
+        if is_dynamic_scale:
             with graph.inserting_before(node):
                 mx_scale = create_getattr_from_value(
                     model, graph, input_node.name + "_scale", q_scale

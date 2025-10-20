@@ -531,8 +531,12 @@ if __name__ == "__main__":
 
         from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
 
-        # if transpose key cache, quantize along the last axis.
-        key_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-1,scale=fp8_e5m3")
+        # KV Cache shape: (N, H, S, D)
+        #   N = batch size
+        #   H = number of heads
+        #   S = sequence length
+        #   D = head dimension
+        key_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-2,scale=fp8_e5m3")
         value_qspec = QuantizationSpec.from_str("uint2,bs=64,qs=group_wise_affine,ax=-1,scale=fp8_e5m3")
 
         for node in gm.graph.nodes:

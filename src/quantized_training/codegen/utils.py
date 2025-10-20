@@ -910,6 +910,14 @@ TRANSPOSED_OPERATORS = {
 }
 
 
+AXES_ARG_INDEX_MAP = {
+    torch.ops.quantized_ops.calculate_mx_qparam.default: 1,
+    torch.ops.quantized_ops.dequantize.default: 3,
+    torch.ops.quantized_ops.quantize.default: 3,
+    torch.ops.quantized_ops.quantize_mx.default: 2,
+}
+
+
 def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
     visited: Set[Node] = set()
@@ -1002,15 +1010,10 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     node_to_treat.args[0], pad, *node_to_treat.args[2:]
                 )
 
-            axis_fix_map = {
-                torch.ops.quantized_ops.calculate_mx_qparam.default: 1,
-                torch.ops.quantized_ops.quantize_mx.default: 2,
-            }
-
-            if node_to_treat.target in axis_fix_map:
+            if node_to_treat.target in AXES_ARG_INDEX_MAP:
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]
                 args = tuple(node_to_treat.args)
-                idx = axis_fix_map[node_to_treat.target]
+                idx = AXES_ARG_INDEX_MAP[node_to_treat.target]
                 axes = [a + max(order) + 1 if a < 0 else a for a in args[idx]]
                 axes = tuple(order.index(a) for a in axes)
                 node_to_treat.args = args[:idx] + (axes,) + args[idx + 1 :]
@@ -1226,6 +1229,26 @@ def _insert_transposed_input(arg: Node, model: GraphModule):
     return transposed
 
 
+def _fix_axes_after_transpose(node: Node) -> List[int]:
+    if (index := AXES_ARG_INDEX_MAP.get(node.target)) is None:
+        return
+
+    axes = get_arg_or_kwarg(node, index, "axes")
+    rank = _rank(node)
+
+    # Build forward and inverse permutation for transpose(-2, -1)
+    perm = list(range(rank))
+    perm[-2], perm[-1] = perm[-1], perm[-2]
+    inv_perm = [perm.index(i) for i in range(rank)]
+
+    # Normalize negative axes first
+    norm_axes = [(a + rank) % rank for a in axes]
+
+    # Apply inverse permutation
+    new_axes = tuple(inv_perm[a] for a in norm_axes)
+    node.args = node.args[:index] + (new_axes,) + node.args[index + 1 :]
+
+
 def process_double_transpose_chain(
     model: GraphModule, chain: List[Node], transposed_nodes: Dict[Node, Node] = None
 ) -> bool:
@@ -1283,6 +1306,7 @@ def process_double_transpose_chain(
             if arg not in transposed_nodes:
                 transposed_nodes[arg] = _insert_transposed_input(arg, model)
             n.replace_input_with(arg, transposed_nodes[arg])
+        _fix_axes_after_transpose(n)
 
     down_t.replace_all_uses_with(down_t.args[0])
     graph.erase_node(down_t)
@@ -1359,6 +1383,7 @@ def move_transpose_before_dq(
             if arg not in transposed_nodes:
                 transposed_nodes[arg] = _insert_transposed_input(arg, model)
             n.replace_input_with(arg, transposed_nodes[arg])
+        _fix_axes_after_transpose(n)
 
     down_t.replace_all_uses_with(down_t.args[0])
     graph.erase_node(down_t)
@@ -2741,7 +2766,7 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         node_to_key = get_node_to_key(node)
         input_nodes = [
-            n for n in node.all_input_nodes if not n.name.startswith("code")
+            n for n in node.all_input_nodes if not "qmap" in n.name
         ]
         found_tiling = False
 

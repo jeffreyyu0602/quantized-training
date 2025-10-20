@@ -888,7 +888,7 @@ def _fuse_dequantize_recursive(
 
     if is_gemm_op(current_node) or is_elementwise_op(current_node):
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
-        fused_nodes = move_op_after_select(graph, fused_nodes)
+        fused_nodes = move_dq_after_select(graph, fused_nodes)
         nodes_map[fused_nodes[0]] = fused_nodes[-2]
 
         if (group := search_group(current_node, candidates)) is not None:
@@ -910,14 +910,14 @@ def _fuse_dequantize_recursive(
         )
 
 
-def move_op_after_select(graph: torch.fx.Graph, nodes: List[Node]):
+def move_dq_after_select(graph: torch.fx.Graph, nodes: List[Node]):
     node_to_move = nodes[0]
 
     # Pick select nodes in the chain
     select_nodes = [n for n in nodes if n.target == torch.ops.aten.select.int]
     chain = [node_to_move] + select_nodes
     for n, next_n in zip(chain[:-1], chain[1:]):
-        if next_n not in n.users:
+        if next_n not in n.users or n.args[1] != 0:
             return nodes
 
     if len(select_nodes) == 0:
@@ -929,7 +929,7 @@ def move_op_after_select(graph: torch.fx.Graph, nodes: List[Node]):
         if arg == node_to_move.args[0]:
             return select_nodes[-1]
 
-        if "code" in arg.name:
+        if "qmap" in arg.name:
             return arg
 
         # TODO some dims are broadcasted, thus don't need to apply all selects
@@ -944,6 +944,10 @@ def move_op_after_select(graph: torch.fx.Graph, nodes: List[Node]):
 
     with graph.inserting_before(user_node):
         new_node = graph.node_copy(node_to_move, map_arg)
+
+    # Update dequantize axes arguments
+    axes = tuple(a - len(select_nodes) if a >= 0 else a for a in new_node.args[3])
+    new_node.args = new_node.args[:3] + (axes,) + new_node.args[4:]
 
     user_node.replace_input_with(select_nodes[-1], new_node)
     select_nodes[0].replace_input_with(node_to_move, node_to_move.args[0])
@@ -1250,7 +1254,7 @@ def run_fused_op_l2_tiling(
             new_shapes = normalize_shape(first_node, new_shapes)
 
         for n in node.all_input_nodes:
-            if n not in new_shapes and not n.name.startswith("code") and n.value.numel() > 1:
+            if n not in new_shapes and not "qmap" in n.name and n.value.numel() > 1:
                 new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
 
         if isinstance(node.value, (tuple, list)):
@@ -1416,7 +1420,7 @@ def run_memory_mapping(
         if node.op == "call_module" and tiled_shapes:
             output_shape = tiled_shapes[first_node]
             for n in node.all_input_nodes:
-                if n not in tiled_shapes and not n.name.startswith("code"):
+                if n not in tiled_shapes and not "qmap" in n.name:
                     tiled_shapes[n] = get_tiled_input_shape(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
@@ -1450,7 +1454,7 @@ def run_memory_mapping(
         tensor_sizes = {
             n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
             for n in node.all_input_nodes
-            if not n.name.startswith("code") and (
+            if not "qmap" in n.name and (
                 isinstance(n.value, torch.Tensor) and n.value.numel() > 1
                 or n.op != "get_attr"
             )

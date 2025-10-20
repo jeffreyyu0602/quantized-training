@@ -63,7 +63,8 @@ def save_tensor(tensor, filename):
 def _apply_transform(node, key, field):
     if (fused_op := node.meta.get(key)) is not None:
         field.CopyFrom(map_node(fused_op))
-        field.kwargs["output_shape"].int_list.values.extend(node.shape)
+        if key == "reshape":
+            field.kwargs["output_shape"].int_list.values.extend(node.shape)
         return fused_op.args[0]
     return node
 
@@ -245,7 +246,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
 
     # Convert keyword arguments
     for key, value in kwargs.items():
-        if key in ["code", "scale_code", "output_code"] or value is None:
+        if "qmap" in key or value is None:
             continue
 
         if isinstance(value, torch.fx.Node):
