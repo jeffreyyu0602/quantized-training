@@ -917,7 +917,7 @@ def move_dq_after_select(graph: torch.fx.Graph, nodes: List[Node]):
     select_nodes = [n for n in nodes if n.target == torch.ops.aten.select.int]
     chain = [node_to_move] + select_nodes
     for n, next_n in zip(chain[:-1], chain[1:]):
-        if next_n not in n.users or n.args[1] != 0:
+        if next_n not in n.users or next_n.args[1] != 0:
             return nodes
 
     if len(select_nodes) == 0:
