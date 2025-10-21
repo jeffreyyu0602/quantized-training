@@ -1187,7 +1187,7 @@ def run_fused_op_l2_tiling(
                 N, tile_y, tile_x, tile_k = conv2d_layout(
                     tiled_output_shape, False, not transposed
                 )
-                kH, kW, _, tile_c = conv2d_layout(
+                kH, kW, tile_c, _ = conv2d_layout(
                     first_node.args[1].shape, True, not transposed
                 )
 
