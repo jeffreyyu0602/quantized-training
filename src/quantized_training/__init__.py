@@ -155,7 +155,7 @@ def transform(
 
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
-        run_vector_op_l2_tiling(model, unroll_dims, cache_size)
+        run_vector_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
 
     transpose_linear_weights(model, transpose_weight, transpose_fc)
     if transpose_weight:
@@ -197,7 +197,10 @@ def compile(
     if dump_snapshot:
         allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
 
-    path = os.path.join(output_dir, "tensor_files") if dump_verification_file else None
+    path = (
+        os.path.join(output_dir, "tensor_files")
+        if dump_verification_file else None
+    )
     params = gen_code(model, flatten_args, path)
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:

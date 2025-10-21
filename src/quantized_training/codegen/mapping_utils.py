@@ -60,12 +60,14 @@ def save_tensor(tensor, filename):
         _save_tensor(tensor, filename)
 
 
-def _apply_transform(node, key, field):
+def _apply_transform(node, key, field, is_output=False):
     if (fused_op := node.meta.get(key)) is not None:
+        fused_op.meta["tiled_shapes"] = node.meta.get("_tiled_shapes")
+        fused_op.meta["scratchpad_map"] = node.meta.get("_scratchpad_map")
         field.CopyFrom(map_node(fused_op))
         if key == "reshape":
             field.kwargs["output_shape"].int_list.values.extend(node.shape)
-        return fused_op.args[0]
+        return fused_op.args[0] if not is_output else node
     return node
 
 
@@ -78,20 +80,21 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
     if not isinstance(node, Node) or not hasattr(node, 'value'):
         raise TypeError(f"Expected node with value attribute, got {node!r}")
 
-    # Set L2 tiling meta
-    if (tiled_shape := node.meta.get("tiled_shape")) is not None:
-        field.tiled_shape.extend(tiled_shape)
-    if (scratchpad := node.meta.get("scratchpad")) is not None:
-        _set_meminfo(field.scratchpad, scratchpad)
+    tiled_shapes = node.meta.get("_tiled_shapes")
+    scratchpad_map = node.meta.get("_scratchpad_map")
 
     # Apply transformations
     if node.op != "call_module" or is_output:
-        node = _apply_transform(node, "reshape", field.reshape)
-    node = _apply_transform(node, "slicing", field.reshape)
+        node = _apply_transform(node, "reshape", field.reshape, is_output)
     node = _apply_transform(node, "dequantize", field.dequant)
 
     if (source_node := node.meta.get("source_node")) is not None:
         node = source_node
+
+    if tiled_shapes is not None and node in tiled_shapes:
+        field.tiled_shape.extend(tiled_shapes[node])
+    if scratchpad_map is not None and node in scratchpad_map:
+        _set_meminfo(field.scratchpad, scratchpad_map[node])
 
     # Tensor properties
     field.node = node.name
@@ -111,23 +114,18 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
 
 def set_output_field(param, node, output_dir):
     if isinstance(node.value, torch.Tensor):
-        if "tiled_shapes" in node.meta:
-            node.meta["tiled_shape"] = node.meta["tiled_shapes"].get(node)
-
-        if "scratchpad_mem" in node.meta:
-            node.meta["scratchpad"] = node.meta["scratchpad_mem"].get(node)
-
+        node.meta["_tiled_shapes"] = node.meta.get("tiled_shapes")
+        node.meta["_scratchpad_map"] = node.meta.get("scratchpad_map")
         set_tensor_field(param.output, node, output_dir, True)
-    
-        node.meta.pop("tiled_shape", None)
-        node.meta.pop("scratchpad", None)
+        node.meta.pop("_tiled_shapes", None)
+        node.meta.pop("_scratchpad_map", None)
     elif isinstance(node.value, (tuple, list)):
         if (memory := node.meta.get("memory")) is not None:
             memory_copy = copy.copy(memory)
             output_sizes = node.meta["output_sizes"]
 
-        if (scratchpad_mem := node.meta.get("scratchpad_mem")) is not None:
-            scratchpad_copy = copy.copy(scratchpad_mem[node])
+        if (scratchpad_map := node.meta.get("scratchpad_map")) is not None:
+            scratchpad_copy = copy.copy(scratchpad_map[node])
             tiled_output_sizes = node.meta["tiled_output_sizes"]
 
         if (tiled_shape := node.meta.get("tiled_shapes")) is not None:
@@ -146,7 +144,7 @@ def set_output_field(param, node, output_dir):
                 _set_meminfo(tensor.memory, memory_copy)
                 memory_copy.start += output_sizes[i]
 
-            if scratchpad_mem is not None:
+            if scratchpad_map is not None:
                 _set_meminfo(tensor.scratchpad, scratchpad_copy)
                 scratchpad_copy.start += tiled_output_sizes[i]
 
@@ -237,32 +235,23 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     else:
         args, kwargs = node.args, node.kwargs
 
+    # Pass L2 tiling metadata to input nodes
+    for n in node.all_input_nodes:
+        n.meta["_tiled_shapes"] = node.meta.get("tiled_shapes")
+        n.meta["_scratchpad_map"] = node.meta.get("scratchpad_map")
+
     # Convert positional arguments
     for arg in args:
         op_overload.args.append(convert_arg(arg))
 
-    tiled_shapes = node.meta.get("tiled_shapes")
-    scratchpad_mem = node.meta.get("scratchpad_mem")
-
     # Convert keyword arguments
     for key, value in kwargs.items():
-        if "qmap" in key or value is None:
-            continue
+        if not "qmap" in key and value is not None:
+            op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
 
-        if isinstance(value, torch.fx.Node):
-            n = value.meta.get("input_node", value)
-            n = n.meta.get("source_node", n)
-            if tiled_shapes is not None:
-                value.meta["tiled_shape"] = tiled_shapes.get(n)
-
-            if scratchpad_mem is not None:
-                value.meta["scratchpad"] = scratchpad_mem.get(n)
-
-        op_overload.kwargs[key].CopyFrom(convert_arg(value, output_dir))
-
-        if isinstance(value, torch.fx.Node):
-            value.meta.pop("tiled_shape", None)
-            value.meta.pop("scratchpad", None)
+    for n in node.all_input_nodes:
+        n.meta.pop("_tiled_shapes", None)
+        n.meta.pop("_scratchpad_map", None)
 
     if "l2_tiling" in node.meta:
         op_overload.kwargs["l2_tiling"].int_list.values.extend(node.meta["l2_tiling"])

@@ -2737,7 +2737,9 @@ def get_node_to_key(node):
     return node_to_key
 
 
-def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
+def run_vector_op_l2_tiling(
+    model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
+):
     for node in list(model.graph.nodes):
         if not is_elementwise_op(node) and node.target not in [
             torch.ops.aten.softmax.int,
@@ -2766,9 +2768,28 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
 
         node_to_key = get_node_to_key(node)
         input_nodes = [
-            n for n in node.all_input_nodes if not "qmap" in n.name
+            n for n in node.all_input_nodes
+            if (
+                "qmap" not in n.name
+                and "code" not in n.name
+                and isinstance(n.value, torch.Tensor)
+                and (n.value.numel() > 1 or n.op != "get_attr")
+            )
         ]
         found_tiling = False
+
+        bank_size = cache_size // num_banks if num_banks is not None else None
+
+        def compute_size(n, shape):
+            size = get_node_bytes(n) * math.prod(shape)
+            if bank_size is not None:
+                size = int(math.ceil(size / bank_size) * bank_size)
+            # Double input size of softmax and layernorm for scratch space
+            if n == node.args[0] and node.target in [
+                torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
+            ]:
+                size *= 2
+            return size
 
         for tiled_output_shape, tiling in get_valid_tiling(
             output_shape, last_dim=last_dim, min_sizes=(unroll,)
@@ -2779,24 +2800,22 @@ def run_vector_op_l2_tiling(model, unroll, cache_size=DEFAULT_CACHE_SIZE):
             }
 
             total_size = sum(
-                get_node_bytes(n) * math.prod(tiled_shapes[node_to_key[n]])
+                compute_size(n, tiled_shapes[node_to_key[n]])
                 for n in input_nodes
             )
 
-            if node.target in [
-                torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
-            ]:
-                total_size *= 2
-
             if isinstance(node.value, (tuple, list)):
-                outputs = [get_tiled_shape(t.shape, tiling) for t in node.value]
-                tiled_shapes["output"] = outputs
+                output_shapes = [
+                    get_tiled_shape(t.shape, tiling) for t in node.value
+                ]
+                tiled_shapes["output"] = output_shapes
                 total_size += sum(
-                    b * math.prod(s) for b, s in zip(get_node_bytes(node), outputs)
+                    b * math.prod(s)
+                    for b, s in zip(get_node_bytes(node), output_shapes)
                 )
             else:
                 tiled_shapes["output"] = tiled_output_shape
-                total_size += get_node_bytes(node) * math.prod(tiled_output_shape)
+                total_size += compute_size(node, tiled_output_shape)
 
             if total_size <= cache_size:
                 if math.prod(tiling) > 1:

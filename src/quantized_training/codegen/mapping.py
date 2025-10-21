@@ -926,7 +926,7 @@ def move_dq_after_select(graph: torch.fx.Graph, nodes: List[Node]):
         if arg == node_to_move.args[0]:
             return select_nodes[-1]
 
-        if "qmap" in arg.name:
+        if "qmap" in arg.name or "code" in arg.name:
             return arg
 
         # TODO some dims are broadcasted, thus don't need to apply all selects
@@ -980,7 +980,6 @@ def fuse_operator(
     """
     graph = model.graph
     named_modules = dict(model.named_modules(remove_duplicate=False))
-    named_buffers = dict(model.named_buffers())
 
     nodes_map = {}
     fused_nodes_list = []
@@ -988,19 +987,18 @@ def fuse_operator(
     if operations is not None:
         fused_nodes_list = find_sequential_nodes(model, operations)
 
-    if fuse_reshape:
-        for node in list(graph.nodes):
-            # Try to fuse MHA QKV permute with preceeding GEMM
-            if fuse_reshape_with_output(
-                graph, fused_nodes_list, nodes_map, node
-            ):
-                continue
+    for node in list(graph.nodes):
+        # Try to fuse MHA QKV permute with preceeding GEMM
+        if fuse_reshape_with_output(
+            graph, fused_nodes_list, nodes_map, node
+        ):
+            continue
 
-            # Attempt to fuse it with its immediate user
-            if is_reshape_op(node):
-                fuse_reshape_with_input(
-                    graph, fused_nodes_list, nodes_map, node
-                )
+        # Attempt to fuse it with its immediate user
+        if fuse_reshape and is_reshape_op(node):
+            fuse_reshape_with_input(
+                graph, fused_nodes_list, nodes_map, node
+            )
 
     for node in list(graph.nodes):
         if node.target != torch.ops.quantized_ops.dequantize.default:
@@ -1041,14 +1039,8 @@ def fuse_operator(
                 else:
                     n.meta['reshape'] = fused_node
 
-            if is_indexing_or_concatenation_op(fused_node):
-                n.meta['slicing'] = fused_node
-
             if fused_node.target == torch.ops.quantized_ops.dequantize.default:
                 n.meta['dequantize'] = fused_node
-
-            if next(iter(fused_node.users)).op != 'output':
-                n.meta['input_node'] = fused_node.args[0]
 
     graph.lint()
     graph.eliminate_dead_code()
@@ -1251,7 +1243,13 @@ def run_fused_op_l2_tiling(
             new_shapes = normalize_shape(first_node, new_shapes)
 
         for n in node.all_input_nodes:
-            if n not in new_shapes and not "qmap" in n.name and n.value.numel() > 1:
+            if (
+                n not in new_shapes
+                and not "qmap" in n.name
+                and not "code" in n.name
+                and isinstance(n.value, torch.Tensor)
+                and (n.value.numel() > 1 or n.op != "get_attr")
+            ):
                 new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
 
         if isinstance(node.value, (tuple, list)):
@@ -1399,7 +1397,7 @@ def run_memory_mapping(
             return
 
         bank_size = cache_size // num_banks if num_banks is not None else None
-        sp_allocator = MemoryAllocator(
+        sp_alloc = MemoryAllocator(
             cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD
         )
 
@@ -1417,7 +1415,13 @@ def run_memory_mapping(
         if node.op == "call_module" and tiled_shapes:
             output_shape = tiled_shapes[first_node]
             for n in node.all_input_nodes:
-                if n not in tiled_shapes and not "qmap" in n.name:
+                if (
+                    n not in tiled_shapes
+                    and not "qmap" in n.name
+                    and not "code" in n.name
+                    and isinstance(n.value, torch.Tensor)
+                    and (n.value.numel() > 1 or n.op != "get_attr")
+                ):
                     tiled_shapes[n] = get_tiled_input_shape(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
@@ -1431,12 +1435,12 @@ def run_memory_mapping(
         if node.op == "call_module":
             mod = named_modules[node.target]
             new_shapes = run_fused_op_l2_tiling(
-                node, mod, tiled_shapes, sp_allocator, unroll_dims
+                node, mod, tiled_shapes, sp_alloc, unroll_dims
             )
 
             if not new_shapes:
                 new_shapes = run_fused_op_l2_tiling(
-                    node, mod, tiled_shapes, sp_allocator, unroll_dims, False
+                    node, mod, tiled_shapes, sp_alloc, unroll_dims, False
                 )
 
             tiled_shapes = new_shapes
@@ -1449,21 +1453,23 @@ def run_memory_mapping(
             node.meta["tiled_shapes"] = tiled_shapes
 
         tensor_sizes = {
-            n: sp_allocator.get_tensor_size(n, tiled_shapes.get(n))
+            n: sp_alloc.get_tensor_size(n, tiled_shapes.get(n))
             for n in node.all_input_nodes
-            if not "qmap" in n.name and (
-                isinstance(n.value, torch.Tensor) and n.value.numel() > 1
-                or n.op != "get_attr"
+            if (
+                not "qmap" in n.name
+                and not "code" in n.name
+                and isinstance(n.value, torch.Tensor)
+                and (n.value.numel() > 1 or n.op != "get_attr")
             )
         }
 
         if isinstance(node.value, torch.Tensor):
-            tensor_sizes[node] = sp_allocator.get_tensor_size(
+            tensor_sizes[node] = sp_alloc.get_tensor_size(
                 node, tiled_shapes.get(node), is_scratch_output=True
             )
         elif isinstance(node.value, (tuple, list)):
             output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            tensor_sizes[node] = sp_allocator.get_tensor_size(
+            tensor_sizes[node] = sp_alloc.get_tensor_size(
                 node, output_shapes, is_scratch_output=True
             )
 
@@ -1472,21 +1478,21 @@ def run_memory_mapping(
         bytes_to_allocate = sum(tensor_sizes.values())
         remaining_cache_size = cache_size
 
-        scratchpad_mem = {}
-        unaligned_tensors = []
+        scratchpad_map = {}
+        unaligned_nodes = []
 
         # Allocate large tensors first for better cache utilization
         for n, size in tensor_sizes.items():
-            aligned_size = sp_allocator.align_size(size, True)
+            aligned_size = sp_alloc.align_size(size, True)
 
             bytes_to_allocate -= size
             align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
             remaining_cache_size -= aligned_size if align_bank else size
 
             if not align_bank:
-                unaligned_tensors.append(n.name)
+                unaligned_nodes.append(n.name)
 
-            scratchpad_mem[n] = sp_allocator.allocate_memory(
+            scratchpad_map[n] = sp_alloc.allocate_memory(
                 n,
                 shape=tiled_shapes.get(n),
                 align_bank=align_bank,
@@ -1494,20 +1500,20 @@ def run_memory_mapping(
                 is_scratch_output=(n == node),
             )
 
-        if sp_allocator.total_memory != cache_size:
+        if sp_alloc.total_memory != cache_size:
             logger.warning(
                 f"[MEM_ALLOC_FAIL] {node}: expanding cache size from "
-                f"{cache_size} to {sp_allocator.total_memory}."
+                f"{cache_size} to {sp_alloc.total_memory}."
             )
 
-        if unaligned_tensors:
-            names = ', '.join(unaligned_tensors)
+        if unaligned_nodes:
+            names = ', '.join(unaligned_nodes)
             logger.warning(
                 f"[BANK_ASSIGN_FAIL] {node}: tensors {names} could not "
                 f"be assigned to individual banks"
             )
 
-        node.meta["scratchpad_mem"] = scratchpad_mem
+        node.meta["scratchpad_map"] = scratchpad_map
 
     def allocate_for_stack_op(node: Node):
         """
@@ -1655,7 +1661,7 @@ def run_memory_mapping(
         for n in get_unused_values(node):
             allocator.free_memory(n)
 
-        if node.meta.get("scratchpad_mem") is None:
+        if node.meta.get("scratchpad_map") is None:
             allocate_scratchpad(node)
 
 
@@ -1703,7 +1709,7 @@ def gen_code(model, args, output_dir=None):
             args = map_arg(node.args, lambda n: n.value.clone())
             ShapeProp(gm).propagate(*args)
 
-            scratchpad_mem = node.meta.get("scratchpad_mem")
+            scratchpad_map = node.meta.get("scratchpad_map")
 
             operators = []
             for n in gm.graph.nodes:
@@ -1711,7 +1717,7 @@ def gen_code(model, args, output_dir=None):
                     continue
 
                 n.meta["tiled_shapes"] = tiled_shapes
-                n.meta["scratchpad_mem"] = scratchpad_mem
+                n.meta["scratchpad_map"] = scratchpad_map
 
                 operators.append(map_node(n))
 
