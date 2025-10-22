@@ -1342,6 +1342,14 @@ def run_memory_mapping(
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
 
+            if (
+                is_nop(n) or
+                is_indexing_or_concatenation_op(n) or
+                n.target == operator.getitem
+            ):
+                for arg in n.all_input_nodes:
+                    register_last_uses(arg, user)
+
     for node in reversed(model.graph.nodes):
         map_arg(node.args, lambda n: register_last_uses(n, node))
         map_arg(node.kwargs, lambda n: register_last_uses(n, node))
@@ -1352,27 +1360,7 @@ def run_memory_mapping(
         not used in the remainder of the code are freed and the memory usage
         of the code is optimal.
         """
-        visited = set()
-        to_visit = list(user_to_last_uses.get(user, []))
-        nodes_to_delete = []
-
-        while to_visit:
-            n = to_visit.pop()
-            if n in visited:
-                continue
-            visited.add(n)
-            nodes_to_delete.append(n)
-
-            # trace forward if this node is a passthrough type
-            if (
-                is_nop(n)
-                or is_indexing_or_concatenation_op(n)
-                or n.target == operator.getitem
-            ):
-                for arg in n.all_input_nodes:
-                    if arg not in visited:
-                        to_visit.append(arg)
-
+        nodes_to_delete = user_to_last_uses.get(user, [])
         return nodes_to_delete
 
     def get_path_to_target(node: torch.fx.Node, targets):
