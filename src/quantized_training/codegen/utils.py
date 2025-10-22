@@ -1014,14 +1014,15 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]
                 args = tuple(node_to_treat.args)
                 idx = AXES_ARG_INDEX_MAP[node_to_treat.target]
-                axes = [a + max(order) + 1 if a < 0 else a for a in args[idx]]
-                axes = tuple(order.index(a) for a in axes)
-                node_to_treat.args = args[:idx] + (axes,) + args[idx + 1 :]
+                if idx < len(args) and args[idx] is not None:
+                    axes = [a + len(order) if a < 0 else a for a in args[idx]]
+                    axes = tuple(order.index(a) for a in axes)
+                    node_to_treat.args = args[:idx] + (axes,) + args[idx + 1:]
 
             if is_indexing_or_concatenation_op(node_to_treat):
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]
                 args = tuple(node_to_treat.args)
-                dims = args[1] + max(order) + 1 if args[1] < 0 else args[1]
+                dims = args[1] + len(order) if args[1] < 0 else args[1]
                 node_to_treat.args = args[:1] + (order.index(dims),) + args[2:]
 
             if is_reshape_op(node_to_treat):
