@@ -362,12 +362,10 @@ if __name__ == "__main__":
         past_key_values = None
 
         if args.model == "llm_decode":
-            max_generated_length = input_ids.shape[1] + 128
             past_key_values = StaticCache(
                 config=model.config,
                 max_batch_size=1,
-                max_cache_len=max_generated_length,
-                device=model.device,
+                max_cache_len=input_ids.shape[1] + 128,
                 dtype=model.dtype
             )
 
@@ -386,8 +384,14 @@ if __name__ == "__main__":
 
         position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = model.model._update_causal_mask(
-            None, inputs_embeds, cache_position, past_key_values, None
+        causal_mask = TorchExportableModuleWithStaticCache._prepare_4d_causal_attention_mask_with_cache_position(
+            None,
+            sequence_length=inputs_embeds.shape[1],
+            target_length=args.context_length + 128,
+            dtype=inputs_embeds.dtype,
+            device=inputs_embeds.device,
+            cache_position=cache_position,
+            batch_size=inputs_embeds.shape[0],
         )
 
         if args.model == "llm_prefill":
@@ -410,9 +414,9 @@ if __name__ == "__main__":
                 self.static_cache = past_key_values
 
                 if self.static_cache is not None:
-                    for i in range(len(self.static_cache.key_cache)):
-                        self.register_buffer(f"key_cache_{i}", self.static_cache.key_cache[i], persistent=False)
-                        self.register_buffer(f"value_cache_{i}", self.static_cache.value_cache[i], persistent=False)
+                    for i in range(len(self.static_cache.layers)):
+                        self.register_buffer(f"key_cache_{i}", self.static_cache.layers[i].keys, persistent=False)
+                        self.register_buffer(f"value_cache_{i}", self.static_cache.layers[i].values, persistent=False)
 
             def forward(
                 self,
