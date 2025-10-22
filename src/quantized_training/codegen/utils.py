@@ -628,11 +628,18 @@ def pad_gemm_inputs_to_hardware_unroll_size(
         def slice_output(output_node, slice_args):
             nodes_require_slice = []
             for user in list(output_node.users.keys()):
+                # quantize dequantize ops have to be per-tensor
+                if user.target in [
+                    torch.ops.quantized_ops.dequantize.default,
+                    torch.ops.quantized_ops.quantize.default,
+                ]:
+                    bs = get_arg_or_kwarg(user, 4, "block_size")
+                    if bs is None:
+                        slice_output(user, slice_args)
+                        continue
+
                 if is_elementwise_op(user):
-                    if len(user.all_input_nodes) == 1 or user.target in [
-                        torch.ops.quantized_ops.dequantize.default,
-                        torch.ops.quantized_ops.quantize.default,
-                    ]:
+                    if len(user.all_input_nodes) == 1:
                         propagate_shape(user)
                         slice_output(user, slice_args)
                         continue
