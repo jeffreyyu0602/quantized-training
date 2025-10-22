@@ -35,7 +35,7 @@ from .mapping_utils import (
     is_prunable_op,
     is_reshape_op,
 )
-from ..pt2e_utils import get_aten_graph_module
+from ..pt2e_utils import get_aten_graph_module, deduplicate_nodes
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -80,47 +80,6 @@ def get_conv_bn_layers(model):
                 if isinstance(model._modules[module_names[k-1]], torch.nn.Conv2d):
                     layers.append([module_names[k-1], name])
     return layers
-
-
-def fuse_conv_bn(model: torch.fx.GraphModule) -> torch.nn.Module:
-    """
-    Fuses convolution/BN and linear/BN layers for inference purposes.
-    """
-    from torch.nn.utils import fuse_conv_bn_weights
-
-    for node in list(model.graph.nodes):
-        if (
-            node.target == torch.ops.aten._native_batch_norm_legit.default and
-            node.args[0].target == torch.ops.aten.conv2d.default and
-            len(node.args[0].users) == 1 and
-            node.args[5] == False  # inference mode
-        ):
-            n = node.args[0]
-
-            conv_w = model.get_parameter(n.args[1])
-            conv_b = model.get_parameter(n.args[2])
-
-            bn_w = model.get_parameter(node.args[1])
-            bn_b = model.get_parameter(node.args[2])
-            bn_rm = model.get_buffer(node.args[3])
-            bn_rv = model.get_buffer(node.args[4])
-            bn_eps = node.args[7]
-
-            fused_conv_w, fused_conv_b = fuse_conv_bn_weights(
-                conv_w, conv_b, bn_rm, bn_rv, bn_eps, bn_w, bn_b
-            )
-
-            model.register_parameter(n.args[1].target, fused_conv_w)
-            model.register_parameter(n.args[2].target, fused_conv_b)
-
-            node.replace_all_uses_with(n)
-            model.graph.erase_node(node)
-
-    model.graph.lint()
-    model.graph.eliminate_dead_code()
-    model.recompile()
-
-    return model
 
 
 def convert_cat_and_stack_as_stack_on_dim0(model: GraphModule):
@@ -297,18 +256,14 @@ def convert_expand_to_memory_copy(model: torch.fx.GraphModule):
 
         class Expand(torch.nn.Module):
             def forward(self, input):
-                # Stack along the first dimension repeatedly to create the expanded shape
+                # Stack along the first dimension to create the expanded shape
                 for dim, size in enumerate(sizes):
                     if input.shape[dim] == 1 and size > 1:
-                        stacked_tensors = []
-                        for _ in range(size):
-                            stacked_tensors.append(input.squeeze(dim) + 0)
-                        input = torch.stack(stacked_tensors, dim=dim)
+                        input = torch.stack([input.squeeze(dim)] * size, dim=dim)
                     elif input.shape[dim] != size:
                         raise ValueError(
                             f"Cannot expand dimension {dim} from {input.shape[dim]} to {size}."
                         )
-
                 return input
 
         gm = export_model(Expand(), (input_node.meta["val"],))
@@ -1554,14 +1509,22 @@ def transpose_linear_weights(
             node_order = {n: i for i, n in enumerate(model.graph.nodes)}
             path = find_upstream_matching_transpose(weight_transposed)
             sorted_path = sorted(path, key=lambda n: node_order[n])
-            success = process_double_transpose_chain(model, sorted_path, transposed_nodes)
+            success = process_double_transpose_chain(
+                model, sorted_path, transposed_nodes
+            )
             if not success:
                 move_transpose_before_dq(model, sorted_path, transposed_nodes)
 
             if scale_node is not None:
                 scale_path = find_upstream_matching_transpose(scale_transposed)
                 sorted_path = sorted(scale_path, key=lambda n: node_order[n])
-                fold_transpose_into_constant(model, sorted_path, transposed_nodes)
+                success = process_double_transpose_chain(
+                    model, sorted_path, transposed_nodes
+                )
+                if not success:
+                    fold_transpose_into_constant(model, sorted_path, transposed_nodes)
+
+    deduplicate_nodes(model.graph)
 
     model.graph.lint()
     model.recompile()

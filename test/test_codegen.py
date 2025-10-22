@@ -457,11 +457,10 @@ if __name__ == "__main__":
         old_output = gm(*example_args, **example_kwargs)
 
         transform(gm, example_args, example_kwargs=example_kwargs, **transform_args)
-        gm.graph.print_tabular()
+        compile(gm, example_args, **compile_args)
 
         new_output = gm(*example_args, *list(example_kwargs.values()))
-
-        compile(gm, example_args, **compile_args)
+        gm.graph.print_tabular()
     elif args.model == "llm_kivi":
         from transformers import AutoModelForCausalLM
 
