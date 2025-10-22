@@ -4,7 +4,6 @@ import logging
 import math
 import operator
 import os
-import re
 from collections import defaultdict
 from typing import List, Dict, Callable, Union
 
@@ -1319,7 +1318,7 @@ def run_memory_mapping(
 
     # Store all the weights in memory if persistent is enabled
     for node in model.graph.nodes:
-        if node.op == "get_attr" and not re.fullmatch(r"code_\d+", node.name):
+        if node.op == "get_attr" and not "qmap" in node.name:
             node.meta["memory"] = allocator.allocate_memory(node)
 
     # Store inputs to the model in memory
@@ -1738,7 +1737,7 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
     for node in model.graph.nodes:
-        if node.op == "get_attr" and node.name.startswith("code_"):
+        if node.op == "get_attr" and "qmap" in node.name:
             continue
 
         header = node.name
