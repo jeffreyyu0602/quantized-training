@@ -851,6 +851,7 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     dequantize can be fused with the previous operation.
     """
     from .codegen.mapping import propagate_shape
+    from .codegen.utils import get_arg_or_kwarg
 
     graph = model.graph
 
@@ -928,8 +929,8 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             continue
 
         # Only handle per-tensor quantization for now
-        block_size = node.args[3]
-        if block_size is not None and block_size != 1:
+        block_size = get_arg_or_kwarg(node, 4, "block_size")
+        if block_size is not None and block_size > 1:
             continue
 
         output_node = node
