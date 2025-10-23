@@ -79,25 +79,9 @@ vector_stages = [
 ]
 
 
-def get_llm_qscheme(bs=64, threshold=None):
+def get_llama_mp_qconfig(bs=64, threshold=None):
     outlier = f",outlier={threshold}" if threshold is not None else ""
     return {
-        r"self_attn\.q_proj$": [
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
-            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-        ],
-        r"self_attn\.k_proj$": [
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
-            f"int2,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-        ],
-        r"self_attn\.v_proj$": [
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-        ],
-        r"self_attn\.o_proj$": [
-            f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-            f"int6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
-        ],
         torch.nn.Linear: [
             f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3" + outlier,
             f"nf4_6,qs=microscaling,bs={bs},ax=-1,scale=fp8_e5m3",
@@ -442,7 +426,8 @@ if __name__ == "__main__":
                 return logits
 
         if args.mixed_precision:
-            set_qconfig(quantizer, get_llm_qscheme(args.hardware_unrolling[0], args.outlier_threshold))
+            qconfig = get_llama_mp_qconfig(args.hardware_unrolling[0], args.outlier_threshold)
+            set_qconfig(quantizer, qconfig)
 
         gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
 

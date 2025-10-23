@@ -1212,6 +1212,73 @@ def _fix_axes_after_transpose(node: Node) -> List[int]:
     node.args = node.args[:index] + (new_axes,) + node.args[index + 1 :]
 
 
+def _fuse_quantize_mx_last_axis(model: GraphModule):
+    """
+    Replace calculate_mx_qparam + quantize with quantize_mx when the
+    quantization is performed along the last axis.
+    """
+    graph = model.graph
+    for node in list(graph.nodes):
+        if node.target != torch.ops.quantized_ops.calculate_mx_qparam.default:
+            continue
+
+        axes = get_arg_or_kwarg(node, 1, "axes")
+        rank = _rank(node)
+        print(f"Found calculate_mx_qparam with axes {axes} and rank {rank}")
+        if axes != (rank - 1,) and axes != (-1,):
+            continue
+
+        args = node.args[1:] + (None,) * (5 - len(node.args[1:]))
+
+        quantize_node = next(iter(
+            n for n in node.users
+            if n.target == torch.ops.quantized_ops.quantize.default
+        ))
+
+        assert quantize_node.args[0] == node.args[0], "Unexpected quantize input"
+
+        qmap = quantize_node.args[5]
+        output_code = get_arg_or_kwarg(quantize_node, 6, "output_code")
+        new_code = None
+
+        with graph.inserting_before(node):
+            new_qmap = graph.node_copy(qmap)
+            if output_code is not None:
+                new_code = graph.node_copy(output_code)
+            quantize_mx_node = graph.call_function(
+                torch.ops.quantized_ops.quantize_mx.default,
+                (node.args[0], new_qmap) + args + (new_code,)
+            )
+            scale_node = graph.call_function(
+                operator.getitem, (quantize_mx_node, 0)
+            )
+            output_node = graph.call_function(
+                operator.getitem, (quantize_mx_node, 1)
+            )
+
+        propagate_shape(new_qmap, model)
+        if new_code is not None:
+            propagate_shape(new_code, model)
+        propagate_shape(quantize_mx_node, model)
+        propagate_shape(scale_node, model)
+        propagate_shape(output_node, model)
+
+        scale_node.meta["dtype"] = node.meta.get("dtype")
+        output_node.meta["dtype"] = quantize_node.meta.get("dtype")
+        quantize_mx_node.meta["dtype"] = (
+            scale_node.meta.get("dtype"), output_node.meta.get("dtype")
+        )
+
+        node.replace_all_uses_with(scale_node)
+        quantize_node.replace_all_uses_with(output_node)
+
+        logger.info(f"Replaced {node} and {quantize_node} with {quantize_mx_node}")
+
+    graph.lint()
+    model.recompile()
+    return model
+
+
 def process_double_transpose_chain(
     model: GraphModule, chain: List[Node], transposed_nodes: Dict[Node, Node] = None
 ) -> bool:
@@ -1525,6 +1592,7 @@ def transpose_linear_weights(
                     fold_transpose_into_constant(model, sorted_path, transposed_nodes)
 
     deduplicate_nodes(model.graph)
+    _fuse_quantize_mx_last_axis(model)
 
     model.graph.lint()
     model.recompile()
