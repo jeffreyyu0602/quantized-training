@@ -758,7 +758,11 @@ def _fuse_reshape_with_input_impl(
 
     # Check if fusion is valid
     if is_gemm_op(current_node):
-        can_fuse = is_tranpose(reshape_node) or is_mha_qkv_permute(reshape_node)
+        input_node = fused_nodes[-2]
+        if is_mha_qkv_permute(reshape_node):
+            can_fuse = input_node == current_node.args[0]
+        elif is_tranpose(reshape_node):
+            can_fuse = input_node in current_node.args[:2]
     elif is_elementwise_op(current_node):
         can_fuse = not is_tranpose(reshape_node)
     else:
@@ -775,6 +779,8 @@ def _fuse_reshape_with_input_impl(
         else:
             candidates.append(fused_nodes)
         return [fused_nodes[0]]
+    else:
+        logger.warning(f"Cannot fuse {reshape_node} with {current_node}")
 
     if (
         not is_nop(current_node)
