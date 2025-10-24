@@ -91,6 +91,33 @@ def matmul(self: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
     return torch.matmul(self, other)
 
 
+quantized_decomposed_lib.define(
+    "layer_norm(Tensor input, SymInt[] normalized_shape, SymInt[] original_shape, "
+    "Tensor? weight=None, Tensor? bias=None, float eps=1e-05, bool cudnn_enable=True) -> Tensor"
+)
+
+
+@impl(quantized_decomposed_lib, "layer_norm", "CompositeExplicitAutograd")
+def layer_norm(
+    input: torch.Tensor,
+    normalized_shape: Union[int, Tuple[int]],
+    original_shape: Optional[Tuple[int]] = None,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+    cudnn_enable: bool = True
+) -> torch.Tensor:
+    assert len(normalized_shape) == 1
+    return F.layer_norm(
+        input[..., :original_shape[0]],
+        normalized_shape,
+        weight[..., :original_shape[0]],
+        bias[..., :original_shape[0]],
+        eps,
+        cudnn_enable
+    )
+
+
 def expand(input, shape, block_size):
     while input.ndim < len(shape):
         input = input.unsqueeze(0)

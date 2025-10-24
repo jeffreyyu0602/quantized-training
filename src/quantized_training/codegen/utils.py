@@ -35,7 +35,7 @@ from .mapping_utils import (
     is_prunable_op,
     is_reshape_op,
 )
-from ..pt2e_utils import get_aten_graph_module, deduplicate_nodes
+from ..pt2e_utils import get_aten_graph_module, deduplicate_nodes, fetch_attr
 from ..quantize_pt2e import create_getattr_from_value, export_model
 from ..quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -685,6 +685,79 @@ def pad_vector_ops_to_hardware_unroll_size(
 
         node.replace_all_uses_with(slice_node)
         slice_node.replace_input_with(slice_node, node)
+
+        propagate_shape(slice_node)
+        slice_node.meta["dtype"] = node.meta.get("dtype")
+
+    model.graph.lint()
+    model.graph.eliminate_dead_code()
+    model.recompile()
+    return model
+
+
+def pad_layer_norm_to_hardware_unroll_size(
+    model: torch.fx.GraphModule,
+    K_unroll,
+) -> torch.fx.GraphModule:
+    """
+    Pad inputs to vector operations to multiples of the hardware unroll size.
+    Only support softmax operation for now.
+
+    Parameters:
+        model (torch.fx.GraphModule): The FX graph module to transform.
+        K_unroll (int): Unroll factor for the output channels.
+
+    Returns:
+        torch.fx.GraphModule: The transformed FX graph module.
+    """
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.aten.softmax.int:
+            continue
+
+        input = node.args[0]
+        reduction_dim = input.shape[-1]
+
+        pad_K = (K_unroll - (reduction_dim % K_unroll)) % K_unroll
+
+        if not pad_K:
+            continue
+
+        weight = node.args[1]
+        if weight.op == "get_attr":
+            param = fetch_attr(model, weight.target)
+            param.data = F.pad(param.data, [0, pad_K])
+            propagate_shape(weight, model)
+
+        original_shape = node.args[1]
+        normalized_shape = original_shape[:-1] + (original_shape[-1] + pad_K,)
+        print(original_shape, normalized_shape)
+
+        bias = node.args[2]
+        if bias is not None and bias.op == "get_attr":
+            param = fetch_attr(model, bias.target)
+            param.data = F.pad(param.data, [0, pad_K])
+            propagate_shape(bias, model)
+
+        with model.graph.inserting_before(node):
+            new_input = model.graph.call_function(
+                torch.ops.aten.pad.default,
+                (input, [0, pad_K], "constant", float("-inf")),
+            )
+            new_layer_norm = model.graph.call_function(
+                torch.ops.quantized_ops.layer_norm.default,
+                node.args[:1] + (normalized_shape, original_shape) + node.args[2:]
+            )
+            slice_node = model.graph.call_function(
+                torch.ops.aten.slice.Tensor, (new_layer_norm, -1, 0, reduction_dim),
+            )
+
+        node.replace_all_uses_with(slice_node)
+
+        propagate_shape(new_input)
+        new_input.meta["dtype"] = input.meta.get("dtype")
+
+        propagate_shape(new_layer_norm)
+        new_layer_norm.meta["dtype"] = node.meta.get("dtype")
 
         propagate_shape(slice_node)
         slice_node.meta["dtype"] = node.meta.get("dtype")
