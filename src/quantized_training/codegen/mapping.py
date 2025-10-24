@@ -15,9 +15,9 @@ from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 from transformers.utils.import_utils import is_torch_greater_or_equal
 
 from .mapping_utils import (
-    is_addressing_op,
     is_conv2d,
     is_elementwise_op,
+    is_fc,
     is_gemm_op,
     is_indexing_or_concatenation_op,
     is_matmul,
@@ -757,7 +757,7 @@ def _fuse_reshape_with_input_impl(
     fused_nodes.append(current_node)
 
     # Check if fusion is valid
-    if is_gemm_op(current_node):
+    if is_gemm_op(current_node) and not is_fc(current_node):
         input_node = fused_nodes[-2]
         if is_mha_qkv_permute(reshape_node):
             can_fuse = input_node == current_node.args[0]

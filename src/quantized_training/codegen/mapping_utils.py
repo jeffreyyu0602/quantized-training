@@ -1,5 +1,6 @@
 import copy
 import logging
+import math
 import numpy as np
 import operator
 import os
@@ -300,6 +301,13 @@ def is_linear(node: Node) -> bool:
         torch.ops.quantized_ops.linear.default,
         torch.ops.quantized_ops.linear_mx.default,
     ]
+
+
+def is_fc(node: Node) -> bool:
+    return (
+        (is_linear(node) or is_matmul(node))
+        and math.prod(node.args[0].shape[:-1]) == 1
+    )
 
 
 def is_matmul(node: Node) -> bool:
