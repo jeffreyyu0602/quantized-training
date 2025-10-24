@@ -1224,7 +1224,6 @@ def _fuse_quantize_mx_last_axis(model: GraphModule):
 
         axes = get_arg_or_kwarg(node, 1, "axes")
         rank = _rank(node)
-        print(f"Found calculate_mx_qparam with axes {axes} and rank {rank}")
         if axes != (rank - 1,) and axes != (-1,):
             continue
 
@@ -2779,6 +2778,63 @@ def get_node_to_key(node):
 def run_vector_op_l2_tiling(
     model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
 ):
+    def _compute_size(n, shape, node, bank_size=None):
+        size = get_node_bytes(n) * math.prod(shape)
+        if bank_size is not None:
+            size = int(math.ceil(size / bank_size) * bank_size)
+        # Double input size for softmax/layernorm (scratch space)
+        if n == node.args[0] and node.target in [
+            torch.ops.aten.softmax.int,
+            torch.ops.aten.layer_norm.default,
+        ]:
+            size *= 2
+        return size
+
+    def _try_l2_tiling_phase(node, node_to_key, input_nodes, output_shape,
+                             last_dim, unroll, cache_size, bank_size):
+        """Try to find a valid tiling given bank_size (None = no banking constraint)."""
+        for tiled_output_shape, tiling in get_valid_tiling(
+            output_shape, last_dim=last_dim, min_sizes=(unroll,)
+        ):
+            tiled_shapes = {
+                node_to_key.get(n): get_tiled_shape(tuple(n.shape), tiling)
+                for n in input_nodes
+            }
+
+            total_size = sum(
+                _compute_size(n, tiled_shapes[node_to_key[n]], node, bank_size)
+                for n in input_nodes
+            )
+
+            if isinstance(node.value, (tuple, list)):
+                output_shapes = [
+                    get_tiled_shape(t.shape, tiling) for t in node.value
+                ]
+                tiled_shapes["output"] = output_shapes
+                total_size += sum(
+                    b * math.prod(s)
+                    for b, s in zip(get_node_bytes(node), output_shapes)
+                )
+            else:
+                tiled_shapes["output"] = tiled_output_shape
+                total_size += _compute_size(node, tiled_output_shape, node, bank_size)
+
+            logger.debug(
+                f"Trying tiling {tiling} for {node} "
+                f"(bank_size={bank_size}), total_size={total_size}"
+            )
+
+            if total_size <= cache_size:
+                if math.prod(tiling) > 1:
+                    logger.info(
+                        f"Tile {node} with shape {tiled_output_shape} "
+                        f"(reduce factor={tiling}, bank_size={bank_size})"
+                    )
+                    node.meta["tiled_shapes"] = tiled_shapes
+                    node.meta["l2_tiling"] = tiling
+                return True  # found tiling
+        return False
+
     for node in list(model.graph.nodes):
         if not is_elementwise_op(node) and node.target not in [
             torch.ops.aten.softmax.int,
@@ -2815,57 +2871,24 @@ def run_vector_op_l2_tiling(
                 and (n.value.numel() > 1 or n.op != "get_attr")
             )
         ]
+
+        # Try with banking first
         found_tiling = False
-
-        bank_size = cache_size // num_banks if num_banks is not None else None
-
-        def compute_size(n, shape):
-            size = get_node_bytes(n) * math.prod(shape)
-            if bank_size is not None:
-                size = int(math.ceil(size / bank_size) * bank_size)
-            # Double input size of softmax and layernorm for scratch space
-            if n == node.args[0] and node.target in [
-                torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
-            ]:
-                size *= 2
-            return size
-
-        for tiled_output_shape, tiling in get_valid_tiling(
-            output_shape, last_dim=last_dim, min_sizes=(unroll,)
-        ):
-            tiled_shapes = {
-                node_to_key.get(n): get_tiled_shape(tuple(n.shape), tiling)
-                for n in input_nodes
-            }
-
-            total_size = sum(
-                compute_size(n, tiled_shapes[node_to_key[n]])
-                for n in input_nodes
+        if num_banks is not None:
+            bank_size = cache_size // num_banks
+            logger.info(f"Trying L2 tiling for {node} WITH banking constraint.")
+            found_tiling = _try_l2_tiling_phase(
+                node, node_to_key, input_nodes, output_shape,
+                last_dim, unroll, cache_size, bank_size
             )
 
-            if isinstance(node.value, (tuple, list)):
-                output_shapes = [
-                    get_tiled_shape(t.shape, tiling) for t in node.value
-                ]
-                tiled_shapes["output"] = output_shapes
-                total_size += sum(
-                    b * math.prod(s)
-                    for b, s in zip(get_node_bytes(node), output_shapes)
-                )
-            else:
-                tiled_shapes["output"] = tiled_output_shape
-                total_size += compute_size(node, tiled_output_shape)
-
-            if total_size <= cache_size:
-                if math.prod(tiling) > 1:
-                    logger.info(
-                        f"Tile {node} with shape {tiled_output_shape} "
-                        f"(reduce factor={tiling})"
-                    )
-                    node.meta["tiled_shapes"] = tiled_shapes
-                    node.meta["l2_tiling"] = tiling
-                found_tiling = True
-                break
+        # If failed, retry without banking
+        if not found_tiling:
+            logger.info(f"Retrying L2 tiling for {node} WITHOUT banking constraint.")
+            found_tiling = _try_l2_tiling_phase(
+                node, node_to_key, input_nodes, output_shape,
+                last_dim, unroll, cache_size, None
+            )
 
         if not found_tiling:
-            logger.warning(f"No tiling found to fit {node} into cache.")
+            logger.warning(f"No L2 tiling found for {node} (both phases).")

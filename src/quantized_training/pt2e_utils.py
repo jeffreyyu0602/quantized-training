@@ -187,7 +187,7 @@ def deduplicate_nodes(graph: torch.fx.Graph):
             seen[key] = node
 
     for old, new in mapping.items():
-        print(f"Deduplicated {old} to {new}")
+        logger.info(f"Deduplicated {old} to {new}")
 
     graph.lint()
     return mapping
