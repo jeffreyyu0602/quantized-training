@@ -92,8 +92,8 @@ def matmul(self: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
 
 
 quantized_decomposed_lib.define(
-    "layer_norm(Tensor input, SymInt[] normalized_shape, SymInt[] original_shape, "
-    "Tensor? weight=None, Tensor? bias=None, float eps=1e-05, bool cudnn_enable=True) -> Tensor"
+    "layer_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None, "
+    "Tensor? bias=None, float eps=1e-05, bool cudnn_enable=True) -> Tensor"
 )
 
 
@@ -101,21 +101,24 @@ quantized_decomposed_lib.define(
 def layer_norm(
     input: torch.Tensor,
     normalized_shape: Union[int, Tuple[int]],
-    original_shape: Optional[Tuple[int]] = None,
     weight: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     eps: float = 1e-5,
     cudnn_enable: bool = True
 ) -> torch.Tensor:
-    assert len(normalized_shape) == 1
-    return F.layer_norm(
-        input[..., :original_shape[0]],
+    output = torch.ops.aten.layer_norm.default(
+        input[..., :normalized_shape[-1]],
         normalized_shape,
-        weight[..., :original_shape[0]],
-        bias[..., :original_shape[0]],
+        weight[..., :normalized_shape[-1]],
+        bias[..., :normalized_shape[-1]],
         eps,
         cudnn_enable
     )
+    # Pad the output back to the original input shape
+    output = torch.nn.functional.pad(
+        output, (0, input.shape[-1] - normalized_shape[-1])
+    )
+    return output
 
 
 def expand(input, shape, block_size):
