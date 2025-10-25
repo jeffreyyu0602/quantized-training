@@ -647,7 +647,7 @@ def pad_layer_norm_to_hardware_unroll_size(
     input = node.args[0]
     normalize_shape = node.args[1]
     weight = node.args[2]
-    bias = node.args[3]
+    bias = node.args[3] if len(node.args) > 3 else None
 
     orig_k = input.shape[-1]
     pad_k = (-orig_k) % unroll

@@ -1,4 +1,5 @@
 import copy
+import logging
 import operator
 import re
 from collections import OrderedDict
@@ -30,6 +31,8 @@ from .codegen.mapping_utils import (
     is_conv2d,
 )
 from .decomposed import quantized_decomposed_lib
+
+logger = logging.getLogger(__name__)
 
 
 def _create_obs_or_fq_from_qspec(quantization_spec, obs_or_fq_map, is_qat):
@@ -820,6 +823,8 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
+    from .codegen.utils import get_arg_or_kwarg
+
     for node in model.graph.nodes:
         if node.target != torch.ops.quantized_ops.dequantize.default:
             continue
@@ -831,11 +836,13 @@ def _eliminate_dequantize_with_no_effect(model: GraphModule):
 
         # During integer quantization, the dequantize node also perform a
         # quantization to the output dtype
-        if node.args[2] is not None:
+        output_qmap = get_arg_or_kwarg(node, 6, "output_qmap")
+        if output_qmap is not None:
             continue
 
         node.replace_all_uses_with(node.args[0])
         model.graph.erase_node(node)
+        logger.info(f"Eliminate dequantize node {node} with no effect")
 
     model.graph.lint()
     model.graph.eliminate_dead_code()

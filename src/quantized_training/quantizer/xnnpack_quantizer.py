@@ -131,7 +131,10 @@ def _get_module_name_object_type_order_filter(
     def module_name_object_type_order_filter(n: Node) -> bool:
         current_scope = node_name_to_scope[n.name]
         return (
-            (module_name == current_scope[0] or re.search(module_name, current_scope[0]))
+            (
+                module_name == current_scope[0]
+                or re.search(module_name, current_scope[0])
+            )
             and object_type == n.target
             and index == current_scope[2]
         )
@@ -159,6 +162,9 @@ class XNNPACKQuantizer(Quantizer):
         "conv",
         "matmul",
         "residual",
+        "activation",
+        "softmax",
+        "layer_norm",
     ]
 
     def __init__(self):
@@ -247,11 +253,12 @@ class XNNPACKQuantizer(Quantizer):
                 model, config, _get_object_type_filter(op)
             )
 
-        self._annotate_all_static_patterns(
-            model,
-            self.global_config,
-            _get_not_module_type_or_name_filter(tp_list, module_name_list),
-        )
+        if self.global_config is not None:
+            self._annotate_all_static_patterns(
+                model,
+                self.global_config,
+                _get_not_module_type_or_name_filter(tp_list, module_name_list),
+            )
         return model
 
     def _annotate_all_static_patterns(

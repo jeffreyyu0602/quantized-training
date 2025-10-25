@@ -7,6 +7,7 @@ import sys
 import torch
 from datasets import load_dataset
 from torchvision import models, transforms
+from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
 from transformers import (
     AutoImageProcessor,
     AutoTokenizer,
@@ -22,10 +23,12 @@ from quantized_training import (
     compile,
     convert_and_export_with_split_cache,
     convert_pt2e,
+    export_model,
     extract_input_preprocessor,
     fuse,
     get_default_quantizer,
     prepare_pt2e,
+    print_node_scope_tabular,
     sink_obs_or_fq,
     swap_llama_attention,
     transform,
@@ -205,6 +208,11 @@ if __name__ == "__main__":
         "--evaluate",
         action="store_true",
         help="Whether to run the pytorch evaluation during compilation"
+    )
+    parser.add_argument(
+        "--binary_mask",
+        action="store_true",
+        help="Whether to use binary attention mask for LLMs."
     )
     add_qspec_args(parser)
     args = parser.parse_args()
@@ -425,21 +433,36 @@ if __name__ == "__main__":
                 logits = self.lm_head(hidden_states)
                 return logits
 
+        gm = export_model(LlamaWrapper(), example_args, example_kwargs)
+
+        strip_softmax_dtype(gm)
+
         if args.mixed_precision:
             qconfig = get_llama_mp_qconfig(args.hardware_unrolling[0], args.outlier_threshold)
             set_qconfig(quantizer, qconfig)
 
-        gm = prepare_pt2e(LlamaWrapper(), quantizer, example_args, example_kwargs)
+            fp8_qspec = QuantizationSpec.from_str("fp8_e4m3")
+            qconfig = QuantizationConfig(fp8_qspec, None, None, None)
+            quantizer.set_object_type(torch.ops.aten.softmax.int, qconfig)
+            quantizer.set_object_type(torch.ops.aten.layer_norm.default, qconfig)
 
-        strip_softmax_dtype(gm)
+        if args.binary_mask:
+            qspec = QuantizationSpec.from_str("int1,qs=per_tensor_symmetric,qmax=1")
+            attention_mask = next(iter(n for n in gm.graph.nodes if n.target == "attention_mask"))
+            _annotate_output_qspec(attention_mask, qspec)
+
+        gm = prepare_pt2e(gm, quantizer, example_args, example_kwargs)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=torch.bfloat16)
         replace_rmsnorm_with_layer_norm(gm, model.model.layers[0].input_layernorm, (example_input,))
 
+        for _ in range(2):
+            gm(*example_args, *list(example_kwargs.values()))
+
         convert_pt2e(gm, args.bias)
 
-        old_output = gm(*example_args, **example_kwargs)
+        old_output = gm(*example_args, *list(example_kwargs.values()))
 
         transform(gm, example_args, example_kwargs=example_kwargs, **transform_args)
         compile(gm, example_args, **compile_args)
@@ -495,6 +518,9 @@ if __name__ == "__main__":
         act1 = QuantizationSpec.from_str("int6,qs=microscaling,bs=64,ax=(-2,-1),scale=fp8_e5m3")
         matmul_qconfig = QuantizationConfig(act0, None, act1, None)
 
+        input_act = QuantizationSpec.from_str("int1,qs=per_tensor_symmetric")
+        residual_qconfig = QuantizationConfig(input_act, None, None, None)
+
         for layer_idx in range(model.config.num_hidden_layers):
             module_name = (
                 f"model.model.layers.slice(None, {model.config.num_hidden_layers}, None)"
@@ -517,7 +543,9 @@ if __name__ == "__main__":
                 module_name, torch.ops.aten.matmul.default, 3, None
             )
 
-        from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
+            quantizer.set_module_name_object_type_order(
+                module_name, torch.ops.aten.add.Tensor, 2, residual_qconfig
+            )
 
         # KV Cache shape: (N, H, S, D)
         #   N = batch size
