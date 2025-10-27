@@ -46,20 +46,29 @@ class Segment:
         self.end = e
 
 
-def get_user_with_target(node: torch.fx.Node, targets):
+def find_user_with_target(node: torch.fx.Node, targets):
     if not isinstance(targets, (list, tuple)):
         targets = [targets]
 
     for user in node.users:
-        if user.target in targets:
+        if user.target in targets and user.args[0] == node:
             return user
+
+        # Check for users of fused dequantization nodes
+        if (
+            user.target == torch.ops.quantized_ops.dequantize.default
+            and user.meta.get("fused") is True
+        ):
+            dequant_user = find_user_with_target(user, targets)
+            if dequant_user is not None:
+                return dequant_user
 
         if user.op == 'call_module':
             gm = user.meta['submodule']
             placeholder = next(n for n in gm.graph.nodes if n.name == node.name)
-            user = get_user_with_target(placeholder, targets)
-            if user is not None:
-                return user
+            submod_user = find_user_with_target(placeholder, targets)
+            if submod_user is not None:
+                return submod_user
     return None
 
 
@@ -99,34 +108,27 @@ class MemoryAllocator:
             numel = math.prod(shape) if shape is not None else node.value.numel()
             tensor_size = numel * dtype_byte_size(dtype)
 
-            conv2d_node = get_user_with_target(node, (
+            conv2d_node = find_user_with_target(node, (
                 torch.ops.aten.conv2d.default,
                 torch.ops.quantized_ops.conv2d.default,
             ))
-
             if conv2d_node is not None:
-                input_node = conv2d_node.args[0]
-                input_node = input_node.meta.get('source_node', input_node)
                 dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
-                if input_node == node and node.value.shape[dim] < 16:
+                if node.value.shape[dim] == 3:
                     logger.info(
-                        f"Increasing tensor size for node [{node}] -> [{conv2d_node}] "
+                        f"Increasing size for node [{node}] -> [{conv2d_node}] "
                         f"with target [{conv2d_node.target}] by 3x"
                     )
                     tensor_size *= 3
 
-            user = get_user_with_target(node, (
-                torch.ops.aten.softmax.int,
-                torch.ops.aten.layer_norm.default,
-            ))
-
             # TODO: handle the case where one node has multiple users
-            if not is_scratch_output and user is not None:
-                input_node = user.args[0]
-                input_node = input_node.meta.get('source_node', input_node)
-                if input_node == node:
+            if not is_scratch_output:
+                user = find_user_with_target(node, (
+                    torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
+                ))
+                if user is not None:
                     logger.info(
-                        f"Increasing tensor size for node [{node}] -> [{user}] "
+                        f"Increasing size for node [{node}] -> [{user}] "
                         f"with target [{user.target}] by 2x"
                     )
                     tensor_size *= 2
@@ -163,15 +165,10 @@ class MemoryAllocator:
             return None
 
         # Skip allocation for quantization scaling factors
-        quantize_dequantize_node = get_user_with_target(node, [
-            torch.ops.quantized_ops.quantize.default,
-            torch.ops.quantized_ops.dequantize.default,
-        ])
-
         if (
             isinstance(node.value, torch.Tensor)
             and node.value.numel() == 1
-            and quantize_dequantize_node is not None
+            and node.op == "get_attr"
         ):
             logger.info(f"Skipping allocation for scalar scale tensor: {node.name}")
             return None
