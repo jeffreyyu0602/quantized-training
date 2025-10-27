@@ -460,11 +460,13 @@ def get_submodule_name(module, nodes: List[Node]):
                 first_node = n
                 break
             if (
-                first_node is None
-                and n.op == 'call_function'
+                n.op == 'call_function'
                 and not is_nop(n)
-                and not is_indexing_or_concatenation_op(n)
                 and not is_reshape_op(n)
+                and (
+                    first_node is None
+                    or first_node.target == torch.ops.quantized_ops.dequantize.default
+                )
             ):
                 first_node = n
         prefix = get_unique_node_name(first_node)
@@ -475,7 +477,7 @@ def get_submodule_name(module, nodes: List[Node]):
     return get_new_node_name(module)
 
 
-def update_placeholder_meta(model, node, named_modules=None):
+def update_submod_user_meta(model, node, named_modules=None):
     """
     Update the metadata of all user nodes that consume the given node.
     """
@@ -487,12 +489,12 @@ def update_placeholder_meta(model, node, named_modules=None):
             continue
 
         try:
-            index = user.args.index(node)
+            index = user.all_input_nodes.index(node)
         except ValueError:
             continue
 
-        mod = named_modules[user.target]
-        placeholders = [n for n in mod.graph.nodes if n.op == 'placeholder']
+        submod = named_modules[user.target]
+        placeholders = [n for n in submod.graph.nodes if n.op == 'placeholder']
         if index >= len(placeholders):
             continue
 
@@ -509,7 +511,7 @@ def rename_nodes_with_param_names(model: GraphModule):
     for node in list(graph.nodes):
         if node.target in OP_PARAM_ARG_INDEX:
             node.name = get_submodule_name(model, [node])
-            update_placeholder_meta(model, node, named_modules)
+            update_submod_user_meta(model, node, named_modules)
     graph.lint()
     model.recompile()
 
@@ -888,7 +890,14 @@ def _fuse_dequantize_recursive(
 ):
     fused_nodes.append(current_node)
 
-    if is_gemm_op(current_node) or is_elementwise_op(current_node):
+    if (
+        is_gemm_op(current_node)
+        or is_elementwise_op(current_node)
+        or current_node.target in [
+            torch.ops.aten.layer_norm.default,
+            torch.ops.aten.softmax.int,
+        ]
+    ):
         fused_nodes = duplicate_shared_nodes(graph, fused_nodes)
         fused_nodes = move_dq_after_select(graph, fused_nodes)
         nodes_map[fused_nodes[0]] = fused_nodes[-2]
@@ -1028,7 +1037,7 @@ def fuse_operator(
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
         gm = named_modules[node.target]
-        update_placeholder_meta(model, node)
+        update_submod_user_meta(model, node)
         propagate_shape(node, model)
 
         for n in list(gm.graph.nodes):
@@ -1118,7 +1127,10 @@ def get_reference_node(nodes):
     for n in nodes:
         if is_gemm_op(n):
             return n
-        if first_node is None and n.op == "call_function":
+        if n.op == "call_function" and (
+            first_node is None
+            or first_node.target == torch.ops.quantized_ops.dequantize.default
+        ):
             first_node = n
     return first_node
 
@@ -1147,6 +1159,15 @@ def run_fused_op_l2_tiling(
     ):
         return tiled_shapes
 
+    is_gemm = is_gemm_op(first_node)
+    has_fused_reshape_or_dequantize = any(
+        "reshape" in n.meta or "dequantize" in n.meta
+        for n in (*module.graph.nodes, node)
+    )
+    if is_gemm and has_fused_reshape_or_dequantize:
+        logger.info(f"Submodule {node} is GEMM with fused reshape/dequantize")
+        return tiled_shapes
+
     if not tiled_shapes:
         tiled_shapes = {n: n.value.shape for n in node.all_input_nodes}
         if isinstance(node.value, torch.Tensor):
@@ -1159,7 +1180,6 @@ def run_fused_op_l2_tiling(
             if n in node.all_input_nodes or n == node
         }
 
-    is_gemm = is_gemm_op(first_node)
     min_sizes = None
     transposed = first_node.meta.get("transposed", False)
 
