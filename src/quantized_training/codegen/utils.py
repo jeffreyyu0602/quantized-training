@@ -298,13 +298,19 @@ def replace_interpolate():
     torch.nn.functional.interpolate = torch.ops.custom.interpolate
 
 
-def replace_rmsnorm_with_layer_norm(model, layer_norm, example_input):
+def replace_rmsnorm_with_layer_norm(
+    model: GraphModule,
+    layer_norm: torch.nn.Module,
+    example_input,
+    convert_scalars_to_attrs=False,
+):
     """Replace LLaMA RMSNorm with ATen layer_norm
     """
     original_graph = model.graph
 
     pattern = get_aten_graph_module(layer_norm, example_input)
-    _convert_scalars_to_attrs(pattern)
+    if convert_scalars_to_attrs:
+        _convert_scalars_to_attrs(pattern)
     pattern_graph = pattern.graph
 
     matcher = SubgraphMatcher(
