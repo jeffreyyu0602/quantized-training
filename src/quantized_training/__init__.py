@@ -94,18 +94,17 @@ def fuse(model, patterns, example_args, example_kwargs=None, fuse_reshape=True):
         example_kwargs = {}
 
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
-
     ShapeProp(model).propagate(*flatten_args)
 
+    vector_stages = []
     for pattern in patterns:
         # If there is no corresponding mapping, we directly append the op itself
-        vector_stages = [
+        vector_stages.append([
             [item for op in ops for item in OPERATOR_MAPPINGS.get(op, [op])]
             for ops in pattern
-        ]
+        ])
 
-        fuse_operator(model, vector_stages, fuse_reshape)
-
+    fuse_operator(model, vector_stages, fuse_reshape)
     return model
 
 
@@ -127,7 +126,6 @@ def transform(
         example_kwargs = {}
 
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
-
     ShapeProp(model).propagate(*flatten_args)
 
     # Turn batched matmul into multiple matmuls

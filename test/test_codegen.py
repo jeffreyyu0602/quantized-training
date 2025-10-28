@@ -445,7 +445,7 @@ if __name__ == "__main__":
             qconfig = get_llama_mp_qconfig(args.hardware_unrolling[0], args.outlier_threshold)
             set_qconfig(quantizer, qconfig)
 
-            fp8_qspec = QuantizationSpec.from_str("fp8_e4m3,qs=per_tensor_symmetric")
+            fp8_qspec = QuantizationSpec.from_str("fp8_e4m3,qs=per_tensor_symmetric,qmax=240")
             qconfig = QuantizationConfig(fp8_qspec, None, None, None)
             quantizer.set_object_type(torch.ops.aten.softmax.int, qconfig)
             quantizer.set_object_type(torch.ops.aten.layer_norm.default, qconfig)
@@ -546,7 +546,7 @@ if __name__ == "__main__":
                 module_name, torch.ops.aten.matmul.default, 3, None
             )
 
-        fp8_qspec = QuantizationSpec.from_str("fp8_e4m3,qs=per_tensor_symmetric")
+        fp8_qspec = QuantizationSpec.from_str("fp8_e4m3,qs=per_tensor_symmetric,qmax=240")
         qconfig = QuantizationConfig(fp8_qspec, None, None, None)
         quantizer.set_object_type(torch.ops.aten.softmax.int, qconfig)
         quantizer.set_object_type(torch.ops.aten.layer_norm.default, qconfig)

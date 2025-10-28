@@ -5,7 +5,7 @@ import math
 import operator
 import os
 from collections import defaultdict
-from typing import List, Dict, Callable, Union
+from typing import List, Dict, Callable, Union, Any
 
 import graphviz
 import torch
@@ -558,63 +558,98 @@ def _nodes_sequential(nodes: List[Node], order: Dict[Node, int]):
     return True
 
 
-def find_sequential_nodes(model: GraphModule, pattern: List[List[Callable]]):
-    graph = model.graph
+def find_sequential_nodes_(
+    pattern: List[List[Callable]],
+    order: Dict[Node, int],
+    nodes_by_source: Dict[Callable, List[Node]],
+):
+    def get_source_nodes(sources):
+        return [node for s in sources for node in nodes_by_source[s]]
 
-    nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
-    nodes_fused: Dict[Node, None] = {}
-    fused_nodes_list = []
-    for wanted_sources in pattern:
-        partitions = get_source_partitions(graph, wanted_sources)
-        partitions = list(itertools.chain.from_iterable(partitions.values()))
-        output_nodes = [p.output_nodes[0] for p in partitions]
+    def collect_nop_chain(node):
+        nops = []
+        cur = next(iter(node.users), None)
+        while cur and is_nop(cur) and len(cur.users) == 1:
+            nops.append(cur)
+            cur = next(iter(cur.users), None)
+        return nops
 
-        if len(output_nodes) == 0:
+    fused_chain = []
+    fused_nodes = set()
+    singleton_nodes = set(get_source_nodes(pattern[0]))
+
+    for stage_sources in pattern[1:]:
+        stage_nodes = [
+            n for n in get_source_nodes(stage_sources) if n not in fused_nodes
+        ]
+        if not stage_nodes:
             continue
 
-        if len(fused_nodes_list) == 0:
-            fused_nodes_list = [[n] for n in output_nodes]
-            continue
-
-        fusion_candidates = []
-        for nodes in fused_nodes_list:
-            # If the last node in the group has multiple users, it cannot be fused
-            last_node = nodes[-1]
-            if len(last_node.users) > 1:
-                fusion_candidates.append(nodes)
+        fusion_candidates = fused_chain + [[n] for n in singleton_nodes]
+        new_chains = []
+        for nodes in fusion_candidates:
+            if len(nodes) == 1 and nodes[0] in fused_nodes:
                 continue
 
-            # Include any NOP nodes after the last node in the group
-            nop_nodes = []
-            next_node = next(iter(last_node.users))
-            while is_nop(next_node) and len(next_node.users) == 1:
-                nop_nodes.append(next_node)
-                next_node = next(iter(next_node.users))
+            last_node = nodes[-1]
 
+            # Skip if the last node has multiple users
+            if len(last_node.users) > 1:
+                if len(nodes) > 1:
+                    new_chains.append(nodes)
+                continue
+
+            nops = collect_nop_chain(last_node)
             matched = False
-            for node in output_nodes:
-                if node in nodes_fused:
-                    continue
 
-                candidate = nodes + nop_nodes + [node]
-                if _nodes_sequential(candidate, nodes_order):
+            for node in list(stage_nodes):
+                if node in fused_nodes or order[node] < order[last_node]:
+                    continue
+                candidate = nodes + nops + [node]
+                if _nodes_sequential(candidate, order):
+                    new_chains.append(candidate)
+                    fused_nodes.update(candidate)
                     matched = True
-                    fusion_candidates.append(candidate)
-                    for n in candidate:
-                        nodes_fused[n] = None
-                    if [node] in fused_nodes_list:
-                        fused_nodes_list.remove([node])
-                    if [node] in fusion_candidates:
-                        fusion_candidates.remove([node])
-                    output_nodes.remove(node)
                     break
 
-            if not matched:
-                fusion_candidates.append(nodes)
+            if not matched and len(nodes) > 1:
+                new_chains.append(nodes)
 
-        fused_nodes_list = fusion_candidates + [[n] for n in output_nodes]
+        fused_chain = new_chains
+        singleton_nodes = (singleton_nodes | set(stage_nodes)) - fused_nodes
 
-    return [fn for fn in fused_nodes_list if len(fn) > 1]
+    return fused_chain
+
+
+def find_sequential_nodes(model: GraphModule, patterns: List[List[List[Any]]]):
+    graph = model.graph
+    nodes_order = {node: i for i, node in enumerate(graph.nodes)}
+
+    all_sources = {
+        fn for pattern in patterns for group in pattern for fn in group
+    }
+    partitions = get_source_partitions(graph, list(all_sources))
+    nodes_by_source = {
+        s: [p.output_nodes[0] for p in partitions[s]] if s in partitions else []
+        for s in all_sources
+    }
+
+    all_fused_groups = []
+    seen_nodes = set()
+    for pattern in patterns:
+        fused_groups = find_sequential_nodes_(
+            pattern, nodes_order, nodes_by_source
+        )
+        for group in fused_groups:
+            if not any(n in seen_nodes for n in group):
+                all_fused_groups.append(group)
+                seen_nodes.update(group)
+
+    for nodes in all_fused_groups:
+        nodes.sort(key=lambda n: nodes_order[n])
+    all_fused_groups.sort(key=lambda g: nodes_order[g[0]])
+
+    return all_fused_groups
 
 
 def is_tranpose(node: Node):
@@ -1026,19 +1061,19 @@ def fuse_operator(
             graph, fused_nodes_list, nodes_map, node
         )
 
-    # Fuse nodes that appear earlier in the graph first
-    nodes_order = {node: idx for idx, node in enumerate(graph.nodes)}
+    # Sort nodes based on their order of appearance in the graph
+    nodes_order = {node: i for i, node in enumerate(graph.nodes)}
     for nodes in fused_nodes_list:
         nodes.sort(key=lambda n: nodes_order[n])
-    fused_nodes_list.sort(key=lambda fn: nodes_order[fn[-1]])
+    fused_nodes_list.sort(key=lambda g: nodes_order[g[-1]])
 
     nodes_map = {v.name: k.name for k, v in nodes_map.items()}
 
     for fused_nodes in fused_nodes_list:
         node = _create_and_insert_subgraph(fused_nodes, model, named_modules)
-        gm = named_modules[node.target]
         update_submod_user_meta(model, node)
         propagate_shape(node, model)
+        gm = named_modules[node.target]
 
         for n in list(gm.graph.nodes):
             if (name := nodes_map.get(n.name, None)) is None:

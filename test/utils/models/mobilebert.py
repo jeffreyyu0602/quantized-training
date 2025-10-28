@@ -43,9 +43,9 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
     input_shape = input_ids.size()
 
     embedding_output = model.mobilebert.embeddings(
-            input_ids=input_ids,
-            token_type_ids=batch["token_type_ids"]
-        )
+        input_ids=input_ids,
+        token_type_ids=batch["token_type_ids"]
+    )
 
     extended_attention_mask = model.mobilebert.get_extended_attention_mask(batch["attention_mask"], input_shape)
 
