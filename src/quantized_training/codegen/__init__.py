@@ -18,6 +18,7 @@ __all__ = [
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vector_ops_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
+    "rename_nodes_with_param_names",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
     "replace_interpolate",

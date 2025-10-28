@@ -13,8 +13,6 @@ from .quantizer import *
 from .training_args import *
 from .utils import *
 from .histogram import *
-from .quantize_pt2e import fuse_quantize_dequantize_with_previous_op
-from .codegen.mapping import rename_nodes_with_param_names
 from google.protobuf import text_format
 import operator
 import torch.nn as nn
@@ -128,22 +126,20 @@ def transform(
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
     ShapeProp(model).propagate(*flatten_args)
 
-    # Turn batched matmul into multiple matmuls
+    # Decompose BMM in multi-head attention into individual matmuls
     split_multi_head_attention(model)
 
-    # TODO Turned off for large model now. This will be removed in the future
-    # once we can handle them on the C compiler side.
+    # TODO Disabled for large models. This will be removed in the future once
+    # we can handle stack/cat using DMA properly.
     if len(model.graph.nodes) < 10000:
-        # Convert torch.expand to memory copy
         convert_expand_to_memory_copy(model)
-
-        # Perform transformations to the model
         convert_cat_and_stack_as_stack_on_dim0(model)
         convert_cat_with_mismatched_shapes_to_stack(model)
 
-    # Move quantize and dequantize ops to the end of last compute op
+    # Move quantize/dequantize ops after BMM decomposition
     fuse_quantize_dequantize_with_previous_op(model)
 
+    # Replace Conv2d with im2col + GEMM for hardware without replication
     if conv2d_im2col:
         replace_conv2d_with_im2col(model)
 
@@ -155,16 +151,22 @@ def transform(
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
         run_vector_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
 
+    # Transform GEMM and convolution inputs and weights into layouts friendly
+    # for systolic-array based hardware
     transpose_linear_weights(model, transpose_weight, transpose_fc)
     if transpose_weight:
         transpose_conv2d_inputs_and_weights(model)
+
     ShapeProp(model).propagate(*flatten_args)
+
+    # Remove redundant reshapes that have no effect on tensor semantics
     eliminate_reshape_with_no_effect(model)
 
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
 
     rename_nodes_with_param_names(model)
+    return model
 
 
 def compile(
@@ -182,7 +184,6 @@ def compile(
     dump_verification_file=True,
 ):
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
-
     ShapeProp(model).propagate(*flatten_args)
 
     allocator = MemoryAllocator(total_memory)
@@ -193,7 +194,7 @@ def compile(
     os.makedirs(output_dir, exist_ok=True)
 
     if dump_snapshot:
-        allocator.dump_snapshots(os.path.join(output_dir, "memory_snapshots.png"))
+        allocator.dump_snapshots(os.path.join(output_dir, "memory.png"))
 
     path = (
         os.path.join(output_dir, "tensor_files")
