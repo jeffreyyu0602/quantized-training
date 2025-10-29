@@ -115,10 +115,7 @@ class MemoryAllocator:
             if conv2d_node is not None:
                 dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
                 if node.value.shape[dim] == 3:
-                    logger.info(
-                        f"Increasing size for node [{node}] -> [{conv2d_node}] "
-                        f"with target [{conv2d_node.target}] by 3x"
-                    )
+                    logger.info(f"Increasing size for conv2d input {node} by 3x")
                     tensor_size *= 3
 
             # TODO: handle the case where one node has multiple users
@@ -127,11 +124,12 @@ class MemoryAllocator:
                     torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
                 ))
                 if user is not None:
-                    logger.info(
-                        f"Increasing size for node [{node}] -> [{user}] "
-                        f"with target [{user.target}] by 2x"
-                    )
-                    tensor_size *= 2
+                    if user.target == torch.ops.aten.layer_norm.default:
+                        logger.info(f"Increasing size for layernorm input {node} by {tensor_size + numel * 2} bytes")
+                        tensor_size += tensor_size + numel * 2
+                    else:
+                        logger.info(f"Increasing size for softmax input {node} by {tensor_size} bytes")
+                        tensor_size *= 2
 
             return self.align_size(tensor_size, align_bank)
 
