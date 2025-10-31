@@ -227,8 +227,11 @@ def get_default_quantizer(
     qconfig_matmul = QuantizationConfig(input_activation, output_activation, input_activation, None)
     return (
         XNNPACKQuantizer()
-        .set_global(qconfig)
+        .set_object_type(torch.ops.aten.conv2d.default, qconfig)
+        .set_object_type(torch.ops.aten.linear.default, qconfig)
         .set_object_type(torch.ops.aten.matmul.default, qconfig_matmul)
+        .set_object_type(torch.ops.aten.add.Tensor, qconfig)
+        .set_object_type(torch.ops.aten.add_.Tensor, qconfig)
     )
 
 

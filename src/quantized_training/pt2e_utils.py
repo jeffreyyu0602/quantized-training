@@ -42,13 +42,11 @@ def dtype_byte_size(dtype: torch.dtype):
     """
     if dtype == torch.bool:
         return 1 / 8
-    if dtype == "e8m0":
-        return 1
     bit_search = re.search(r"[^\d](\d+)(_.*)?$", str(dtype))
     if bit_search is None:
         raise ValueError(f"`dtype` is not a valid dtype: {dtype}.")
-    bit_size = int(bit_search.groups()[0])
-    return bit_size / 8.0
+    bit_width = int(bit_search.groups()[0])
+    return bit_width / 8.0
 
 
 def fetch_attr(module, target):
