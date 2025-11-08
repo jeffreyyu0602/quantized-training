@@ -876,6 +876,12 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
                 stack.append(user)
 
             if (
+                user.target == operator.getitem
+                and user.args[0].target == torch.ops.quantized_ops.quantize_mx.default
+            ):
+                stack.append(user)
+
+            if (
                 is_conv2d(user) or
                 is_pooling(user) or
                 is_elementwise_op(user) or
@@ -884,7 +890,6 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
                     torch.ops.aten.pad.default,
                     torch.ops.quantized_ops.calculate_mx_qparam.default,
                     torch.ops.quantized_ops.quantize_mx.default,
-                    operator.getitem,
                 ]
             ):
                 stack.append(user)

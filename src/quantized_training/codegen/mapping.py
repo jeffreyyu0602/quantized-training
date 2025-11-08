@@ -800,6 +800,8 @@ def _fuse_reshape_with_input_impl(
             can_fuse = input_node == current_node.args[0]
         elif is_tranpose(reshape_node):
             can_fuse = input_node in current_node.args[:2]
+        else:
+            can_fuse = False
     elif is_elementwise_op(current_node):
         can_fuse = not is_tranpose(reshape_node)
     else:
