@@ -1573,10 +1573,11 @@ def run_memory_mapping(
             )
         user.replace_input_with(node, copy_node)
         propagate_shape(copy_node, model)
-        run_vector_op_node_l2_tiling(
-            copy_node, unroll_dims[1], cache_size, num_banks
-        )
         register_last_uses(copy_node, user)
+        if cache_size is not None:
+            run_vector_op_node_l2_tiling(
+                copy_node, unroll_dims[1], cache_size, num_banks
+            )
         return copy_node
 
     def allocate_for_stack_op(node: Node):
