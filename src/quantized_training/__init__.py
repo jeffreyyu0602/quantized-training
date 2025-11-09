@@ -149,7 +149,6 @@ def transform(
 
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
-        run_vector_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
 
     # Transform GEMM and convolution inputs and weights into layouts friendly
     # for systolic-array based hardware
@@ -161,6 +160,9 @@ def transform(
 
     # Remove redundant reshapes that have no effect on tensor semantics
     eliminate_reshape_with_no_effect(model)
+
+    if cache_size is not None:
+        run_vector_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
 
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)

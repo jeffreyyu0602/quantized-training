@@ -2848,10 +2848,50 @@ def get_node_to_key(node):
     return node_to_key
 
 
-def run_vector_op_l2_tiling(
-    model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
+def run_vector_op_node_l2_tiling(
+    node,
+    unroll,
+    cache_size=DEFAULT_CACHE_SIZE,
+    num_banks=None,
 ):
-    def _compute_size(n, shape, node, bank_size=None):
+    if not is_elementwise_op(node) and node.target not in [
+        torch.ops.aten.softmax.int,
+        torch.ops.aten.layer_norm.default,
+        torch.ops.aten.permute.default,
+        torch.ops.aten.transpose.int,
+        torch.ops.quantized_ops.layer_norm.default,
+        torch.ops.quantized_ops.calculate_mx_qparam.default,
+        torch.ops.quantized_ops.quantize_mx.default,
+    ]:
+        return
+
+    # Certain dimensions cannot be tiled, e.g., transpose or reduction dims
+    last_dim = -1
+    if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
+        last_dim = min(node.args[1])
+    elif node.target == torch.ops.quantized_ops.quantize_mx.default:
+        last_dim = min(node.args[2])
+    elif node.target == torch.ops.aten.transpose.int:
+        last_dim = min(*node.args[1:])
+    elif node.target == torch.ops.aten.permute.default:
+        last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
+
+    node_to_key = get_node_to_key(node)
+    input_nodes = [
+        n for n in node.all_input_nodes
+        if (
+            "qmap" not in n.name
+            and "code" not in n.name
+            and isinstance(n.value, torch.Tensor)
+            and (n.value.numel() > 1 or n.op != "get_attr")
+        )
+    ]
+    output_shape = (
+        node.value.shape if isinstance(node.value, torch.Tensor)
+        else node.value[1].shape
+    )
+
+    def get_node_size(n, shape, node, bank_size):
         size = get_node_bytes(n) * math.prod(shape)
         if bank_size is not None:
             size = int(math.ceil(size / bank_size) * bank_size)
@@ -2859,13 +2899,16 @@ def run_vector_op_l2_tiling(
         if n == node.args[0] and node.target in [
             torch.ops.aten.softmax.int,
             torch.ops.aten.layer_norm.default,
+            torch.ops.quantized_ops.layer_norm.default,
         ]:
             size *= 2
         return size
 
-    def _try_l2_tiling_phase(node, node_to_key, input_nodes, output_shape,
-                             last_dim, unroll, cache_size, bank_size):
-        """Try to find a valid tiling given bank_size (None = no banking constraint)."""
+    def try_tiling(align_bank):
+        bank_size = (
+            cache_size // num_banks if align_bank and num_banks is not None
+            else None
+        )
         for tiled_output_shape, tiling in get_valid_tiling(
             output_shape, last_dim=last_dim, min_sizes=(unroll,)
         ):
@@ -2873,24 +2916,24 @@ def run_vector_op_l2_tiling(
                 node_to_key.get(n): get_tiled_shape(tuple(n.shape), tiling)
                 for n in input_nodes
             }
-
             total_size = sum(
-                _compute_size(n, tiled_shapes[node_to_key[n]], node, bank_size)
+                get_node_size(n, tiled_shapes[node_to_key[n]], node, bank_size)
                 for n in input_nodes
             )
 
             if isinstance(node.value, (tuple, list)):
-                output_shapes = [
+                tiled_shapes["output"] = [
                     get_tiled_shape(t.shape, tiling) for t in node.value
                 ]
-                tiled_shapes["output"] = output_shapes
                 total_size += sum(
                     b * math.prod(s)
-                    for b, s in zip(get_node_bytes(node), output_shapes)
+                    for b, s in zip(get_node_bytes(node), tiled_shapes["output"])
                 )
             else:
                 tiled_shapes["output"] = tiled_output_shape
-                total_size += _compute_size(node, tiled_output_shape, node, bank_size)
+                total_size += get_node_size(
+                    node, tiled_output_shape, node, bank_size
+                )
 
             logger.debug(
                 f"Trying tiling {tiling} for {node} "
@@ -2899,69 +2942,43 @@ def run_vector_op_l2_tiling(
 
             if total_size <= cache_size:
                 if math.prod(tiling) > 1:
-                    logger.info(
-                        f"Tile {node} with shape {tiled_output_shape} "
-                        f"(reduce factor={tiling}, bank_size={bank_size})"
-                    )
+                    logger.info(f"Selected tiling {tiling} for {node}")
                     node.meta["tiled_shapes"] = tiled_shapes
                     node.meta["l2_tiling"] = tiling
-                return True  # found tiling
+                return True
         return False
 
-    for node in list(model.graph.nodes):
-        if not is_elementwise_op(node) and node.target not in [
-            torch.ops.aten.softmax.int,
-            torch.ops.aten.layer_norm.default,
-            torch.ops.aten.permute.default,
-            torch.ops.aten.transpose.int,
-            torch.ops.quantized_ops.calculate_mx_qparam.default,
-            torch.ops.quantized_ops.quantize_mx.default,
-        ]:
-            continue
+    if try_tiling(True) or try_tiling(False):
+        return True
 
-        output_shape = (
-            node.value.shape if isinstance(node.value, torch.Tensor)
-            else node.value[1].shape
+    logger.warning(f"No L2 tiling found for {node.name}")
+    return False
+
+
+def run_vector_op_l2_tiling(
+    model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
+):
+    """
+    Perform tiling on vector operations in a model to fit intermediate data into cache.
+
+    Tiling is applied across all non-reduction dimensions with the following strategy:
+    - Maximize tile size along the last dimension
+    - Ensure tile sizes are multiples of specified minimums
+    - Cache is divided across multiple banks
+
+    Args:
+        model: A model object with a FX Graph containing vector operation nodes.
+        cache_size (int): Total cache size in bytes.
+        unroll (int): Minimum unrolling dimension for vector operations.
+    """
+    graph = model.graph
+
+    for node in list(graph.nodes):
+        run_vector_op_node_l2_tiling(
+            node, unroll, cache_size, num_banks
         )
 
-        last_dim = -1
-        if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
-            last_dim = min(node.args[1])
-        elif node.target == torch.ops.quantized_ops.quantize_mx.default:
-            last_dim = min(node.args[2])
-        elif node.target == torch.ops.aten.transpose.int:
-            last_dim = min(*node.args[1:])
-        elif node.target == torch.ops.aten.permute.default:
-            last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
-
-        node_to_key = get_node_to_key(node)
-        input_nodes = [
-            n for n in node.all_input_nodes
-            if (
-                "qmap" not in n.name
-                and "code" not in n.name
-                and isinstance(n.value, torch.Tensor)
-                and (n.value.numel() > 1 or n.op != "get_attr")
-            )
-        ]
-
-        # Try with banking first
-        found_tiling = False
-        if num_banks is not None:
-            bank_size = cache_size // num_banks
-            logger.info(f"Trying L2 tiling for {node} WITH banking constraint.")
-            found_tiling = _try_l2_tiling_phase(
-                node, node_to_key, input_nodes, output_shape,
-                last_dim, unroll, cache_size, bank_size
-            )
-
-        # If failed, retry without banking
-        if not found_tiling:
-            logger.info(f"Retrying L2 tiling for {node} WITHOUT banking constraint.")
-            found_tiling = _try_l2_tiling_phase(
-                node, node_to_key, input_nodes, output_shape,
-                last_dim, unroll, cache_size, None
-            )
-
-        if not found_tiling:
-            logger.warning(f"No L2 tiling found for {node} (both phases).")
+    graph.lint()
+    graph.eliminate_dead_code()
+    model.recompile()
+    return model

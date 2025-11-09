@@ -1565,6 +1565,20 @@ def run_memory_mapping(
 
         node.meta["scratchpad_map"] = scratchpad_map
 
+    def create_copy_node(node: Node, user: Node):
+        from .utils import run_vector_op_node_l2_tiling
+        with graph.inserting_before(user):
+            copy_node = graph.call_function(
+                torch.ops.aten.add.Scalar, (node, 0)
+            )
+        user.replace_input_with(node, copy_node)
+        propagate_shape(copy_node, model)
+        run_vector_op_node_l2_tiling(
+            copy_node, unroll_dims[1], cache_size, num_banks
+        )
+        register_last_uses(copy_node, user)
+        return copy_node
+
     def allocate_for_stack_op(node: Node):
         """
         For stacked layers, place them next to each other so that we can read
@@ -1577,14 +1591,7 @@ def run_memory_mapping(
 
         if nodes is not None:
             if len(node.users) > 1:
-                with graph.inserting_before(nodes[1]):
-                    copy_node = graph.call_function(
-                        torch.ops.aten.add.Scalar, (node, 0)
-                    )
-                nodes[1].replace_input_with(node, copy_node)
-                propagate_shape(copy_node, model)
-                register_last_uses(copy_node, nodes[1])
-                nodes[0] = copy_node
+                nodes[0] = create_copy_node(node, nodes[1])
 
             nodes = duplicate_shared_nodes(graph, nodes)
             for n in nodes:
@@ -1609,13 +1616,7 @@ def run_memory_mapping(
             # to copy the input node over to the new location
             input_node = node.all_input_nodes[0]
             if is_nop(node) and input_node.meta["memory"] != segment:
-                with graph.inserting_before(node):
-                    copy_node = graph.call_function(
-                        torch.ops.aten.add.Scalar, (input_node, 0)
-                    )
-                node.replace_input_with(input_node, copy_node)
-                propagate_shape(copy_node, model)
-                register_last_uses(copy_node, node)
+                copy_node = create_copy_node(input_node, node)
                 nodes.insert(0, copy_node)
 
             # If the node is used multiple times by the stack op, we need to
@@ -1625,12 +1626,7 @@ def run_memory_mapping(
             indices = [i for i, n in enumerate(tensors) if n == nodes[-2]]
             if len(indices) > 1:
                 for i in indices[1:]:
-                    with graph.inserting_before(stack_node):
-                        copy_node = graph.call_function(
-                            torch.ops.aten.add.Scalar, (nodes[-2], 0)
-                        )
-                    propagate_shape(copy_node, model)
-                    register_last_uses(copy_node, stack_node)
+                    copy_node = create_copy_node(nodes[-2], stack_node)
                     tensors[i] = copy_node
                     start_offset = memory.start + sum(tensor_sizes[:i])
                     copy_node.meta["memory"] = Segment(
