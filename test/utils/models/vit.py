@@ -37,10 +37,10 @@ from quantized_training import (
     extract_input_preprocessor,
     fuse,
 )
-from quantized_training.codegen.utils import (
+from quantized_training.codegen import (
     get_conv_bn_layers,
     pad_vit_embeddings_output,
-    strip_softmax_dtype,
+    remove_softmax_dtype_cast,
 )
 
 from .utils import get_compile_args, get_transform_args
@@ -314,7 +314,7 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
 
     gm = prepare_pt2e(gm, quantizer)
 
-    strip_softmax_dtype(gm)
+    remove_softmax_dtype_cast(gm)
 
     for i in tqdm(range(10), desc="Calibrating ViT"):
         inputs = calibration_data[i]["image"]

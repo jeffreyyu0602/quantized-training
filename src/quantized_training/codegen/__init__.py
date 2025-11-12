@@ -1,7 +1,12 @@
 from .mapping import *
 from .memory import *
+from .passes.data_layout import *
+from .passes.lowering import *
+from .passes.padding import *
+from .passes.tiling import *
+from .passes.utils import *
 from .shape_prop import *
-from .utils import *
+
 
 __all__ = [
     "MemoryAllocator",
@@ -18,6 +23,7 @@ __all__ = [
     "pad_gemm_inputs_to_hardware_unroll_size",
     "pad_vector_ops_to_hardware_unroll_size",
     "pad_vit_embeddings_output",
+    "inline_autocast_modules",
     "rename_nodes_with_param_names",
     "replace_conv2d_with_im2col",
     "replace_target_with_vmap",
@@ -28,6 +34,7 @@ __all__ = [
     "run_matrix_op_l2_tiling",
     "run_vector_op_l2_tiling",
     "split_multi_head_attention",
+    "remove_softmax_dtype_cast",
     "transpose_conv2d_inputs_and_weights",
     "transpose_linear_weights",
 ]

@@ -16,7 +16,7 @@ from .decomposed import expand
 from .pt2e_utils import fetch_attr
 from .quantize_pt2e import create_getattr_from_value
 from .codegen.mapping_utils import is_gemm_op, is_nop, is_reshape_op
-from .codegen.utils import get_arg_or_kwarg
+from .codegen.passes.utils import get_arg_or_kwarg
 
 
 __all__ = [

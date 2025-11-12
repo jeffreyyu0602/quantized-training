@@ -16,7 +16,7 @@ from quantized_training import (
     extract_input_preprocessor,
     fuse,
 )
-from quantized_training.codegen.utils import get_conv_bn_layers
+from quantized_training.codegen import get_conv_bn_layers
 
 from .utils import get_transform_args, get_compile_args
 

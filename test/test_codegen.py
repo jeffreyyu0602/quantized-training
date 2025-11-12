@@ -33,10 +33,10 @@ from quantized_training import (
     swap_llama_attention,
     transform,
 )
-from quantized_training.codegen.utils import (
-    remove_autocast_nodes,
+from quantized_training.codegen import (
+    inline_autocast_modules,
     replace_rmsnorm_with_layer_norm,
-    strip_softmax_dtype,
+    remove_softmax_dtype_cast,
 )
 from quantized_training.llm_utils import fuse_dequantize_quantize
 
@@ -435,7 +435,7 @@ if __name__ == "__main__":
 
         gm = export_model(LlamaWrapper(), example_args, example_kwargs)
 
-        strip_softmax_dtype(gm)
+        remove_softmax_dtype_cast(gm)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 128, hidden_size, dtype=model.dtype)
@@ -507,8 +507,8 @@ if __name__ == "__main__":
             model_decode=gm,
         )[0]
 
-        remove_autocast_nodes(gm)
-        strip_softmax_dtype(gm)
+        inline_autocast_modules(gm)
+        remove_softmax_dtype_cast(gm)
 
         hidden_size = model.model.layers[0].input_layernorm.weight.shape[-1]
         example_input = torch.randn(1, 1, hidden_size, dtype=model.dtype)

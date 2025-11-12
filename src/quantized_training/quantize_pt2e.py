@@ -23,6 +23,7 @@ from quantized_training.quantizer.quantizer import QuantizationSpec, DerivedQuan
 from quantized_training.quantizer.xnnpack_quantizer import XNNPACKQuantizer
 from quantized_training.quantizer.xnnpack_quantizer_utils import QuantizationConfig
 
+from .codegen.passes.utils import get_arg_or_kwarg
 from .codegen.mapping_utils import (
     is_gemm_op,
     is_indexing_or_concatenation_op,
@@ -826,8 +827,6 @@ def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed
 
 
 def _eliminate_dequantize_with_no_effect(model: GraphModule):
-    from .codegen.utils import get_arg_or_kwarg
-
     for node in model.graph.nodes:
         if node.target != torch.ops.quantized_ops.dequantize.default:
             continue
@@ -861,7 +860,6 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     dequantize can be fused with the previous operation.
     """
     from .codegen.mapping import propagate_shape
-    from .codegen.utils import get_arg_or_kwarg
 
     graph = model.graph
 

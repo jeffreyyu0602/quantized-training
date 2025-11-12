@@ -11,6 +11,7 @@ import graphviz
 import torch
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
+from torch.fx.operator_schemas import normalize_function
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 from transformers.utils.import_utils import is_torch_greater_or_equal
 
@@ -29,6 +30,7 @@ from .mapping_utils import (
 )
 from .memory import MemoryAllocator, Segment, MemorySpace
 from .param_pb2 import Model, Operation, Tensor
+from .passes.utils import get_arg_or_kwarg
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
 from ..quantize_pt2e import create_getattr_from_value, export_model
@@ -677,8 +679,6 @@ def is_mha_qkv_permute(node):
     the permuted dimensions are the middle two dimensions (2 and 3) of a 4D
     tensor.
     """
-    import math
-
     # Don't support head dimension not being a power of 2
     if (
         not hasattr(node, 'shape') or
@@ -1140,8 +1140,6 @@ def conv2d_layout(shape, is_weight=False, do_transpose=False):
 
 
 def normalize_shape(node, shape):
-    from torch.fx.operator_schemas import normalize_function
-
     args_and_kwargs = normalize_function(
         node.target,
         node.args,
@@ -1175,8 +1173,10 @@ def get_reference_node(nodes):
 def run_fused_op_l2_tiling(
     node, module, tiled_shapes, allocator, unroll_dims, align_banks=True,
 ):
-    from .utils import (
-        get_arg_or_kwarg, get_valid_tiling, get_tiled_shape, construct_tiled_shape
+    from .passes.tiling import (
+        get_valid_tiling,
+        get_tiled_shape,
+        construct_tiled_shape,
     )
 
     if isinstance(unroll_dims, int):
@@ -1441,7 +1441,7 @@ def run_memory_mapping(
         return None
 
     def allocate_scratchpad(node: Node):
-        from .utils import get_tiled_shape
+        from .passes.tiling import get_tiled_shape
 
         if cache_size is None:
             return
@@ -1566,7 +1566,7 @@ def run_memory_mapping(
         node.meta["scratchpad_map"] = scratchpad_map
 
     def create_copy_node(node: Node, user: Node):
-        from .utils import run_vector_op_node_l2_tiling
+        from .passes.tiling import run_vector_op_node_l2_tiling
         with graph.inserting_before(user):
             copy_node = graph.call_function(
                 torch.ops.aten.add.Scalar, (node, 0)
@@ -1578,6 +1578,7 @@ def run_memory_mapping(
             run_vector_op_node_l2_tiling(
                 copy_node, unroll_dims[1], cache_size, num_banks
             )
+        copy_node.meta['dtype'] = node.meta.get('dtype', None)
         return copy_node
 
     def allocate_for_stack_op(node: Node):
