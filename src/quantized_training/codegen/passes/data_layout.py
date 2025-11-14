@@ -260,8 +260,9 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
             if is_indexing_or_concatenation_op(node_to_treat):
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]
                 args = tuple(node_to_treat.args)
-                dims = args[1] + len(order) if args[1] < 0 else args[1]
-                node_to_treat.args = args[:1] + (order.index(dims),) + args[2:]
+                dim = get_arg_or_kwarg(node_to_treat, 1, "dim", 0)
+                dim = dim + len(order) if dim < 0 else dim
+                node_to_treat.args = args[:1] + (order.index(dim),) + args[2:]
 
             if is_reshape_op(node_to_treat):
                 order = node_dim_order[node_to_treat.all_input_nodes[0]]

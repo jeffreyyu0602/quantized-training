@@ -863,7 +863,7 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
 
     graph = model.graph
 
-    def find_prev_op_and_move_node(node, prev_node=None):
+    def find_prev_op_and_move_node(node, prev_node=None, curr_node=None):
         nodes_on_path = []
         prev_node = node.args[0] if prev_node is None else prev_node
         while len(prev_node.users) == 1:
@@ -873,7 +873,9 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             ]:
                 nodes_on_path.append(prev_node)
                 for arg in prev_node.all_input_nodes:
-                    nodes_on_path.extend(find_prev_op_and_move_node(node, arg))
+                    nodes_on_path.extend(
+                        find_prev_op_and_move_node(node, arg, prev_node)
+                    )
                 return nodes_on_path
 
             # stack and cat are handled above, so we can safely assume that
@@ -892,6 +894,7 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
             assert len(prev_node.all_input_nodes) == 1
 
             nodes_on_path.append(prev_node)
+            curr_node = prev_node
             prev_node = prev_node.args[0]
 
         # Check if the quantize or dq node can be moved. In the case of a recursive
@@ -907,8 +910,10 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
                     value_remap[n] = graph.node_copy(n)
             new_node = graph.node_copy(node, lambda n: value_remap[n])
 
-        prev_node.replace_all_uses_with(new_node)
-        new_node.replace_input_with(new_node, prev_node)
+        assert curr_node in prev_node.users, (
+            "The last node on the path should be a user of the previous node"
+        )
+        curr_node.replace_input_with(prev_node, new_node)
 
         for n in list(value_remap.values()) + [new_node]:
             propagate_shape(n, model)
