@@ -312,7 +312,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 )
 
                 tiling = node_to_treat.meta["l2_tiling"]
-                node_to_treat.meta["l2_tiling"] = (1, 1, 1, tiling[0])
+                node_to_treat.meta["l2_tiling"] = (1, 1, 1, tiling[1])
 
             node_dim_order[node_to_treat] = node_dim_order[
                 node_to_treat.all_input_nodes[0]

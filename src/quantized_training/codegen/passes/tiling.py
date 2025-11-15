@@ -196,7 +196,7 @@ def split_conv2d_node(model, node, tiling):
     _, C, kH, kW = node.args[1].shape
     _, _, IX, IY = node.args[0].shape
 
-    tile_y, tile_x, tile_k, tile_c = tiling
+    tile_y, tile_x, tile_c, tile_k = tiling
 
     tiled_shapes = []
     tiling = (1, K // tile_k, 1, 1)
@@ -1086,7 +1086,7 @@ def run_matrix_op_l2_tiling(
                 f"output {output_shape} -> {output_tiled}"
             )
 
-            split_conv2d_node(model, node, (y_tiled, x_tiled, k_tiled, c_tiled))
+            split_conv2d_node(model, node, (y_tiled, x_tiled, c_tiled, k_tiled))
         else:
             if is_linear(node):
                 K, C = weight_node.shape
