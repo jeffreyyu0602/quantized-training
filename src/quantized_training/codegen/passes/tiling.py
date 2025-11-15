@@ -507,12 +507,11 @@ def split_conv2d_node(model, node, tiling):
 
             if n.target == node.target:
                 n.meta.update({
-                    "tiled_shapes": copy.deepcopy(tiled_shapes[0]),
+                    "tiled_shapes": tiled_shapes.pop(0),
                     "l2_tiling": tiling,
                     "dtype": node.meta.get("dtype"),
                     "source_fn_stack": [(n.name, source_fn[1])],
                 })
-                tiled_shapes.pop(0)
 
         if output[0].target == torch.ops.aten.cat.default:
             move_fusable_ops_after_conv2d(model, output[0])

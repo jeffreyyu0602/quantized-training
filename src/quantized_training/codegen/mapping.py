@@ -1246,18 +1246,15 @@ def run_fused_op_l2_tiling(
         if is_gemm:
             bs = first_node.kwargs.get("block_size", 1)
             if is_conv2d(first_node):
-                N, tile_y, tile_x, tile_k = conv2d_layout(
-                    tiled_output_shape, False, not transposed
+                N, tile_iy, tile_ix, tile_c = conv2d_layout(
+                    first_node.args[0].shape, False, not transposed
                 )
-                kH, kW, tile_c, _ = conv2d_layout(
+                kH, kW, _, _ = conv2d_layout(
                     first_node.args[1].shape, True, not transposed
                 )
-
-                stride = get_arg_or_kwarg(first_node, 3, "stride", (1, 1))
-                dilation = get_arg_or_kwarg(first_node, 5, "dilation", (1, 1))
-
-                tile_iy = (tile_y - 1) * stride[0] + (kH - 1) * dilation[0] + 1
-                tile_ix = (tile_x - 1) * stride[1] + (kW - 1) * dilation[1] + 1
+                _, _, _, tile_k = conv2d_layout(
+                    tiled_output_shape, False, not transposed
+                )
 
                 new_shapes = {
                     "input": (N, tile_c, tile_iy, tile_ix),
