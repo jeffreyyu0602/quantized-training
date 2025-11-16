@@ -14,6 +14,7 @@ from ..mapping import (
     propagate_shape,
     replace_node_with_graph_module,
     get_node_bytes,
+    _nodes_sequential,
 )
 from ..mapping_utils import (
     is_conv2d,
@@ -38,49 +39,27 @@ __all__ = [
 DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
-def find_slice_dims(conv_node):
-    """Find all slice ops that conv2d nodes consume."""
-    slice_ops = []
+def create_new_chain(model, node_to_fuse, cat_node, fusable):
+    conv_node = node_to_fuse if is_conv2d(node_to_fuse) else node_to_fuse.args[0]
+    input_shape = conv_node.meta["tiled_shapes"]["input"]
+    output_shape = conv_node.meta["tiled_shapes"]["output"]
+
+    slice_args = []
     input_nodes = conv_node.args[0]
     while input_nodes.target in [
         torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default
     ]:
         if input_nodes.target == torch.ops.aten.slice.Tensor:
-            slice_ops.append(input_nodes)
+            dim, start, end = input_nodes.args[1:]
+            if dim in (2, 3):
+                tile_idx = round(float(start) / input_shape[dim])
+                tile_start = tile_idx * output_shape[dim]
+                tile_end = tile_start + output_shape[dim]
+                slice_args.insert(0, (dim, tile_start, tile_end))
         input_nodes = input_nodes.args[0]
-    slice_args = [tuple(n.args[1:]) for n in slice_ops]
-    return slice_args
 
-
-def get_slice_args(full_shape, tiled_shape, tile):
-    # infer how many tiles exist per dimension
-    tiling = tuple(f // t for f, t in zip(full_shape, tiled_shape))
-
-    slices = []
-    for dim, (tile_size, tidx) in enumerate(zip(tiled_shape, tile)):
-        if tiling[dim] == 1:
-            continue  # no split in this dimension
-        start = tidx * tile_size
-        stop = start + tile_size
-        slices.append((dim, start, stop))
-
-    return slices
-
-
-def create_new_chain(model, conv_node, cat_node, fusable):
-    input_shape = conv_node.meta["tiled_shapes"]["input"]
-    output_shape = conv_node.meta["tiled_shapes"]["output"]
-
-    slice_dims = find_slice_dims(conv_node)
-    # slice start is not exact multiples of tile sizes, but we can
-    # approximate it here
-    tile = [0] * len(input_shape)
-    for (dim, start, end) in slice_dims:
-        tile[dim] = round(float(start) / input_shape[dim])
-    slice_args = get_slice_args(cat_node.shape, output_shape, tile)
-
-    value_remap = {cat_node: conv_node}
-    anchor = conv_node.next
+    value_remap = {cat_node: node_to_fuse}
+    anchor = node_to_fuse.next
     for n in fusable:
         for arg in n.all_input_nodes:
             if arg in value_remap:
@@ -99,7 +78,7 @@ def create_new_chain(model, conv_node, cat_node, fusable):
 
             slice_node = arg
             for dim, start, end in slice_args:
-                with model.graph.inserting_before(conv_node):
+                with model.graph.inserting_before(node_to_fuse):
                     slice_node = model.graph.call_function(
                         torch.ops.aten.slice.Tensor,
                         (slice_node, dim, start, end),
@@ -120,43 +99,49 @@ def create_new_chain(model, conv_node, cat_node, fusable):
             ]
         value_remap[n] = new_node
 
-    for user in list(conv_node.users):
+    for user in list(node_to_fuse.users):
         if user != value_remap[fusable[0]]:
-            user.replace_input_with(conv_node, value_remap[fusable[-1]])
+            user.replace_input_with(node_to_fuse, value_remap[fusable[-1]])
 
 
 def move_fusable_ops_after_conv2d(model, node):
-    nodes_to_fuse = []
+    fusable_ops = []
     next_node = next(iter(node.users))
     while is_elementwise_op(next_node):
-        nodes_to_fuse.append(next_node)
+        fusable_ops.append(next_node)
         if len(next_node.users) != 1:
             break
         next_node = next(iter(next_node.users))
 
-    if not nodes_to_fuse:
+    if not fusable_ops:
+        return
+
+    order = {n: i for i, n in enumerate(model.graph.nodes)}
+    if not _nodes_sequential([node] + fusable_ops, order):
         return
 
     # Find all the conv2d nodes to fuse with
     conv2d_nodes = []
-    stack_and_slice_nodes = []
+    cat_and_slice_nodes = []
     stack = node.all_input_nodes[:]
     while stack:
         curr = stack.pop()
-        if is_conv2d(curr):
-            conv2d_nodes.append(curr)
-        else:
-            stack_and_slice_nodes.append(curr)
+        if curr.target in [
+            torch.ops.aten.cat.default, torch.ops.aten.slice.Tensor,
+        ]:
+            cat_and_slice_nodes.append(curr)
             stack.extend(curr.all_input_nodes)
+        else:
+            conv2d_nodes.append(curr)
 
     for conv_node in conv2d_nodes:
-        create_new_chain(model, conv_node, node, nodes_to_fuse)
+        create_new_chain(model, conv_node, node, fusable_ops)
 
-    for n in stack_and_slice_nodes:
-        n.meta["dtype"] = nodes_to_fuse[-1].meta.get("dtype")
+    for n in cat_and_slice_nodes:
+        n.meta["dtype"] = fusable_ops[-1].meta.get("dtype")
 
-    nodes_to_fuse[-1].replace_all_uses_with(node)
-    for n in reversed(nodes_to_fuse):
+    fusable_ops[-1].replace_all_uses_with(node)
+    for n in reversed(fusable_ops):
         model.graph.erase_node(n)
 
 
