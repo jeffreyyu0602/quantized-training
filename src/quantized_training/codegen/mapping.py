@@ -4,6 +4,7 @@ import logging
 import math
 import operator
 import os
+import re
 from collections import defaultdict
 from typing import List, Dict, Callable, Union, Any
 
@@ -1197,11 +1198,10 @@ def run_fused_op_l2_tiling(
         return tiled_shapes
 
     is_gemm = is_gemm_op(first_node)
-    has_fused_reshape_or_dequantize = any(
+    if is_gemm and any(
         "reshape" in n.meta or "dequantize" in n.meta
-        for n in (*module.graph.nodes, node)
-    )
-    if is_gemm and has_fused_reshape_or_dequantize:
+        for n in list(module.graph.nodes) + [node]
+    ):
         logger.info(f"Submodule {node} is GEMM with fused reshape/dequantize")
         return tiled_shapes
 
@@ -1304,8 +1304,7 @@ def run_fused_op_l2_tiling(
         for n in node.all_input_nodes:
             if (
                 n not in new_shapes
-                and not "qmap" in n.name
-                and not "code" in n.name
+                and not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
                 and isinstance(n.value, torch.Tensor)
                 and (n.value.numel() > 1 or n.op != "get_attr")
             ):
@@ -1464,8 +1463,7 @@ def run_memory_mapping(
             for n in node.all_input_nodes:
                 if (
                     n not in tiled_shapes
-                    and not "qmap" in n.name
-                    and not "code" in n.name
+                    and not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
                     and isinstance(n.value, torch.Tensor)
                     and (n.value.numel() > 1 or n.op != "get_attr")
                 ):
@@ -1503,8 +1501,7 @@ def run_memory_mapping(
             n: sp_alloc.get_tensor_size(n, tiled_shapes.get(n))
             for n in node.all_input_nodes
             if (
-                not "qmap" in n.name
-                and not "code" in n.name
+                not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
                 and isinstance(n.value, torch.Tensor)
                 and (n.value.numel() > 1 or n.op != "get_attr")
             )
