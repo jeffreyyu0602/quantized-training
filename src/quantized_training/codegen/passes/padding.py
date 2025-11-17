@@ -311,6 +311,66 @@ def pad_layer_norm_to_hardware_unroll_size(
     model.graph.erase_node(node)
 
 
+def pad_calculate_mx_qparam(model, node, unroll):
+    input, axes, bs = node.args[:3]
+    ndim = len(input.shape)
+
+    pad_dims = {}
+
+    orig_k = input.shape[-1]
+    if orig_k % unroll != 0:
+        pad_dims[ndim - 1] = (-orig_k) % unroll
+
+    for axis in axes:
+        size = input.shape[axis]
+        if size % bs != 0:
+            pad_dims[axis % ndim] = (bs - (size % bs)) % bs
+
+    if not pad_dims:
+        return
+
+    logger.info(f"Padding calculate_mx_qparams {node} with {pad_dims}")
+
+    min_pad_dim = min(pad_dims.keys())
+    pad_tuple = []
+    for dim in range(ndim - 1, min_pad_dim - 1, -1):
+        pad_tuple.extend([0, pad_dims.get(dim, 0)])
+
+    with model.graph.inserting_before(node):
+        new_input = model.graph.call_function(
+            torch.ops.aten.pad.default,
+            (input, pad_tuple, "constant", 0),
+        )
+
+    propagate_shape(new_input)
+    new_input.meta["dtype"] = input.meta.get("dtype")
+    node.replace_input_with(input, new_input)
+
+    propagate_shape(node)
+
+    def slice_node(n):
+        with model.graph.inserting_after(n.next):
+            for dim in pad_dims.keys():
+                n = model.graph.call_function(
+                    torch.ops.aten.slice.Tensor, (n, dim, 0, input.shape[dim]),
+                )
+            propagate_shape(n)
+            n.meta["dtype"] = node.meta.get("dtype")
+        return n
+
+    scale_node = slice_node(node)
+
+    for user in list(node.users):
+        if user.target == torch.ops.quantized_ops.quantize.default:
+            users = list(user.users)
+            new_q_node = slice_node(user)
+            for u in users:
+                u.replace_input_with(user, new_q_node)
+            user.replace_input_with(input, new_input)
+        elif user != scale_node:
+            user.replace_input_with(node, scale_node)
+
+
 def pad_vector_ops_to_hardware_unroll_size(
     model: GraphModule,
     K_unroll,
@@ -329,6 +389,10 @@ def pad_vector_ops_to_hardware_unroll_size(
     for node in list(model.graph.nodes):
         if node.target == torch.ops.aten.layer_norm.default:
             pad_layer_norm_to_hardware_unroll_size(model, node, K_unroll)
+            continue
+
+        if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
+            pad_calculate_mx_qparam(model, node, K_unroll)
             continue
 
         if node.target != torch.ops.aten.softmax.int:
@@ -376,7 +440,7 @@ def pad_vit_embeddings_output(
     embeddings,
     example_inputs,
     dynamic_shapes=None,
-    array_size=32
+    unroll=32
 ):
     original_graph = model.graph
 
@@ -401,7 +465,7 @@ def pad_vit_embeddings_output(
     vit_embed_out = _matches[0].returning_nodes[0]\
 
     orig_dim = vit_embed_out.meta["val"].shape[-2]
-    pad = (array_size - (orig_dim % array_size)) % array_size
+    pad = (unroll - (orig_dim % unroll)) % unroll
     logger.info(f"Padding {vit_embed_out} with {pad}")
 
     with model.graph.inserting_after(vit_embed_out):

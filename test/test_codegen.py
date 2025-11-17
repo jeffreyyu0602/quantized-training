@@ -622,7 +622,6 @@ if __name__ == "__main__":
 
         if args.evaluate:
             vit.evaluate(gm, preprocessed_imagenet)
-
     elif args.model == "yolo5":
         import sys
         sys.path.append("libraries/yolov5-face")

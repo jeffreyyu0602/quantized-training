@@ -310,7 +310,12 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
     example_args = (calibration_data[0]["image"].to(torch_dtype),)
 
     gm = export_model(model, example_args)
-    pad_vit_embeddings_output(gm, model.vit.embeddings, example_args)
+    pad_vit_embeddings_output(
+        gm,
+        model.vit.embeddings,
+        example_args,
+        unroll=args.hardware_unrolling[1]
+    )
 
     gm = prepare_pt2e(gm, quantizer)
 
