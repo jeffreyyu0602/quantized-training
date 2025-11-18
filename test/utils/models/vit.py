@@ -308,13 +308,14 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
         quantizer.set_module_name("^vit.embeddings.patch_embeddings.projection$", qconfig)
 
     example_args = (calibration_data[0]["image"].to(torch_dtype),)
+    unroll = args.hardware_unrolling[1] if args.hardware_unrolling is not None else None
 
     gm = export_model(model, example_args)
     pad_vit_embeddings_output(
         gm,
         model.vit.embeddings,
         example_args,
-        unroll=args.hardware_unrolling[1]
+        unroll=unroll
     )
 
     gm = prepare_pt2e(gm, quantizer)
