@@ -1,3 +1,4 @@
+import re
 import torch
 
 from torchvision import models
@@ -96,13 +97,22 @@ def quantize_and_dump_model(model, quantizer, calibration_data, vector_stages, a
         model.features[0][0].padding = (3, 3)
         model.features[0][0].weight.data = torch.nn.functional.pad(model.features[0][0].weight.data, (2, 2, 2, 2))
 
-    quantizer.set_module_name("fc", None)
+    # Some designs do not support quantized fc layers
+    if not args.quantize_fc:
+        quantizer.set_module_name("fc", None)
+
+    if args.residual is not None:
+        qspec = QuantizationSpec.from_str(f"{args.residual},qs=per_tensor_symmetric")
+        qconfig = QuantizationConfig(qspec, None, None, None)
+        quantizer.set_object_type(torch.ops.aten.add.Tensor, qconfig)
+        quantizer.set_object_type(torch.ops.aten.add_.Tensor, qconfig)
 
     # use per-tensor instead of microscaling for conv1 in resnet18 and resnet50
     if args.activation is not None and "microscaling" in args.activation:
         dtype = args.activation.split(",")[0]
-        if dtype == "nf4_6":
-            dtype = "int6"
+        if (match := re.fullmatch(r'nf(\d+)(?:_(\d+))?', dtype)):
+            bits = int(match.group(1))
+            dtype = f"int{bits}"
         qspec = QuantizationSpec.from_str(f"{dtype},qs=per_tensor_symmetric")
         qspec.observer_or_fake_quant_ctr = FusedAmaxObsFakeQuantize
 

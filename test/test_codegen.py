@@ -214,6 +214,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use binary attention mask for LLMs."
     )
+    parser.add_argument(
+        "--quantize_fc",
+        action="store_true",
+        help="Whether to quantize the fully connected layers."
+    )
+    parser.add_argument(
+        "--residual",
+        help="Quantization spec for residual inputs.",
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
