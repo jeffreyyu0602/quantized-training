@@ -408,6 +408,113 @@ def split_conv2d_node(model, node, tile_sizes):
         propagate_shape(node, model)
         _, _, IY, IX = node.args[0].shape
 
+    def _compute_spatial_tile_region(y, x, oh, ow):
+        if tile_x == X and tile_y == Y:
+            return {
+                "y_tile": (0, IY),
+                "x_tile": (0, IX),
+                "input_padding": (0, 0, 0, 0),
+                "output_offset": (0, 0),
+            }
+
+        y_in_start = y * stride[0] - padding[0]
+        y_in_end = y_in_start + (oh - 1) * stride[0] + (kH - 1) * dilation[0] + 1
+        x_in_start = x * stride[1] - padding[1]
+        x_in_end = x_in_start + (ow - 1) * stride[1] + (kW - 1) * dilation[1] + 1
+
+        # Grab more input pixels so that after applying padding of three, the
+        # new convolution still aligns with the original one, just with some
+        # garbage outputs on the right and bottom side
+        if is_conv1:
+            y_in_start = y_in_start - (padding[0] % stride[0])
+            x_in_start = x_in_start - (padding[1] % stride[1])
+
+        # Adjust receptive field to multiple of stride for depthwise conv
+        if is_dwc:
+            rem = (y_in_end - y_in_start) % stride[0]
+            if rem:
+                y_in_end += stride[0] - rem
+            rem = (x_in_end - x_in_start) % stride[1]
+            if rem:
+                x_in_end += stride[1] - rem
+
+        y_in_start_clamped = max(y_in_start, 0)
+        x_in_start_clamped = max(x_in_start, 0)
+
+        if not is_conv1:
+            x_in_end_clamped = min(x_in_end, IX)
+            y_in_end_clamped = min(y_in_end, IY)
+
+            assert (
+                y_in_start_clamped == y_in_start
+                or x_in_start_clamped == x_in_start
+                or y_in_end_clamped == y_in_end
+                or x_in_end_clamped == x_in_end
+            ), f"{node}: Unexpected input tile size"
+
+            # downsample layers input size must be multiples of stride
+            if kH == 1 and kW == 1:
+                y_in_end_clamped = y_in_start_clamped + oh * stride[0]
+                x_in_end_clamped = x_in_start_clamped + ow * stride[1]
+
+            pad_top, pad_left, pad_bottom, pad_right = 0, 0, 0, 0
+            x_offset, y_offset = 0, 0
+        else:
+            # conv1 hardware replication constraints
+            y_in_end += (16 - ((y_in_end - y_in_start_clamped) % 16))
+            x_in_end += (16 - ((x_in_end - x_in_start_clamped) % 16))
+            y_in_end_clamped = min(y_in_end, IY)
+            x_in_end_clamped = min(x_in_end, IX)
+
+            pad_top = 0
+            pad_left = 0
+            pad_bottom = y_in_end - y_in_end_clamped
+            pad_right = x_in_end - x_in_end_clamped
+
+            y_offset = (y * stride[0] - y_in_start_clamped) // stride[0]
+            x_offset = (x * stride[1] - x_in_start_clamped) // stride[1]
+
+        return {
+            "y_tile": (y_in_start_clamped, y_in_end_clamped),
+            "x_tile": (x_in_start_clamped, x_in_end_clamped),
+            "input_padding": (pad_left, pad_right, pad_top, pad_bottom),
+            "output_offset": (y_offset, x_offset),
+        }
+
+    def _compute_per_tile_shapes(cfg):
+        (y0, y1) = cfg["y_tile"]
+        (x0, x1) = cfg["x_tile"]
+        (pad_left, pad_right, pad_top, pad_bottom) = cfg["input_padding"]
+        conv_padding = cfg["conv_padding"]
+        (oh, ow) = cfg["output_sizes"]
+        (c_start, c_end) = cfg["c_tile"]
+
+        h_in = (y1 - y0) + pad_top + pad_bottom
+        w_in = (x1 - x0) + pad_left + pad_right
+        h_out = (h_in + 2 * conv_padding[0] - kH) // stride[0] + 1
+        w_out = (w_in + 2 * conv_padding[1] - kW) // stride[1] + 1
+
+        assert h_out >= oh and w_out >= ow, (
+            f"Output sizes mismatch: ({h_out}, {w_out}) vs ({oh}, {ow})"
+        )
+
+        c_tile = c_end - c_start
+        tiled_shape = {}
+
+        if is_dwc:
+            tiled_shape["input"] = (N, tile_k, h_in, w_in)
+            tiled_shape["input_scale"] = (N, tile_k // bs, h_in, w_in)
+            tiled_shape["weight_scale"] = (tile_k, 1, kH, kW)
+        else:
+            tiled_shape["input"] = (N, c_tile, h_in, w_in)
+            tiled_shape["input_scale"] = (N, c_tile // bs, h_in, w_in)
+            tiled_shape["weight_scale"] = (tile_k, c_tile // bs, kH, kW)
+
+        tiled_shape["weight"] = (tile_k, c_tile, kH, kW)
+        tiled_shape["bias"] = (tile_k,)
+        tiled_shape["output"] = (N, tile_k, h_out, w_out)
+        return tiled_shape
+
     tiled_shapes = []
     tile_configs = []
     for y in range(0, Y, tile_y):
@@ -415,128 +522,33 @@ def split_conv2d_node(model, node, tile_sizes):
             oh = min(tile_y, Y - y)
             ow = min(tile_x, X - x)
 
-            if tile_x == X and tile_y == Y:
-                y_in_start_clamped, y_in_end_clamped = 0, IY
-                x_in_start_clamped, x_in_end_clamped = 0, IX
-                pad_top, pad_left, pad_bottom, pad_right = 0, 0, 0, 0
-                conv_padding = padding
-                x_offset, y_offset = 0, 0
-            else:
-                y_in_start = y * stride[0] - padding[0]
-                y_in_end = y_in_start + (oh - 1) * stride[0] + (kH - 1) * dilation[0] + 1
-                x_in_start = x * stride[1] - padding[1]
-                x_in_end = x_in_start + (ow - 1) * stride[1] + (kW - 1) * dilation[1] + 1
-
-                # Grab more input pixcels so that after applying padding of
-                # three, the new convolution still aligns with the original one,
-                # just with some garbage on the right and bottom side
-                if is_conv1:
-                    y_in_start = y_in_start - (padding[0] % stride[0])
-                    x_in_start = x_in_start - (padding[1] % stride[1])
-
-                # Adjust the receptive field such that it is mutiple of stride
-                if is_dwc:
-                    rem = (y_in_end - y_in_start) % stride[0]
-                    if rem:
-                        y_in_end += stride[0] - rem
-                    rem = (x_in_end - x_in_start) % stride[1]
-                    if rem:
-                        x_in_end += stride[1] - rem
-
-                y_in_start_clamped = max(y_in_start, 0)
-                x_in_start_clamped = max(x_in_start, 0)
-                
-                if not is_conv1:
-                    x_in_end_clamped = min(x_in_end, IX)
-                    y_in_end_clamped = min(y_in_end, IY)
-                    assert (
-                        y_in_start_clamped == y_in_start
-                        or x_in_start_clamped == x_in_start
-                        or y_in_end_clamped == y_in_end
-                        or x_in_end_clamped == x_in_end
-                    ), (
-                        f"{node}: Unexpected input tile size"
-                    )
-                    # downsample layers input size must be multiples of stride
-                    if kH == 1 and kW == 1:
-                        y_in_end_clamped = y_in_start_clamped + oh * stride[0]
-                        x_in_end_clamped = x_in_start_clamped + ow * stride[1]
-                    pad_top, pad_left, pad_bottom, pad_right = 0, 0, 0, 0
-                    x_offset, y_offset = 0, 0
-                    conv_padding = _pair(0)
-                else:
-                    # adjust the receptive field to multiple of 8
-                    # this is required by the hardware conv1 replication
-                    y_in_end = y_in_end + (16 - ((y_in_end - y_in_start_clamped) % 16))
-                    x_in_end = x_in_end + (16 - ((x_in_end - x_in_start_clamped) % 16))
-                    y_in_end_clamped = min(y_in_end, IY)
-                    x_in_end_clamped = min(x_in_end, IX)
-                    # we never pad on the left and top side
-                    pad_top = 0
-                    pad_left = 0
-                    # pad on the bottom and right side to match the receptive field
-                    pad_bottom = y_in_end - y_in_end_clamped
-                    pad_right = x_in_end - x_in_end_clamped
-                    # calculate the number of pixels to slice on the top and left side
-                    x_offset = (x * stride[1] - x_in_start_clamped) // stride[1]
-                    y_offset = (y * stride[0] - y_in_start_clamped) // stride[0]
-                    # maintain original padding for conv1
-                    conv_padding = padding 
+            spatial = _compute_spatial_tile_region(y, x, oh, ow)
 
             for c_start in range(0, C, tile_c):
                 c_end = min(c_start + tile_c, C)
-                tile_configs.append({
+                cfg = {
+                    **spatial,
                     "c_tile": (c_start, c_end),
-                    "y_tile": (y_in_start_clamped, y_in_end_clamped),
-                    "x_tile": (x_in_start_clamped, x_in_end_clamped),
-                    "input_padding": (pad_left, pad_right, pad_top, pad_bottom),
-                    "conv_padding": conv_padding,
-                    "output_offset": (y_offset, x_offset),
+                    "conv_padding": padding,
                     "output_sizes": (oh, ow),
                     "keep_dims_and_padding": is_conv1,
-                })
+                }
 
-                input_height = y_in_end_clamped - y_in_start_clamped + pad_top + pad_bottom
-                input_width = x_in_end_clamped - x_in_start_clamped + pad_left + pad_right
-                output_height = (input_height + 2 * conv_padding[0] - kH) // stride[0] + 1
-                output_width = (input_width + 2 * conv_padding[1] - kW) // stride[1] + 1
-
-                assert output_height >= oh and output_width >= ow, (
-                    f"{node}: Output height {output_height} is less than tile height {oh}"
-                )
-
-                tiled_shape = {}
-                if is_dwc:
-                    # for depthwise conv, the input channel equals to tile_k
-                    tiled_shape["input"] = (N, tile_k, input_height, input_width)
-                    if node.target == torch.ops.quantized_ops.conv2d_mx.default:
-                        tiled_shape["input_scale"] = (
-                            N, tile_k // bs, input_height, input_width
-                        )
-                        tiled_shape["weight_scale"] = (tile_k, 1, kH, kW)
-                else:
-                    tiled_shape["input"] = (N, c_end - c_start, input_height, input_width)
-                    if node.target == torch.ops.quantized_ops.conv2d_mx.default:
-                        tiled_shape["input_scale"] = (
-                            N, (c_end - c_start) // bs, input_height, input_width
-                        )
-                        tiled_shape["weight_scale"] = (
-                            tile_k, (c_end - c_start) // bs, kH, kW
-                        )
-
-                tiled_shape["weight"] = (tile_k, c_end - c_start, kH, kW)
-                tiled_shape["bias"] = (tile_k,)
-                tiled_shape["output"] = (N, tile_k, output_height, output_width)
-                tiled_shapes.append(tiled_shape)
+                tile_configs.append(cfg)
+                tiled_shapes.append(_compute_per_tile_shapes(cfg))
 
     if tile_c != C or is_conv1:
-        _decompose_conv2d_node(model, node, tile_sizes, tiled_shapes, tile_configs)
+        _decompose_conv2d_node(
+            model, node, tile_sizes, tiled_shapes, tile_configs
+        )
     else:
+        h_in = tile_y * stride[0]
+        w_in = tile_x * stride[1]
         node.meta["tiled_shapes"] = tiled_shapes[0]
         node.meta["l2_tiling"] = (1, K // tile_k, Y // tile_y, X // tile_x)
         node.meta["tile_strides"] = {
-            "input": (1, tile_c, tile_y * stride[0], tile_x * stride[1]),
-            "input_scale": (1, tile_c // bs, tile_y * stride[0], tile_x * stride[1]),
+            "input": (1, tile_c, h_in, w_in),
+            "input_scale": (1, tile_c // bs, h_in, w_in),
         }
 
 
