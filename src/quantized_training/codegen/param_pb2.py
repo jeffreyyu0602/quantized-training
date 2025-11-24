@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bparam.proto\x12\x07\x63odegen\",\n\x06Memory\x12\x11\n\tpartition\x18\x01 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\x04\"\xb2\x02\n\x06Tensor\x12\x0c\n\x04node\x18\x01 \x01(\t\x12\r\n\x05shape\x18\x02 \x03(\x05\x12\r\n\x05\x64type\x18\x03 \x01(\t\x12$\n\x06memory\x18\x04 \x01(\x0b\x32\x0f.codegen.MemoryH\x00\x88\x01\x01\x12\x13\n\x0btiled_shape\x18\x05 \x03(\x05\x12(\n\nscratchpad\x18\x06 \x01(\x0b\x32\x0f.codegen.MemoryH\x01\x88\x01\x01\x12)\n\x07\x64\x65quant\x18\x07 \x01(\x0b\x32\x13.codegen.OpOverloadH\x02\x88\x01\x01\x12)\n\x07reshape\x18\x08 \x01(\x0b\x32\x13.codegen.OpOverloadH\x03\x88\x01\x01\x12\x0f\n\x07is_none\x18\t \x01(\x08\x42\t\n\x07_memoryB\r\n\x0b_scratchpadB\n\n\x08_dequantB\n\n\x08_reshape\".\n\nTensorList\x12 \n\x07tensors\x18\x01 \x03(\x0b\x32\x0f.codegen.Tensor\"\x19\n\x07IntList\x12\x0e\n\x06values\x18\x01 \x03(\x03\"\x1a\n\x08\x42oolList\x12\x0e\n\x06values\x18\x01 \x03(\x08\"\x1c\n\nScalarList\x12\x0e\n\x06values\x18\x01 \x03(\x01\"\xb6\x02\n\x08\x41rgument\x12!\n\x06tensor\x18\x01 \x01(\x0b\x32\x0f.codegen.TensorH\x00\x12*\n\x0btensor_list\x18\x02 \x01(\x0b\x32\x13.codegen.TensorListH\x00\x12$\n\x08int_list\x18\x03 \x01(\x0b\x32\x10.codegen.IntListH\x00\x12\x13\n\tint_value\x18\x04 \x01(\x03H\x00\x12\x15\n\x0b\x66loat_value\x18\x05 \x01(\x01H\x00\x12\x14\n\nbool_value\x18\x06 \x01(\x08H\x00\x12\x13\n\tstr_value\x18\x07 \x01(\tH\x00\x12&\n\tbool_list\x18\x08 \x01(\x0b\x32\x11.codegen.BoolListH\x00\x12*\n\x0bscalar_list\x18\t \x01(\x0b\x32\x13.codegen.ScalarListH\x00\x42\n\n\x08\x61rg_type\"\xca\x01\n\nOpOverload\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\n\n\x02op\x18\x02 \x01(\t\x12\x0e\n\x06target\x18\x03 \x01(\t\x12\x1f\n\x04\x61rgs\x18\x04 \x03(\x0b\x32\x11.codegen.Argument\x12/\n\x06kwargs\x18\x05 \x03(\x0b\x32\x1f.codegen.OpOverload.KwargsEntry\x1a@\n\x0bKwargsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12 \n\x05value\x18\x02 \x01(\x0b\x32\x11.codegen.Argument:\x02\x38\x01\"D\n\x0eOpOverloadList\x12\x0c\n\x04name\x18\x01 \x01(\t\x12$\n\x07op_list\x18\x02 \x03(\x0b\x32\x13.codegen.OpOverload\"\xc0\x01\n\tOperation\x12!\n\x02op\x18\x02 \x01(\x0b\x32\x13.codegen.OpOverloadH\x00\x12+\n\x08\x66used_op\x18\x03 \x01(\x0b\x32\x17.codegen.OpOverloadListH\x00\x12!\n\x06output\x18\x04 \x01(\x0b\x32\x0f.codegen.TensorH\x01\x12&\n\x07outputs\x18\x05 \x01(\x0b\x32\x13.codegen.TensorListH\x01\x42\t\n\x07op_typeB\r\n\x0breturn_type\"n\n\x05Model\x12\x1f\n\x06inputs\x18\x01 \x03(\x0b\x32\x0f.codegen.Tensor\x12#\n\nparameters\x18\x02 \x03(\x0b\x32\x0f.codegen.Tensor\x12\x1f\n\x03ops\x18\x03 \x03(\x0b\x32\x12.codegen.Operationb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bparam.proto\x12\x07\x63odegen\",\n\x06Memory\x12\x11\n\tpartition\x18\x01 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\x04\"\xc8\x02\n\x06Tensor\x12\x0c\n\x04node\x18\x01 \x01(\t\x12\r\n\x05shape\x18\x02 \x03(\x05\x12\r\n\x05\x64type\x18\x03 \x01(\t\x12$\n\x06memory\x18\x04 \x01(\x0b\x32\x0f.codegen.MemoryH\x00\x88\x01\x01\x12\x13\n\x0btiled_shape\x18\x05 \x03(\x05\x12\x14\n\x0ctile_strides\x18\x06 \x03(\x05\x12(\n\nscratchpad\x18\x07 \x01(\x0b\x32\x0f.codegen.MemoryH\x01\x88\x01\x01\x12)\n\x07\x64\x65quant\x18\x08 \x01(\x0b\x32\x13.codegen.OpOverloadH\x02\x88\x01\x01\x12)\n\x07reshape\x18\t \x01(\x0b\x32\x13.codegen.OpOverloadH\x03\x88\x01\x01\x12\x0f\n\x07is_none\x18\n \x01(\x08\x42\t\n\x07_memoryB\r\n\x0b_scratchpadB\n\n\x08_dequantB\n\n\x08_reshape\".\n\nTensorList\x12 \n\x07tensors\x18\x01 \x03(\x0b\x32\x0f.codegen.Tensor\"\x19\n\x07IntList\x12\x0e\n\x06values\x18\x01 \x03(\x03\"\x1a\n\x08\x42oolList\x12\x0e\n\x06values\x18\x01 \x03(\x08\"\x1c\n\nScalarList\x12\x0e\n\x06values\x18\x01 \x03(\x01\"\xb6\x02\n\x08\x41rgument\x12!\n\x06tensor\x18\x01 \x01(\x0b\x32\x0f.codegen.TensorH\x00\x12*\n\x0btensor_list\x18\x02 \x01(\x0b\x32\x13.codegen.TensorListH\x00\x12$\n\x08int_list\x18\x03 \x01(\x0b\x32\x10.codegen.IntListH\x00\x12\x13\n\tint_value\x18\x04 \x01(\x03H\x00\x12\x15\n\x0b\x66loat_value\x18\x05 \x01(\x01H\x00\x12\x14\n\nbool_value\x18\x06 \x01(\x08H\x00\x12\x13\n\tstr_value\x18\x07 \x01(\tH\x00\x12&\n\tbool_list\x18\x08 \x01(\x0b\x32\x11.codegen.BoolListH\x00\x12*\n\x0bscalar_list\x18\t \x01(\x0b\x32\x13.codegen.ScalarListH\x00\x42\n\n\x08\x61rg_type\"\xca\x01\n\nOpOverload\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\n\n\x02op\x18\x02 \x01(\t\x12\x0e\n\x06target\x18\x03 \x01(\t\x12\x1f\n\x04\x61rgs\x18\x04 \x03(\x0b\x32\x11.codegen.Argument\x12/\n\x06kwargs\x18\x05 \x03(\x0b\x32\x1f.codegen.OpOverload.KwargsEntry\x1a@\n\x0bKwargsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12 \n\x05value\x18\x02 \x01(\x0b\x32\x11.codegen.Argument:\x02\x38\x01\"D\n\x0eOpOverloadList\x12\x0c\n\x04name\x18\x01 \x01(\t\x12$\n\x07op_list\x18\x02 \x03(\x0b\x32\x13.codegen.OpOverload\"\xc0\x01\n\tOperation\x12!\n\x02op\x18\x02 \x01(\x0b\x32\x13.codegen.OpOverloadH\x00\x12+\n\x08\x66used_op\x18\x03 \x01(\x0b\x32\x17.codegen.OpOverloadListH\x00\x12!\n\x06output\x18\x04 \x01(\x0b\x32\x0f.codegen.TensorH\x01\x12&\n\x07outputs\x18\x05 \x01(\x0b\x32\x13.codegen.TensorListH\x01\x42\t\n\x07op_typeB\r\n\x0breturn_type\"n\n\x05Model\x12\x1f\n\x06inputs\x18\x01 \x03(\x0b\x32\x0f.codegen.Tensor\x12#\n\nparameters\x18\x02 \x03(\x0b\x32\x0f.codegen.Tensor\x12\x1f\n\x03ops\x18\x03 \x03(\x0b\x32\x12.codegen.Operationb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -26,25 +26,25 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_MEMORY']._serialized_start=24
   _globals['_MEMORY']._serialized_end=68
   _globals['_TENSOR']._serialized_start=71
-  _globals['_TENSOR']._serialized_end=377
-  _globals['_TENSORLIST']._serialized_start=379
-  _globals['_TENSORLIST']._serialized_end=425
-  _globals['_INTLIST']._serialized_start=427
-  _globals['_INTLIST']._serialized_end=452
-  _globals['_BOOLLIST']._serialized_start=454
-  _globals['_BOOLLIST']._serialized_end=480
-  _globals['_SCALARLIST']._serialized_start=482
-  _globals['_SCALARLIST']._serialized_end=510
-  _globals['_ARGUMENT']._serialized_start=513
-  _globals['_ARGUMENT']._serialized_end=823
-  _globals['_OPOVERLOAD']._serialized_start=826
-  _globals['_OPOVERLOAD']._serialized_end=1028
-  _globals['_OPOVERLOAD_KWARGSENTRY']._serialized_start=964
-  _globals['_OPOVERLOAD_KWARGSENTRY']._serialized_end=1028
-  _globals['_OPOVERLOADLIST']._serialized_start=1030
-  _globals['_OPOVERLOADLIST']._serialized_end=1098
-  _globals['_OPERATION']._serialized_start=1101
-  _globals['_OPERATION']._serialized_end=1293
-  _globals['_MODEL']._serialized_start=1295
-  _globals['_MODEL']._serialized_end=1405
+  _globals['_TENSOR']._serialized_end=399
+  _globals['_TENSORLIST']._serialized_start=401
+  _globals['_TENSORLIST']._serialized_end=447
+  _globals['_INTLIST']._serialized_start=449
+  _globals['_INTLIST']._serialized_end=474
+  _globals['_BOOLLIST']._serialized_start=476
+  _globals['_BOOLLIST']._serialized_end=502
+  _globals['_SCALARLIST']._serialized_start=504
+  _globals['_SCALARLIST']._serialized_end=532
+  _globals['_ARGUMENT']._serialized_start=535
+  _globals['_ARGUMENT']._serialized_end=845
+  _globals['_OPOVERLOAD']._serialized_start=848
+  _globals['_OPOVERLOAD']._serialized_end=1050
+  _globals['_OPOVERLOAD_KWARGSENTRY']._serialized_start=986
+  _globals['_OPOVERLOAD_KWARGSENTRY']._serialized_end=1050
+  _globals['_OPOVERLOADLIST']._serialized_start=1052
+  _globals['_OPOVERLOADLIST']._serialized_end=1120
+  _globals['_OPERATION']._serialized_start=1123
+  _globals['_OPERATION']._serialized_end=1315
+  _globals['_MODEL']._serialized_start=1317
+  _globals['_MODEL']._serialized_end=1427
 # @@protoc_insertion_point(module_scope)

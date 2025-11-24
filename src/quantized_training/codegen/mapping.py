@@ -1497,6 +1497,10 @@ def run_memory_mapping(
         if tiled_shapes:
             node.meta["tiled_shapes"] = tiled_shapes
 
+        strides = first_node.meta.get("tile_strides")
+        if strides is not None:
+            node.meta["tile_strides"] = normalize_shape(first_node, strides)
+
         tensor_sizes = {
             n: sp_alloc.get_tensor_size(n, tiled_shapes.get(n))
             for n in node.all_input_nodes
@@ -1518,6 +1522,12 @@ def run_memory_mapping(
             )
 
         tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
+
+        if num_banks is not None and len(tensor_sizes) > num_banks:
+            logger.warning(
+                f"{node}: number of tensors ({len(tensor_sizes)}) exceeds number "
+                f"of banks ({num_banks})"
+            )
 
         bytes_to_allocate = sum(tensor_sizes.values())
         remaining_cache_size = cache_size
@@ -1751,15 +1761,14 @@ def gen_code(model, args, output_dir=None):
             args = map_arg(node.args, lambda n: n.value.clone())
             ShapeProp(gm).propagate(*args)
 
-            scratchpad_map = node.meta.get("scratchpad_map")
-
             operators = []
             for n in gm.graph.nodes:
                 if n.op != 'call_function' or n.meta.get('fused', False) or is_nop(n):
                     continue
 
                 n.meta["tiled_shapes"] = tiled_shapes
-                n.meta["scratchpad_map"] = scratchpad_map
+                n.meta["tile_strides"] = node.meta.get("tile_strides")
+                n.meta["scratchpad_map"] = node.meta.get("scratchpad_map")
 
                 operators.append(map_node(n))
 

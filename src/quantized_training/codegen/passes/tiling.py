@@ -1,6 +1,7 @@
 import copy
 import logging
 import math
+import re
 from typing import Optional
 
 import torch
@@ -40,7 +41,7 @@ DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
 def create_new_chain(model, node_to_fuse, cat_node, fusable):
-    conv_node = node_to_fuse if is_conv2d(node_to_fuse) else node_to_fuse.args[0]
+    conv_node = node_to_fuse if is_conv2d(node_to_fuse) else node_to_fuse.args[1]
     input_shape = conv_node.meta["tiled_shapes"]["input"]
     output_shape = conv_node.meta["tiled_shapes"]["output"]
 
@@ -58,8 +59,9 @@ def create_new_chain(model, node_to_fuse, cat_node, fusable):
                 slice_args.insert(0, (dim, tile_start, tile_end))
         input_nodes = input_nodes.args[0]
 
-    value_remap = {cat_node: node_to_fuse}
     anchor = node_to_fuse.next
+    value_remap = {cat_node: node_to_fuse}
+
     for n in fusable:
         for arg in n.all_input_nodes:
             if arg in value_remap:
@@ -67,9 +69,12 @@ def create_new_chain(model, node_to_fuse, cat_node, fusable):
 
             if arg.op == "get_attr":
                 param = fetch_attr(model, arg.target)
+                prefix = arg.name
+                if match := re.fullmatch(r'(code|qmap)(_\d+)?', arg.name):
+                    prefix = match.group(1)
                 with model.graph.inserting_before(anchor):
                     get_attr = create_getattr_from_value(
-                        model, model.graph, arg.name, param
+                        model, model.graph, prefix, param
                     )
                 propagate_shape(get_attr, model)
                 get_attr.meta["dtype"] = arg.meta.get("dtype")
@@ -105,19 +110,24 @@ def create_new_chain(model, node_to_fuse, cat_node, fusable):
 
 
 def move_fusable_ops_after_conv2d(model, node):
+    order = {n: i for i, n in enumerate(model.graph.nodes)}
     fusable_ops = []
     next_node = next(iter(node.users))
     while is_elementwise_op(next_node):
-        fusable_ops.append(next_node)
-        if len(next_node.users) != 1:
+        chain = [node] + fusable_ops + [next_node]
+        if _nodes_sequential(chain, order):
+            fusable_ops.append(next_node)
+        else:
+            break
+        # Stop fusing if last node is a quantize op
+        if (
+            len(next_node.users) != 1
+            or next_node.target == torch.ops.quantized_ops.quantize.default
+        ):
             break
         next_node = next(iter(next_node.users))
 
     if not fusable_ops:
-        return
-
-    order = {n: i for i, n in enumerate(model.graph.nodes)}
-    if not _nodes_sequential([node] + fusable_ops, order):
         return
 
     # Find all the conv2d nodes to fuse with
@@ -145,46 +155,260 @@ def move_fusable_ops_after_conv2d(model, node):
         model.graph.erase_node(n)
 
 
-def split_conv2d_node(model, node, tiling):
+def _make_conv2d_tiled_module(
+    X, C, tile_x, tile_c, pad_value, is_dwc, is_mx_conv, configs
+):
+    """
+    Factory function to create a Conv2dTiled module class with captured parameters.
+    """
+    class Conv2dTiled(torch.nn.Module):
+        def __init__(self, stride=1, padding=0, dilation=1, groups=1, block_size=1):
+            super().__init__()
+            self.stride = _pair(stride)
+            self.padding = _pair(padding)
+            self.dilation = _pair(dilation)
+            self.groups = groups
+            self.block_size = block_size
+
+        def get_input_tile(self, input, cfg):
+            c0, c1 = cfg["c_tile"]
+            y0, y1 = cfg["y_tile"]
+            x0, x1 = cfg["x_tile"]
+
+            if is_dwc:
+                tile = input[:, :, y0:y1, x0:x1]
+            else:
+                tile = input[:, c0:c1, y0:y1, x0:x1]
+
+            padding = cfg["input_padding"]
+            if any(p > 0 for p in padding):
+                tile = F.pad(tile, padding, "constant", pad_value)
+
+            return tile
+
+        def get_weight_tile(self, weight, cfg):
+            c0, c1 = cfg["c_tile"]
+            return weight[:, c0:c1, :, :]
+
+        def get_scales(self, input_scale, weight_scale, cfg):
+            if not is_mx_conv:
+                return None, None
+
+            c0, c1 = cfg["c_tile"]
+            y0, y1 = cfg["y_tile"]
+            x0, x1 = cfg["x_tile"]
+
+            bs = self.block_size
+
+            if is_dwc:
+                in_s = input_scale[:, :, y0:y1, x0:x1]
+                wt_s = weight_scale[:, 0:1, :, :]
+            else:
+                s0, s1 = c0 // bs, c1 // bs
+                in_s = input_scale[:, s0:s1, y0:y1, x0:x1]
+                wt_s = weight_scale[:, s0:s1, :, :]
+
+            padding = cfg["input_padding"]
+            if any(p > 0 for p in padding):
+                tile = F.pad(tile, padding, "constant", 1.0)
+
+            return in_s, wt_s
+
+        def run_conv(self, input_tile, weight_tile, bias, cfg, scales, codes):
+            args = (
+                input_tile,
+                weight_tile,
+                bias,
+                self.stride,
+                cfg["conv_padding"],
+                self.dilation,
+                self.groups,
+            )
+
+            if not is_mx_conv:
+                return torch.ops.aten.conv2d.default(*args)
+
+            return torch.ops.quantized_ops.conv2d_mx(
+                *args,
+                input_scale=scales[0],
+                weight_scale=scales[1],
+                block_size=self.block_size,
+                input_code=codes[0],
+                weight_code=codes[1],
+            )
+
+        def trim_output(self, out, cfg):
+            if not cfg["keep_dims_and_padding"]:
+                return out
+
+            oy, ox = cfg["output_offset"]
+            oh, ow = cfg["output_sizes"]
+            return out[:, :, oy:oy+oh, ox:ox+ow]
+
+        def forward(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: Optional[torch.Tensor] = None,
+            input_scale: Optional[torch.Tensor] = None,
+            weight_scale: Optional[torch.Tensor] = None,
+            input_code: Optional[torch.Tensor] = None,
+            weight_code: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            row_tiles = []
+            col_tiles = []
+
+            # Track when to break rows
+            tile_c_count = C // tile_c
+            tile_x_count = X // tile_x
+
+            for tile_idx, cfg in enumerate(configs):
+                input_tile = self.get_input_tile(input, cfg)
+                weight_tile = self.get_weight_tile(weight, cfg)
+                scale_tiles = self.get_scales(input_scale, weight_scale, cfg)
+                out = self.run_conv(
+                    input_tile,
+                    weight_tile,
+                    bias if cfg["c_tile"][1] == C else None,
+                    cfg,
+                    scale_tiles,
+                    (input_code, weight_code),
+                )
+                out = self.trim_output(out, cfg)
+
+                # accumulate partial channels
+                acc = out if (tile_idx % tile_c_count == 0) else (acc + out)
+
+                # when finishing tile_c accumulations
+                if (tile_idx + 1) % tile_c_count == 0:
+                    col_tiles.append(acc)
+
+                # when finishing tile_x tiles (a full row)
+                if len(col_tiles) == tile_x_count:
+                    row_tiles.append(torch.cat(col_tiles, dim=-1))
+                    col_tiles = []
+
+            return torch.cat(row_tiles, dim=2)
+
+    return Conv2dTiled
+
+
+def _decompose_conv2d_node(model, node, tile_sizes, tiled_shapes, configs):
+    stride = get_arg_or_kwarg(node, 3, "stride", 1)
+    padding = get_arg_or_kwarg(node, 4, "padding", 0)
+    dilation = get_arg_or_kwarg(node, 5, "dilation", 1)
+    groups = get_arg_or_kwarg(node, 6, "groups", 1)
+    bs = node.kwargs.get("block_size", 1)
+
+    N, K, Y, X = node.shape
+    _, C, kH, kW = node.args[1].shape
+
+    tile_y, tile_x, tile_c, tile_k = tile_sizes
+
+    # Compute pad_value once
+    pad_value = 0
+    input_code = node.kwargs.get("input_code")
+    if input_code is not None:
+        code = model.get_buffer(input_code.target)
+        pad_value = (code == 0).nonzero()[0].item()
+
+    is_dwc = is_depthwise_conv(node)
+    is_mx_conv = node.target == torch.ops.quantized_ops.conv2d_mx.default
+
+    # Create the tiled module using factory function
+    Conv2dTiled = _make_conv2d_tiled_module(
+        X, C, tile_x, tile_c, pad_value, is_dwc, is_mx_conv, configs
+    )
+
+    def load_arg(a):
+        return map_arg(a, lambda n: n.value if isinstance(n, Node) else n)
+
+    mod = Conv2dTiled(stride, padding, dilation, groups, bs)
+    kwargs = {k: v for k, v in node.kwargs.items() if v is not None}
+    kwargs.pop("block_size", None)
+    gm = export_model(mod, load_arg(node.args[:3]), load_arg(kwargs))
+
+    for n in list(gm.graph.nodes):
+        if is_prunable_op(n):
+            n.replace_all_uses_with(n.all_input_nodes[0])
+            gm.graph.erase_node(n)
+    gm.graph.lint()
+
+    value_remap = {}
+    output = replace_node_with_graph_module(model, gm, node, value_remap)
+
+    # Update metadata on new nodes in the graph
+    source_fn = node.meta['source_fn_stack'][-1]
+    for n in list(value_remap.values()):
+        if n.target in [
+            torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default,
+        ]:
+            n.meta["dtype"] = n.args[0].meta.get("dtype")
+
+        if n.target == node.target:
+            n.meta.update({
+                "tiled_shapes": tiled_shapes.pop(0),
+                "l2_tiling": (1, K // tile_k, 1, 1),
+                "dtype": node.meta.get("dtype"),
+                "source_fn_stack": [(n.name, source_fn[1])],
+            })
+
+    if output[0].target == torch.ops.aten.cat.default:
+        move_fusable_ops_after_conv2d(model, output[0])
+
+
+def _pad_input(model, node, arg, padding, pad_value):
+    with model.graph.inserting_before(node):
+        new_arg = model.graph.call_function(
+            torch.ops.aten.pad.default,
+            (arg, padding, "constant", pad_value),
+        )
+    propagate_shape(new_arg, model)
+    new_arg.meta["dtype"] = node.meta.get("dtype")
+    node.replace_input_with(arg, new_arg)
+    return new_arg
+
+
+def split_conv2d_node(model, node, tile_sizes):
     """
     Replace a conv2d node with a tiled conv2d subgraph.
 
     Args:
         model: GraphModule
         node: node (must be aten.conv2d or quantized conv2d)
-        tiling: (Y, X, K, C)
-            - Y: number of tiles along kernel height
-            - X: number of tiles along kernel width
-            - K : number of tiles along output channels
-            - C : number of tiles along input channels
+        tile_sizes: (Y, X, C, K)
     """
-    stride = get_arg_or_kwarg(node, 3, "stride", 1)
-    padding = get_arg_or_kwarg(node, 4, "padding", 0)
-    dilation = get_arg_or_kwarg(node, 5, "dilation", 1)
-    groups = get_arg_or_kwarg(node, 6, "groups", 1)
+    stride  = _pair(get_arg_or_kwarg(node, 3, "stride", 1))
+    padding = _pair(get_arg_or_kwarg(node, 4, "padding", 0))
+    dilation = _pair(get_arg_or_kwarg(node, 5, "dilation", 1))
     bs = node.kwargs.get("block_size", 1)
-    bs = bs if isinstance(bs, int) else bs[1]
 
-    is_conv1 = (
-        node.shape[2] == 112
-        and node.shape[3] == 112
-        and stride == [2,2]
-        and padding == [3, 3]
-    )
+    is_conv1 = node.args[0].shape[1] == 3
     is_dwc = is_depthwise_conv(node)
-
-    stride = _pair(stride)
-    padding = _pair(padding)
-    dilation = _pair(dilation)
 
     N, K, Y, X = node.shape
     _, C, kH, kW = node.args[1].shape
     _, _, IX, IY = node.args[0].shape
+    tile_y, tile_x, tile_c, tile_k = tile_sizes
 
-    tile_y, tile_x, tile_c, tile_k = tiling
+    pad_value = 0
+    if (input_code := node.kwargs.get("input_code")) is not None:
+        code = model.get_buffer(input_code.target)
+        pad_value = (code == 0).nonzero()[0].item()
+
+    if (tile_x != X or tile_y != Y) and any(p for p in padding) and not is_conv1:
+        pad_hw = (padding[1], padding[1], padding[0], padding[0])
+        _pad_input(model, node, node.args[0], pad_hw, pad_value)
+
+        if input_scale := node.kwargs.get("input_scale"):
+            _pad_input(model, node, input_scale, pad_hw, 1.0)
+
+        padding = _pair(0)
+        node.args = node.args[:4] + (padding,) + node.args[5:]
+        propagate_shape(node, model)
+        _, _, IY, IX = node.args[0].shape
 
     tiled_shapes = []
-    tiling = (1, K // tile_k, 1, 1)
     tile_configs = []
     for y in range(0, Y, tile_y):
         for x in range(0, X, tile_x):
@@ -192,38 +416,26 @@ def split_conv2d_node(model, node, tiling):
             ow = min(tile_x, X - x)
 
             if tile_x == X and tile_y == Y:
-                # no need to tile
-                y_in_start_clamped = 0
-                y_in_end_clamped = IY
-                x_in_start_clamped = 0
-                x_in_end_clamped = IX
-                pad_top = 0
-                pad_left = 0
-                pad_bottom = 0
-                pad_right = 0
-                kernel_padding = padding
-                x_out_valid_start = 0
-                y_out_valid_start = 0
+                y_in_start_clamped, y_in_end_clamped = 0, IY
+                x_in_start_clamped, x_in_end_clamped = 0, IX
+                pad_top, pad_left, pad_bottom, pad_right = 0, 0, 0, 0
+                conv_padding = padding
+                x_offset, y_offset = 0, 0
             else:
-                # Compute receptive field in input
                 y_in_start = y * stride[0] - padding[0]
-                y_in_end = (
-                    y_in_start + (oh - 1) * stride[0] + (kH - 1) * dilation[0] + 1
-                )
+                y_in_end = y_in_start + (oh - 1) * stride[0] + (kH - 1) * dilation[0] + 1
                 x_in_start = x * stride[1] - padding[1]
-                x_in_end = (
-                    x_in_start + (ow - 1) * stride[1] + (kW - 1) * dilation[1] + 1
-                )
-                # include even more padding so that after applying padding of
+                x_in_end = x_in_start + (ow - 1) * stride[1] + (kW - 1) * dilation[1] + 1
+
+                # Grab more input pixcels so that after applying padding of
                 # three, the new convolution still aligns with the original one,
                 # just with some garbage on the right and bottom side
                 if is_conv1:
                     y_in_start = y_in_start - (padding[0] % stride[0])
                     x_in_start = x_in_start - (padding[1] % stride[1])
-                
+
+                # Adjust the receptive field such that it is mutiple of stride
                 if is_dwc:
-                    # adjust the receptive field such that is is mutiple of stride
-                    # this required by the dwc hardware
                     rem = (y_in_end - y_in_start) % stride[0]
                     if rem:
                         y_in_end += stride[0] - rem
@@ -237,31 +449,21 @@ def split_conv2d_node(model, node, tiling):
                 if not is_conv1:
                     x_in_end_clamped = min(x_in_end, IX)
                     y_in_end_clamped = min(y_in_end, IY)
-                    # Pad input locally if receptive field goes outside
-                    pad_top  = y_in_start_clamped - y_in_start
-                    pad_left = x_in_start_clamped - x_in_start
-                    pad_bottom = y_in_end - y_in_end_clamped
-                    pad_right = x_in_end - x_in_end_clamped
-                    no_padding = (
-                        pad_top == 0
-                        and pad_left == 0
-                        and pad_bottom == 0
-                        and pad_right == 0
+                    assert (
+                        y_in_start_clamped == y_in_start
+                        or x_in_start_clamped == x_in_start
+                        or y_in_end_clamped == y_in_end
+                        or x_in_end_clamped == x_in_end
+                    ), (
+                        f"{node}: Unexpected input tile size"
                     )
-                    # if there's no padding, and the receptive field is smaller
-                    # than output x stride (pixels at the right and bottom
-                    # boundary are not used by the kernel), we need to expand the
-                    # receptive field to make sure the input size is output x stride
-                    # this is a requirement by the hardware for the downsample layer
-                    if no_padding and kH == 1 and kW == 1:
-                        if (y_in_end_clamped - y_in_start_clamped) % stride[0] != 0:
-                            y_in_end_clamped = oh * stride[0] + y_in_start_clamped
-                        if (x_in_end_clamped - x_in_start_clamped) % stride[1] != 0:
-                            x_in_end_clamped = ow * stride[1] + x_in_start_clamped
-                    x_out_valid_start = 0
-                    y_out_valid_start = 0
-                    # we are explicitly padding the input, remove the kernel padding
-                    kernel_padding = (0, 0)
+                    # downsample layers input size must be multiples of stride
+                    if kH == 1 and kW == 1:
+                        y_in_end_clamped = y_in_start_clamped + oh * stride[0]
+                        x_in_end_clamped = x_in_start_clamped + ow * stride[1]
+                    pad_top, pad_left, pad_bottom, pad_right = 0, 0, 0, 0
+                    x_offset, y_offset = 0, 0
+                    conv_padding = _pair(0)
                 else:
                     # adjust the receptive field to multiple of 8
                     # this is required by the hardware conv1 replication
@@ -269,37 +471,38 @@ def split_conv2d_node(model, node, tiling):
                     x_in_end = x_in_end + (16 - ((x_in_end - x_in_start_clamped) % 16))
                     y_in_end_clamped = min(y_in_end, IY)
                     x_in_end_clamped = min(x_in_end, IX)
-                    # we will never pad on the left and top side
+                    # we never pad on the left and top side
                     pad_top = 0
                     pad_left = 0
-                    # feel free to pad on the bottom and right side, just throw away the extra output
+                    # pad on the bottom and right side to match the receptive field
                     pad_bottom = y_in_end - y_in_end_clamped
                     pad_right = x_in_end - x_in_end_clamped
-                    # calculate the number of pixels we need to throw away on the top and left side
-                    x_out_valid_start = (x * stride[1] - x_in_start_clamped) // stride[1]
-                    y_out_valid_start = (y * stride[0] - y_in_start_clamped) // stride[0]
+                    # calculate the number of pixels to slice on the top and left side
+                    x_offset = (x * stride[1] - x_in_start_clamped) // stride[1]
+                    y_offset = (y * stride[0] - y_in_start_clamped) // stride[0]
                     # maintain original padding for conv1
-                    kernel_padding = padding 
+                    conv_padding = padding 
 
             for c_start in range(0, C, tile_c):
                 c_end = min(c_start + tile_c, C)
                 tile_configs.append({
-                    "b_tile": (0, N),
                     "c_tile": (c_start, c_end),
                     "y_tile": (y_in_start_clamped, y_in_end_clamped),
                     "x_tile": (x_in_start_clamped, x_in_end_clamped),
-                    "input_padding": (pad_top, pad_left, pad_bottom, pad_right),
-                    "kernel_padding": kernel_padding,
-                    "out_valid_start": (y_out_valid_start, x_out_valid_start),
-                    "out_tile": (oh, ow),
+                    "input_padding": (pad_left, pad_right, pad_top, pad_bottom),
+                    "conv_padding": conv_padding,
+                    "output_offset": (y_offset, x_offset),
+                    "output_sizes": (oh, ow),
                     "keep_dims_and_padding": is_conv1,
                 })
+
                 input_height = y_in_end_clamped - y_in_start_clamped + pad_top + pad_bottom
                 input_width = x_in_end_clamped - x_in_start_clamped + pad_left + pad_right
-                output_height = (input_height + 2 * kernel_padding[0] - kH) // stride[0] + 1
-                output_width = (input_width + 2 * kernel_padding[1] - kW) // stride[1] + 1
+                output_height = (input_height + 2 * conv_padding[0] - kH) // stride[0] + 1
+                output_width = (input_width + 2 * conv_padding[1] - kW) // stride[1] + 1
+
                 assert output_height >= oh and output_width >= ow, (
-                    f"Output height {output_height} is less than tile height {oh}"
+                    f"{node}: Output height {output_height} is less than tile height {oh}"
                 )
 
                 tiled_shape = {}
@@ -324,185 +527,17 @@ def split_conv2d_node(model, node, tiling):
                 tiled_shape["weight"] = (tile_k, c_end - c_start, kH, kW)
                 tiled_shape["bias"] = (tile_k,)
                 tiled_shape["output"] = (N, tile_k, output_height, output_width)
-                tiled_shape["keep_dims_and_padding"] = is_conv1
                 tiled_shapes.append(tiled_shape)
 
-    pad_value = 0
-    if (input_code := node.kwargs.get("input_code")) is not None:
-        code = model.get_buffer(input_code.target)
-        pad_value = (code == 0).nonzero()[0].item()
-
-    class Conv2dTiled(torch.nn.Module):
-        def __init__(self, stride=1, padding=0, dilation=1, groups=1, block_size=1):
-            super().__init__()
-            self.stride = _pair(stride)
-            self.padding = _pair(padding)
-            self.dilation = _pair(dilation)
-            self.groups = groups
-            self.block_size = block_size
-
-        def forward(
-            self,
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            bias: Optional[torch.Tensor] = None,
-            input_scale: Optional[torch.Tensor] = None,
-            weight_scale: Optional[torch.Tensor] = None,
-            input_code: Optional[torch.Tensor] = None,
-            weight_code: Optional[torch.Tensor] = None,
-        ) -> torch.Tensor:
-            # Iterate spatial tiles
-            row_tiles = []
-            tile_index = 0
-            for y in range(0, Y, tile_y):
-                col_tiles = []
-                for x in range(0, X, tile_x):
-                    acc = None
-                    for c_start in range(0, C, tile_c):
-                        config = tile_configs[tile_index]
-                        tile_index += 1
-                        # Extract tile parameters
-                        c_start, c_end = config["c_tile"]
-                        y_in_start_clamped, y_in_end_clamped = config["y_tile"]
-                        x_in_start_clamped, x_in_end_clamped = config["x_tile"]
-                        oh, ow = config["out_tile"]
-                        pad_top, pad_left, pad_bottom, pad_right = config["input_padding"]
-                        kernel_padding = config["kernel_padding"]
-                        y_out_valid_start, x_out_valid_start = config["out_valid_start"]
-                        keep_dims_and_padding = config["keep_dims_and_padding"]
-
-                        if is_dwc:
-                            input_tile = input[:, :, 
-                                y_in_start_clamped:y_in_end_clamped,
-                                x_in_start_clamped:x_in_end_clamped
-                            ]
-                        else:
-                            input_tile = input[:,
-                                c_start:c_end,
-                                y_in_start_clamped:y_in_end_clamped,
-                                x_in_start_clamped:x_in_end_clamped
-                            ]
-
-                        if pad_top or pad_left or pad_bottom or pad_right:
-                            input_tile = F.pad(
-                                input_tile,
-                                (pad_left, pad_right, pad_top, pad_bottom),
-                                mode='constant',
-                                value=pad_value,
-                            )
-
-                        weight_tile = weight[:, c_start:c_end, :, :]
-
-                        args = (
-                            input_tile,
-                            weight_tile,
-                            bias if c_end == C else None,
-                            self.stride,
-                            kernel_padding,
-                            self.dilation,
-                            self.groups,
-                        )
-
-                        if input_scale is not None:
-                            bs = self.block_size
-                            if is_dwc:
-                                tiled_input_scale = input_scale[
-                                    :,
-                                    :,
-                                    y_in_start_clamped:y_in_end_clamped,
-                                    x_in_start_clamped:x_in_end_clamped
-                                ]
-                            else:
-                                tiled_input_scale = input_scale[:,
-                                    c_start // bs : c_end // bs,
-                                    y_in_start_clamped:y_in_end_clamped,
-                                    x_in_start_clamped:x_in_end_clamped
-                                ]
-                            if pad_top or pad_left or pad_bottom or pad_right:
-                                tiled_input_scale = F.pad(
-                                    tiled_input_scale,
-                                    (pad_left, pad_right, pad_top, pad_bottom),
-                                    mode='constant',
-                                    value=1.0,
-                                )
-                            if is_dwc:
-                                tiled_weight_scale = weight_scale[:, 0:1, :, :]
-                            else:
-                                tiled_weight_scale = weight_scale[
-                                    :, c_start // bs : c_end // bs, :, :
-                                ]
-                            kwargs = {
-                                "input_scale": tiled_input_scale,
-                                "weight_scale": tiled_weight_scale,
-                                "block_size": bs,
-                                "input_code": input_code,
-                                "weight_code": weight_code,
-                            }
-                            out_patch = torch.ops.quantized_ops.conv2d_mx(*args, **kwargs)
-                        else:
-                            out_patch = torch.ops.aten.conv2d.default(*args)
-
-                        if keep_dims_and_padding:
-                            out_patch = out_patch[
-                                :,
-                                :,
-                                y_out_valid_start:oh + y_out_valid_start,
-                                x_out_valid_start:ow + x_out_valid_start,
-                            ]
-
-                        acc = out_patch if acc is None else acc + out_patch
-
-                    col_tiles.append(acc)
-
-                row_tiles.append(
-                    torch.cat(col_tiles, dim=-1) if len(col_tiles) > 1
-                    else col_tiles[0]
-                )
-
-            return (
-                torch.cat(row_tiles, dim=2) if len(row_tiles) > 1
-                else row_tiles[0]
-            )
-
-    def load_arg(a):
-        return map_arg(a, lambda n: n.value if isinstance(n, Node) else n)
-
-    if tile_y != Y or tile_x != X or tile_c != C:
-        mod = Conv2dTiled(stride, padding, dilation, groups, bs)
-        kwargs = {k: v for k, v in node.kwargs.items() if v is not None}
-        kwargs.pop("block_size", None)
-        gm = export_model(mod, load_arg(node.args[:3]), load_arg(kwargs))
-
-        for n in list(gm.graph.nodes):
-            if is_prunable_op(n):
-                n.replace_all_uses_with(n.all_input_nodes[0])
-                gm.graph.erase_node(n)
-        gm.graph.lint()
-
-        value_remap = {}
-        output = replace_node_with_graph_module(model, gm, node, value_remap)
-
-        # Update metadata on new nodes in the graph
-        source_fn = node.meta['source_fn_stack'][-1]
-        for n in list(value_remap.values()):
-            if n.target in [
-                torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default,
-            ]:
-                n.meta["dtype"] = n.args[0].meta.get("dtype")
-
-            if n.target == node.target:
-                n.meta.update({
-                    "tiled_shapes": tiled_shapes.pop(0),
-                    "l2_tiling": tiling,
-                    "dtype": node.meta.get("dtype"),
-                    "source_fn_stack": [(n.name, source_fn[1])],
-                })
-
-        if output[0].target == torch.ops.aten.cat.default:
-            move_fusable_ops_after_conv2d(model, output[0])
+    if tile_c != C or is_conv1:
+        _decompose_conv2d_node(model, node, tile_sizes, tiled_shapes, tile_configs)
     else:
         node.meta["tiled_shapes"] = tiled_shapes[0]
-        node.meta["l2_tiling"] = tiling
+        node.meta["l2_tiling"] = (1, K // tile_k, Y // tile_y, X // tile_x)
+        node.meta["tile_strides"] = {
+            "input": (1, tile_c, tile_y * stride[0], tile_x * stride[1]),
+            "input_scale": (1, tile_c // bs, tile_y * stride[0], tile_x * stride[1]),
+        }
 
 
 def _prime_factors(n: int):
@@ -898,13 +933,14 @@ def calculate_conv2d_tile_size(
     N, K, Y, X = node.shape
     _, C, kH, kW = weight_node.shape
 
-    total_bytes = 0
-
     # Input memory: depends on receptive field for output tiles
     input_y = (Y // y_factor - 1) * stride[0] + (kH - 1) * dilation[0] + 1
     input_x = (X // x_factor - 1) * stride[1] + (kW - 1) * dilation[1] + 1
     input_size = 1 * (C // c_factor) * input_y * input_x
-    total_bytes += get_node_bytes(input_node) * input_size
+    total_bytes = get_node_bytes(input_node) * input_size
+
+    if bank_size is not None:
+        total_bytes = int(math.ceil(total_bytes / bank_size) * bank_size)
 
     # Weight memory
     weight_tiles = c_factor * k_factor

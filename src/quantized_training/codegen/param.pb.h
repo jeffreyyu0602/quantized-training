@@ -1624,13 +1624,14 @@ class Tensor final :
   enum : int {
     kShapeFieldNumber = 2,
     kTiledShapeFieldNumber = 5,
+    kTileStridesFieldNumber = 6,
     kNodeFieldNumber = 1,
     kDtypeFieldNumber = 3,
     kMemoryFieldNumber = 4,
-    kScratchpadFieldNumber = 6,
-    kDequantFieldNumber = 7,
-    kReshapeFieldNumber = 8,
-    kIsNoneFieldNumber = 9,
+    kScratchpadFieldNumber = 7,
+    kDequantFieldNumber = 8,
+    kReshapeFieldNumber = 9,
+    kIsNoneFieldNumber = 10,
   };
   // repeated int32 shape = 2;
   int shape_size() const;
@@ -1666,6 +1667,24 @@ class Tensor final :
   private:
   const ::google::protobuf::RepeatedField<::int32_t>& _internal_tiled_shape() const;
   ::google::protobuf::RepeatedField<::int32_t>* _internal_mutable_tiled_shape();
+
+  public:
+  // repeated int32 tile_strides = 6;
+  int tile_strides_size() const;
+  private:
+  int _internal_tile_strides_size() const;
+
+  public:
+  void clear_tile_strides() ;
+  ::int32_t tile_strides(int index) const;
+  void set_tile_strides(int index, ::int32_t value);
+  void add_tile_strides(::int32_t value);
+  const ::google::protobuf::RepeatedField<::int32_t>& tile_strides() const;
+  ::google::protobuf::RepeatedField<::int32_t>* mutable_tile_strides();
+
+  private:
+  const ::google::protobuf::RepeatedField<::int32_t>& _internal_tile_strides() const;
+  ::google::protobuf::RepeatedField<::int32_t>* _internal_mutable_tile_strides();
 
   public:
   // string node = 1;
@@ -1715,7 +1734,7 @@ class Tensor final :
   ::codegen::Memory* _internal_mutable_memory();
 
   public:
-  // optional .codegen.Memory scratchpad = 6;
+  // optional .codegen.Memory scratchpad = 7;
   bool has_scratchpad() const;
   void clear_scratchpad() ;
   const ::codegen::Memory& scratchpad() const;
@@ -1730,7 +1749,7 @@ class Tensor final :
   ::codegen::Memory* _internal_mutable_scratchpad();
 
   public:
-  // optional .codegen.OpOverload dequant = 7;
+  // optional .codegen.OpOverload dequant = 8;
   bool has_dequant() const;
   void clear_dequant() ;
   const ::codegen::OpOverload& dequant() const;
@@ -1745,7 +1764,7 @@ class Tensor final :
   ::codegen::OpOverload* _internal_mutable_dequant();
 
   public:
-  // optional .codegen.OpOverload reshape = 8;
+  // optional .codegen.OpOverload reshape = 9;
   bool has_reshape() const;
   void clear_reshape() ;
   const ::codegen::OpOverload& reshape() const;
@@ -1760,7 +1779,7 @@ class Tensor final :
   ::codegen::OpOverload* _internal_mutable_reshape();
 
   public:
-  // bool is_none = 9;
+  // bool is_none = 10;
   void clear_is_none() ;
   bool is_none() const;
   void set_is_none(bool value);
@@ -1776,7 +1795,7 @@ class Tensor final :
 
   friend class ::google::protobuf::internal::TcParser;
   static const ::google::protobuf::internal::TcParseTable<
-      4, 9, 4,
+      4, 10, 4,
       40, 2>
       _table_;
   friend class ::google::protobuf::MessageLite;
@@ -1799,6 +1818,8 @@ class Tensor final :
     mutable ::google::protobuf::internal::CachedSize _shape_cached_byte_size_;
     ::google::protobuf::RepeatedField<::int32_t> tiled_shape_;
     mutable ::google::protobuf::internal::CachedSize _tiled_shape_cached_byte_size_;
+    ::google::protobuf::RepeatedField<::int32_t> tile_strides_;
+    mutable ::google::protobuf::internal::CachedSize _tile_strides_cached_byte_size_;
     ::google::protobuf::internal::ArenaStringPtr node_;
     ::google::protobuf::internal::ArenaStringPtr dtype_;
     ::codegen::Memory* memory_;
@@ -3060,7 +3081,52 @@ inline ::google::protobuf::RepeatedField<::int32_t>* Tensor::_internal_mutable_t
   return &_impl_.tiled_shape_;
 }
 
-// optional .codegen.Memory scratchpad = 6;
+// repeated int32 tile_strides = 6;
+inline int Tensor::_internal_tile_strides_size() const {
+  return _internal_tile_strides().size();
+}
+inline int Tensor::tile_strides_size() const {
+  return _internal_tile_strides_size();
+}
+inline void Tensor::clear_tile_strides() {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _impl_.tile_strides_.Clear();
+}
+inline ::int32_t Tensor::tile_strides(int index) const {
+  // @@protoc_insertion_point(field_get:codegen.Tensor.tile_strides)
+  return _internal_tile_strides().Get(index);
+}
+inline void Tensor::set_tile_strides(int index, ::int32_t value) {
+  _internal_mutable_tile_strides()->Set(index, value);
+  // @@protoc_insertion_point(field_set:codegen.Tensor.tile_strides)
+}
+inline void Tensor::add_tile_strides(::int32_t value) {
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  _internal_mutable_tile_strides()->Add(value);
+  // @@protoc_insertion_point(field_add:codegen.Tensor.tile_strides)
+}
+inline const ::google::protobuf::RepeatedField<::int32_t>& Tensor::tile_strides() const
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_list:codegen.Tensor.tile_strides)
+  return _internal_tile_strides();
+}
+inline ::google::protobuf::RepeatedField<::int32_t>* Tensor::mutable_tile_strides()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_mutable_list:codegen.Tensor.tile_strides)
+  PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
+  return _internal_mutable_tile_strides();
+}
+inline const ::google::protobuf::RepeatedField<::int32_t>& Tensor::_internal_tile_strides()
+    const {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return _impl_.tile_strides_;
+}
+inline ::google::protobuf::RepeatedField<::int32_t>* Tensor::_internal_mutable_tile_strides() {
+  PROTOBUF_TSAN_READ(&_impl_._tsan_detect_race);
+  return &_impl_.tile_strides_;
+}
+
+// optional .codegen.Memory scratchpad = 7;
 inline bool Tensor::has_scratchpad() const {
   bool value = (_impl_._has_bits_[0] & 0x00000002u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.scratchpad_ != nullptr);
@@ -3156,7 +3222,7 @@ inline void Tensor::set_allocated_scratchpad(::codegen::Memory* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.scratchpad)
 }
 
-// optional .codegen.OpOverload dequant = 7;
+// optional .codegen.OpOverload dequant = 8;
 inline bool Tensor::has_dequant() const {
   bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.dequant_ != nullptr);
@@ -3252,7 +3318,7 @@ inline void Tensor::set_allocated_dequant(::codegen::OpOverload* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.dequant)
 }
 
-// optional .codegen.OpOverload reshape = 8;
+// optional .codegen.OpOverload reshape = 9;
 inline bool Tensor::has_reshape() const {
   bool value = (_impl_._has_bits_[0] & 0x00000008u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.reshape_ != nullptr);
@@ -3348,7 +3414,7 @@ inline void Tensor::set_allocated_reshape(::codegen::OpOverload* value) {
   // @@protoc_insertion_point(field_set_allocated:codegen.Tensor.reshape)
 }
 
-// bool is_none = 9;
+// bool is_none = 10;
 inline void Tensor::clear_is_none() {
   PROTOBUF_TSAN_WRITE(&_impl_._tsan_detect_race);
   _impl_.is_none_ = false;

@@ -21,10 +21,9 @@ from ..mapping_utils import (
     is_linear,
     is_matmul,
     is_nop,
-    is_pooling,
     is_reshape_op,
 )
-from ...pt2e_utils import deduplicate_nodes
+from ...pt2e_utils import deduplicate_nodes, fetch_attr
 from ...quantize_pt2e import create_getattr_from_value
 
 logger = logging.getLogger(__name__)
@@ -39,6 +38,7 @@ TRANSPOSED_OPERATORS = {
     torch.ops.aten.conv2d.default: torch.ops.quantized_ops.conv2d.default,
     torch.ops.aten.max_pool2d.default: torch.ops.quantized_ops.max_pool2d.default,
     torch.ops.aten.adaptive_avg_pool2d.default: torch.ops.quantized_ops.adaptive_avg_pool2d.default,
+    torch.ops.quantized_ops.conv2d_mx.default: torch.ops.quantized_ops.conv2d_mx.default,
 }
 
 AXES_ARG_INDEX_MAP = {
@@ -47,6 +47,10 @@ AXES_ARG_INDEX_MAP = {
     torch.ops.quantized_ops.quantize.default: 3,
     torch.ops.quantized_ops.quantize_mx.default: 2,
 }
+
+NCHW_TO_NHWC = (0, 2, 3, 1)
+NHWC_TO_NCHW = (0, 3, 1, 2)
+WEIGHT_NCHW_TO_HWIO = (2, 3, 1, 0)
 
 
 def conv2d_transposed(
@@ -79,8 +83,8 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
         node = stack.pop()
         if node in visited:
             continue
-        visited.add(node)
 
+        visited.add(node)
         nodes_in_graph.add(node)
 
         for user in list(node.users.keys()) + node.all_input_nodes:
@@ -99,11 +103,10 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
                 stack.append(user)
 
             if (
-                is_conv2d(user) or
-                is_pooling(user) or
-                is_elementwise_op(user) or
-                is_indexing_or_concatenation_op(user) or
-                user.target in [
+                user.target in TRANSPOSED_OPERATORS
+                or is_elementwise_op(user)
+                or is_indexing_or_concatenation_op(user)
+                or user.target in [
                     torch.ops.aten.pad.default,
                     torch.ops.quantized_ops.calculate_mx_qparam.default,
                     torch.ops.quantized_ops.quantize_mx.default,
@@ -112,8 +115,7 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
                 stack.append(user)
 
     order = {n: i for i, n in enumerate(model.graph.nodes)}
-    nodes_in_graph = sorted(nodes_in_graph, key=lambda n: order[n])
-    return nodes_in_graph
+    return sorted(nodes_in_graph, key=lambda n: order[n])
 
 
 def remap_pad_after_permute(
@@ -175,122 +177,109 @@ def _get_path_to_conv2d(node: torch.fx.Node):
 
 def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
-    visited: Set[Node] = set()
-    node_dim_order = {}
+    visited_nodes: Set[Node] = set()
 
     torch.nn.functional.conv2d = conv2d_transposed
 
     for node in list(graph.nodes):
-        if node in visited or not (is_conv2d(node) or is_pooling(node)):
+        if node in visited_nodes or node.target not in TRANSPOSED_OPERATORS:
             continue
 
-        conv2d_graph = extract_conv2d_graph(model, node, visited)
-        handled = []
+        # Extract the cluster of nodes that can share the NHWC layout
+        island_nodes = extract_conv2d_graph(model, node, visited_nodes)
+        island_set = set(island_nodes)
 
-        for node_to_treat in conv2d_graph:
-            for arg in node_to_treat.all_input_nodes:
-                if arg in conv2d_graph or arg in handled:
+        for node_to_treat in island_nodes:
+            # Inspect inputs to see if they come from outside the island (NCHW)
+            for input_node in list(node_to_treat.all_input_nodes):
+                if input_node in island_set or "dims" in input_node.meta:
                     continue
 
-                path = _get_path_to_conv2d(arg)
+                path = _get_path_to_conv2d(input_node)
 
-                # Permute weight and weight scale param
-                if arg.op == "get_attr" and path is not None:
-                    input_node = path[-2]
+                # Case A: Input is a weight (Parameter) or weight scale
+                if input_node.op == "get_attr" and path is not None:
                     conv2d_node = path[-1]
-
-                    # Skip depthwise conv weights
-                    if is_depthwise_conv(conv2d_node):
-                        continue
-
-                    if input_node in (
+                    if is_depthwise_conv(conv2d_node) or path[-2] not in (
                         conv2d_node.args[1], conv2d_node.kwargs.get("weight_scale")
                     ):
-                        logger.debug(f"Permuting parameter {arg}")
-                        param = get_parameter_or_buffer(model, arg.target)
-                        param.data = param.data.permute(2, 3, 1, 0)
-                        node_dim_order[arg] = (2, 3, 1, 0)
+                        continue
 
-                    handled.append(arg)
+                    logger.debug(f"Permuting parameter {input_node}")
+                    param = fetch_attr(model, input_node.target)
+                    param.data = param.data.permute(2, 3, 1, 0)
 
-                # Permute input tensor
-                if arg.op != "get_attr" and len(arg.shape) == 4:
-                    is_weight_node = path is not None and id(path[-2]) == id(path[-1].args[1])
-                    dims = (2, 3, 1, 0) if is_weight_node else (0, 2, 3, 1)
+                    input_node.meta["dims"] = WEIGHT_NCHW_TO_HWIO
 
-                    logger.debug(f"Insert permute after {arg} with dims {dims}")
-                    with graph.inserting_after(arg):
+                # Case B: Input is a node flow from outside the island
+                if input_node.op != "get_attr" and len(input_node.shape) == 4:
+                    is_weight_node = (
+                        path is not None and id(path[-2]) == id(path[-1].args[1])
+                    )
+                    dims = WEIGHT_NCHW_TO_HWIO if is_weight_node else NCHW_TO_NHWC
+
+                    logger.debug(f"Insert permute after {input_node} with dims {dims}")
+                    with graph.inserting_after(input_node):
                         permute_node = graph.call_function(
-                            torch.ops.aten.permute.default, (arg, dims),
+                            torch.ops.aten.permute.default, (input_node, dims),
                         )
-                    permute_node.meta["dtype"] = arg.meta.get("dtype")
-                    node_to_treat.replace_input_with(arg, permute_node)
-                    node_dim_order[permute_node] = dims
+
+                    permute_node.meta["dims"] = dims
+                    permute_node.meta["dtype"] = input_node.meta.get("dtype")
+
+                    for user in list(input_node.users.keys()):
+                        if user in island_set:
+                            user.replace_input_with(input_node, permute_node)
 
             for user in list(node_to_treat.users.keys()):
-                if user in conv2d_graph or user in handled:
+                if user in island_set or "dims" in user.meta:
                     continue
                 logger.debug(f"Insert permute before {user} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
-                        torch.ops.aten.permute.default, (node_to_treat, (0, 3, 1, 2)),
+                        torch.ops.aten.permute.default,
+                        (node_to_treat, NHWC_TO_NCHW),
                     )
                 permute_node.meta["dtype"] = node_to_treat.meta.get("dtype")
                 user.replace_input_with(node_to_treat, permute_node)
 
+            args = tuple(node_to_treat.args)
+            order = node_to_treat.all_input_nodes[0].meta.get("dims")
+            node_to_treat.meta["dims"] = order
+
             if node_to_treat.target == torch.ops.aten.pad.default:
                 pad = remap_pad_after_permute(
-                    node_to_treat.args[1],
-                    node_dim_order[node_to_treat.args[0]],
-                    node_to_treat.value.ndim,
+                    args[1], order, node_to_treat.value.ndim,
                 )
-                node_to_treat.args = (
-                    node_to_treat.args[0], pad, *node_to_treat.args[2:]
-                )
-
-            if node_to_treat.target in AXES_ARG_INDEX_MAP:
-                order = node_dim_order[node_to_treat.all_input_nodes[0]]
-                args = tuple(node_to_treat.args)
-                idx = AXES_ARG_INDEX_MAP[node_to_treat.target]
-                if idx < len(args) and args[idx] is not None:
-                    axes = [a + len(order) if a < 0 else a for a in args[idx]]
-                    axes = tuple(order.index(a) for a in axes)
-                    node_to_treat.args = args[:idx] + (axes,) + args[idx + 1:]
+                node_to_treat.args = args[:1] + (pad,) + args[2:]
 
             if is_indexing_or_concatenation_op(node_to_treat):
-                order = node_dim_order[node_to_treat.all_input_nodes[0]]
-                args = tuple(node_to_treat.args)
                 dim = get_arg_or_kwarg(node_to_treat, 1, "dim", 0)
-                dim = dim + len(order) if dim < 0 else dim
+                if dim < 0:
+                    dim = dim + len(order)
                 node_to_treat.args = args[:1] + (order.index(dim),) + args[2:]
 
             if is_reshape_op(node_to_treat):
-                order = node_dim_order[node_to_treat.all_input_nodes[0]]
-                args = tuple(node_to_treat.args)
                 if node_to_treat.target == torch.ops.aten.transpose.int:
                     dims = (args[1], args[2])
                 else:
                     dims = args[1]
                 dims = [d + max(order) + 1 if d < 0 else d for d in dims]
                 dims = tuple(order.index(d) for d in dims)
-                node_to_treat.args = args[:1] + (order.index(dims),) + args[2:]
+                node_to_treat.args = args[:1] + (dims,) + args[2:]
+
+            idx = AXES_ARG_INDEX_MAP.get(node_to_treat.target)
+            if idx is not None and idx < len(args) and args[idx] is not None:
+                axes = [a + len(order) if a < 0 else a for a in args[idx]]
+                axes = tuple(order.index(a) for a in axes)
+                node_to_treat.args = args[:idx] + (axes,) + args[idx + 1:]
 
             if node_to_treat.target in TRANSPOSED_OPERATORS:
-                with graph.inserting_before(node_to_treat):
-                    new_node = graph.call_function(
-                        TRANSPOSED_OPERATORS[node_to_treat.target],
-                        node_to_treat.args,
-                        node_to_treat.kwargs,
-                    )
-                logger.debug(f"Replace node {node_to_treat} with {new_node}")
-                new_node.meta = node_to_treat.meta
-                node_to_treat.replace_all_uses_with(new_node)
-                graph.erase_node(node_to_treat)
-                handled.append(new_node)
-                node_to_treat = new_node
-
-            if is_conv2d(node_to_treat):
+                node_to_treat.target = TRANSPOSED_OPERATORS[node_to_treat.target]
                 node_to_treat.meta["transposed"] = True
+
+            def permute(t, dims):
+                return tuple(t[i] for i in dims)
 
             tiled_shapes = node_to_treat.meta.get("tiled_shapes")
             if is_conv2d(node_to_treat) and tiled_shapes is not None:
@@ -298,25 +287,24 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     ("input", node_to_treat.args[0]),
                     ("weight", node_to_treat.args[1])
                 ]:
-                    order = node_dim_order[arg]
-                    tiled_shapes[key] = tuple(tiled_shapes[key][i] for i in order)
+                    order = arg.meta["dims"]
+                    tiled_shapes[key] = permute(tiled_shapes[key], order)
 
                     scale_key = f"{key}_scale"
                     if scale_key in tiled_shapes:
-                        tiled_shapes[scale_key] = tuple(
-                            tiled_shapes[scale_key][i] for i in order
+                        tiled_shapes[scale_key] = permute(
+                            tiled_shapes[scale_key], order
                         )
 
-                tiled_shapes["output"] = tuple(
-                    tiled_shapes["output"][i] for i in (0, 2, 3, 1)
-                )
+                tiled_shapes["output"] = permute(tiled_shapes["output"], NCHW_TO_NHWC)
 
                 tiling = node_to_treat.meta["l2_tiling"]
-                node_to_treat.meta["l2_tiling"] = (1, 1, 1, tiling[1])
+                node_to_treat.meta["l2_tiling"] = permute(tiling, NCHW_TO_NHWC)
 
-            node_dim_order[node_to_treat] = node_dim_order[
-                node_to_treat.all_input_nodes[0]
-            ]
+                if stride := node_to_treat.meta.get("tile_strides"):
+                    stride["input"] = permute(stride["input"], NCHW_TO_NHWC)
+                    stride["input_scale"] = permute(stride["input_scale"], NCHW_TO_NHWC)
+                    node_to_treat.meta["tile_strides"] = stride
 
     graph.lint()
     model.recompile()
@@ -798,13 +786,7 @@ def transpose_linear_weights(
                     tiled_shapes["weight_scale"] = (scale_shape[1], scale_shape[0])
 
             if node.target == torch.ops.aten.linear.default:
-                with model.graph.inserting_before(node):
-                    linear_transposed = model.graph.call_function(
-                        torch.ops.quantized_ops.linear.default, node.args
-                    )
-                node.replace_all_uses_with(linear_transposed)
-                model.graph.erase_node(node)
-                linear_transposed.meta = node.meta
+                node.target = torch.ops.quantized_ops.linear.default
 
         # Matmul is already transposed by default
         if is_matmul(node):
@@ -837,14 +819,7 @@ def transpose_linear_weights(
             node.meta["transposed"] = True
 
             if node.target == torch.ops.aten.matmul.default:
-                with model.graph.inserting_before(node):
-                    matmul_transposed = model.graph.call_function(
-                        torch.ops.quantized_ops.matmul.default,
-                        (input_node, weight_transposed),
-                    )
-                node.replace_all_uses_with(matmul_transposed)
-                model.graph.erase_node(node)
-                matmul_transposed.meta = node.meta
+                node.target = torch.ops.quantized_ops.matmul.default
             else:
                 node.args = (input_node, weight_transposed)
                 node.kwargs = {**node.kwargs, "weight_scale": scale_transposed}

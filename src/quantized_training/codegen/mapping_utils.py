@@ -82,6 +82,7 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
         raise TypeError(f"Expected node with value attribute, got {node!r}")
 
     tiled_shapes = node.meta.get("_tiled_shapes")
+    tile_strides = node.meta.get("_tile_strides")
     scratchpad_map = node.meta.get("_scratchpad_map")
 
     # Apply transformations
@@ -94,6 +95,8 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
 
     if tiled_shapes is not None and node in tiled_shapes:
         field.tiled_shape.extend(tiled_shapes[node])
+    if tile_strides is not None and node in tile_strides:
+        field.tile_strides.extend(tile_strides[node])
     if scratchpad_map is not None and node in scratchpad_map:
         _set_meminfo(field.scratchpad, scratchpad_map[node])
 
@@ -239,6 +242,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
     # Pass L2 tiling metadata to input nodes
     for n in node.all_input_nodes:
         n.meta["_tiled_shapes"] = node.meta.get("tiled_shapes")
+        n.meta["_tile_strides"] = node.meta.get("tile_strides")
         n.meta["_scratchpad_map"] = node.meta.get("scratchpad_map")
 
     # Convert positional arguments

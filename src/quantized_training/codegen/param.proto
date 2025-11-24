@@ -14,11 +14,12 @@ message Tensor {
   optional Memory memory = 4;      // Optional memory info
 
   repeated int32 tiled_shape = 5;
-  optional Memory scratchpad = 6;  // Optional scratchpad info
+  repeated int32 tile_strides = 6;
+  optional Memory scratchpad = 7;  // Optional scratchpad info
 
-  optional OpOverload dequant = 7; // Optional fused dequantization op
-  optional OpOverload reshape = 8; // Optional fused reshape/slicing op
-  bool is_none = 9;
+  optional OpOverload dequant = 8; // Optional fused dequantization op
+  optional OpOverload reshape = 9; // Optional fused reshape/slicing op
+  bool is_none = 10;
 }
 
 // Wrapper for repeated tensors (since `oneof` doesn't allow repeated fields)
