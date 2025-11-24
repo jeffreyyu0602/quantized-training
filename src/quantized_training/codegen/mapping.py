@@ -1171,14 +1171,71 @@ def get_reference_node(nodes):
     return first_node
 
 
+def _calculate_gemm_new_shapes(node, output_shape, tiling):
+    """Calculates specific shape layouts for GEMM (Conv2d or MatMul)."""
+    from .passes.tiling import construct_tiled_shape
+
+    bs = node.kwargs.get("block_size", 1)
+    transposed = node.meta.get("transposed", False)
+    effective_tiling = tiling
+
+    if is_conv2d(node):
+        N, tile_iy, tile_ix, tile_c = conv2d_layout(
+            node.args[0].shape, False, not transposed
+        )
+        kH, kW, _, _ = conv2d_layout(
+            node.args[1].shape, True, not transposed
+        )
+        _, _, _, tile_k = conv2d_layout(output_shape, False, not transposed)
+
+        new_shapes = {
+            "input": (N, tile_c, tile_iy, tile_ix),
+            "weight": (tile_k, tile_c, kH, kW),
+            "bias": (tile_k,),
+            "input_scale": (N, tile_c // bs, tile_iy, tile_ix),
+            "weight_scale": (tile_k, tile_c // bs, kH, kW),
+        }
+
+        new_shapes = {
+            k: conv2d_layout(v, "weight" in k, transposed) if k != "bias" else v
+            for k, v in new_shapes.items()
+        }
+    else:
+        x_tiled = math.prod(output_shape[:-1])
+        k_tiled = output_shape[-1]
+        c_tiled = node.args[0].value.shape[-1]
+
+        input_value = node.args[0].value
+        tiled_input_shape = construct_tiled_shape(
+            input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
+        )
+
+        weight_transposed = is_matmul(node) ^ transposed
+        weight_shape = (c_tiled, k_tiled) if weight_transposed else (k_tiled, c_tiled)
+        weight_scale_shape = (
+            (c_tiled // bs, k_tiled) if weight_transposed else (k_tiled, c_tiled // bs)
+        )
+
+        weight_key = "other" if is_matmul(node) else "weight"
+
+        new_shapes = {
+            "input": tiled_input_shape[:-1] + (c_tiled,),
+            weight_key: weight_shape,
+            "bias": (k_tiled,),
+            "input_scale": tiled_input_shape[:-1] + (c_tiled // bs,),
+            "weight_scale": weight_scale_shape,
+        }
+
+        # Tiling tuple adjustment for linear layers
+        effective_tiling = (math.prod(tiling[:-1]), tiling[-1])
+
+    return normalize_shape(node, new_shapes), effective_tiling
+
+
 def run_fused_op_l2_tiling(
     node, module, tiled_shapes, allocator, unroll_dims, align_banks=True,
 ):
-    from .passes.tiling import (
-        get_valid_tiling,
-        get_tiled_shape,
-        construct_tiled_shape,
-    )
+    from .passes.tiling import get_valid_tiling, get_tiled_shape
 
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
@@ -1227,10 +1284,8 @@ def run_fused_op_l2_tiling(
 
         # We are not doing tiling on Y, X and C dimensions for conv layers here
         if is_conv2d(first_node):
-            if transposed:
-                min_sizes = output_shape[:-1] + (unroll_dims[0],)
-            else:
-                min_sizes = (unroll_dims[0],) + output_shape[2:]
+            dim = 3 if transposed else 1
+            min_sizes = output_shape[:dim] + (unroll_dims[0],) + output_shape[dim + 1:]
         else:
             min_sizes = (unroll_dims[0],)
     elif isinstance(node.value, torch.Tensor):
@@ -1244,62 +1299,9 @@ def run_fused_op_l2_tiling(
         new_shapes = {}
 
         if is_gemm:
-            bs = first_node.kwargs.get("block_size", 1)
-            if is_conv2d(first_node):
-                N, tile_iy, tile_ix, tile_c = conv2d_layout(
-                    first_node.args[0].shape, False, not transposed
-                )
-                kH, kW, _, _ = conv2d_layout(
-                    first_node.args[1].shape, True, not transposed
-                )
-                _, _, _, tile_k = conv2d_layout(
-                    tiled_output_shape, False, not transposed
-                )
-
-                new_shapes = {
-                    "input": (N, tile_c, tile_iy, tile_ix),
-                    "weight": (tile_k, tile_c, kH, kW),
-                    "bias": (tile_k,),
-                    "input_scale": (N, tile_c // bs, tile_iy, tile_ix),
-                    "weight_scale": (tile_k, tile_c // bs, kH, kW),
-                }
-
-                new_shapes = {
-                    k: conv2d_layout(v, "weight" in k, transposed) if k != "bias" else v
-                    for k, v in new_shapes.items()
-                }
-            else:
-                x_tiled = math.prod(tiled_output_shape[:-1])
-                k_tiled = tiled_output_shape[-1]
-                c_tiled = first_node.args[0].value.shape[-1]
-
-                input_value = first_node.args[0].value
-                tiled_input_shape = construct_tiled_shape(
-                    input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
-                )
-
-                weight_transposed = is_matmul(first_node) ^ transposed
-                weight_shape = (
-                    (c_tiled, k_tiled) if weight_transposed else (k_tiled, c_tiled)
-                )
-                weight_scale_shape = (
-                    (c_tiled // bs, k_tiled) if weight_transposed
-                    else (k_tiled, c_tiled // bs)
-                )
-
-                weight_key = "other" if is_matmul(first_node) else "weight"
-
-                new_shapes = {
-                    "input": tiled_input_shape[:-1] + (c_tiled,),
-                    weight_key: weight_shape,
-                    "bias": (k_tiled,),
-                    "input_scale": tiled_input_shape[:-1] + (c_tiled // bs,),
-                    "weight_scale": weight_scale_shape,
-                }
-
-                tiling = (math.prod(tiling[:-1]), tiling[-1])
-
-            new_shapes = normalize_shape(first_node, new_shapes)
+            new_shapes, tiling = _calculate_gemm_new_shapes(
+                first_node, tiled_output_shape, tiling
+            )
 
         for n in node.all_input_nodes:
             if (
