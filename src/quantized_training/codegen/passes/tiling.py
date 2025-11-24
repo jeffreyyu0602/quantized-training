@@ -364,7 +364,7 @@ def _pad_input(model, node, arg, padding, pad_value):
             (arg, padding, "constant", pad_value),
         )
     propagate_shape(new_arg, model)
-    new_arg.meta["dtype"] = node.meta.get("dtype")
+    new_arg.meta["dtype"] = arg.meta.get("dtype")
     node.replace_input_with(arg, new_arg)
     return new_arg
 
