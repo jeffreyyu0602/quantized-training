@@ -431,11 +431,9 @@ def split_conv2d_node(model, node, tile_sizes):
 
         # Adjust receptive field to multiple of stride for depthwise conv
         if is_dwc:
-            rem = (y_in_end - y_in_start) % stride[0]
-            if rem:
+            if rem := (y_in_end - y_in_start) % stride[0]:
                 y_in_end += stride[0] - rem
-            rem = (x_in_end - x_in_start) % stride[1]
-            if rem:
+            if rem := (x_in_end - x_in_start) % stride[1]:
                 x_in_end += stride[1] - rem
 
         y_in_start_clamped = max(y_in_start, 0)
@@ -878,36 +876,37 @@ def select_gemm_tiling(node, X, C, K, cache_size, unroll_dims, bank_size=None):
         unroll_dims = (unroll_dims, unroll_dims)
 
     # Stage 1: pick a reduction dim that fits in a bank
-    c_outer = 1
+    c_tile = 1
     if bank_size is not None:
-        for (ct,), _ in get_valid_tiling((C,), min_sizes=(unroll_dims[0],)):
-            if min(128, X) * ct * get_node_bytes(node.args[0]) <= bank_size:
-                c_outer = C // ct
+        for (c,), (c_tile,) in get_valid_tiling(
+            (C,), min_sizes=(unroll_dims[0],)
+        ):
+            if min(128, X) * c * get_node_bytes(node.args[0]) <= bank_size:
                 break
 
     # Stage 2: search tilings for (X, C, K) in given order
-    for (xt, ct, kt), (x_factor, c_factor, k_factor) in get_valid_tiling(
-        (X, C // c_outer, K),
+    for tile_sizes, (x_factor, c_factor, k_factor) in get_valid_tiling(
+        (X, C // c_tile, K),
         min_sizes=(1, unroll_dims[0], unroll_dims[1]),
         order=(2, 0, 1),
     ):
         total_size = calculate_gemm_tile_size(
-            node, x_factor, c_outer * c_factor, k_factor, bank_size=bank_size
+            node, x_factor, c_tile * c_factor, k_factor, bank_size,
         )
         if total_size <= cache_size:
-            return xt, ct, kt
+            return tile_sizes
 
     # Stage 3: search tilings without bank constraint
-    for (xt, ct, kt), (x_factor, c_factor, k_factor) in get_valid_tiling(
-        (X, C // c_outer, K),
+    for tile_sizes, (x_factor, c_factor, k_factor) in get_valid_tiling(
+        (X, C // c_tile, K),
         min_sizes=(1, unroll_dims[0], unroll_dims[1]),
         order=(2, 0, 1),
     ):
         total_size = calculate_gemm_tile_size(
-            node, x_factor, c_outer * c_factor, k_factor, bank_size=None
+            node, x_factor, c_tile * c_factor, k_factor, bank_size=None
         )
         if total_size <= cache_size:
-            return xt, ct, kt
+            return tile_sizes
 
     # If no valid tiling found
     raise ValueError(
@@ -923,10 +922,10 @@ def calculate_conv2d_tile_size(
 
     Args:
         node: conv2d node
-        c_factor: tiling factor for input channels
-        k_factor: tiling factor for output channels
         y_factor: tiling factor for output height
         x_factor: tiling factor for output width
+        c_factor: tiling factor for input channels
+        k_factor: tiling factor for output channels
         bank_size: optional, round each memory block up to multiple of bank_size
     """
     stride = get_arg_or_kwarg(node, 3, "stride", (1, 1))
@@ -980,14 +979,15 @@ def calculate_conv2d_tile_size(
     return total_bytes
 
 
-def select_conv2d_tiling(node, Y, X, C, K, cache_size, unroll_dims, bank_size=None):
+def select_conv2d_tiling(
+    node, Y, X, C, K, cache_size, unroll_dims, bank_size=None
+):
     """
     Pick tiling for conv2d layers to fit in cache.
 
     Args:
         node: conv2d node
-        Y, X: output height, width
-        C, K: input/output channels
+        Y, X, C, K: conv2d dimensions
         cache_size: max allowed memory
         unroll_dims: (c_unroll, k_unroll)
         bank_size: optional bank constraint
@@ -995,60 +995,51 @@ def select_conv2d_tiling(node, Y, X, C, K, cache_size, unroll_dims, bank_size=No
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    # Heuristic: channel-dominant or spatial-dominant
-    if C * K > 4 * (Y * X):   # channels dominate
-        order = (2, 3, 0, 1)  # C, K, Y, X
-    else:
-        order = (3, 0, 1, 2)  # K, Y, X, C
-
-    # Stage 1: bank-size constraint on reduction dim
-    c_outer = 1
-    if bank_size is not None:
-        for (ct,), _ in get_valid_tiling((C,), min_sizes=(unroll_dims[0],)):
-            # TODO determine the minimum X and Y tile sizes
-            if min(14, X) * min(14, Y) * ct * get_node_bytes(node.args[0]) <= bank_size:
-                c_outer = C // ct
-                break
-
-    # Stage 2: exhaustive K first
-    k_outer = 1
-    for (yt, xt, ct, kt), (y_factor, x_factor, c_factor, k_factor) in get_valid_tiling(
-        (Y, X, C // c_outer, K),
+    # Stage 1: exhaustive K first
+    for tile_sizes, (_, _, _, k_tile) in get_valid_tiling(
+        (Y, X, C, K),
         min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
         order=(3,),
     ):
         total_size = calculate_conv2d_tile_size(
-            node, 1, c_outer, k_factor, 1, bank_size
+            node, 1, 1, 1, k_tile, bank_size,
         )
         if total_size <= cache_size:
-            return yt, xt, ct, kt
-        k_outer = K // kt
+            return tile_sizes
 
-    # Stage 3: greedy search with bank constraint
-    for (yt, xt, ct, kt), (y_factor, x_factor, c_factor, k_factor) in get_valid_tiling(
-        (Y, X, C // c_outer, K // k_outer),
+    # Stage 2: round robin on Y and X
+    for tile_sizes, (y_factor, x_factor, _, _) in get_valid_tiling(
+        (Y, X, C, K // k_tile),
         min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
-        order=order,
+        order=(0, 1),
         round_robin=True,
     ):
+        if tile_sizes[0] * tile_sizes[1] < unroll_dims[0]:
+            logger.warning(
+                f"Conv2D {node}: YxX tile {tile_sizes[0]}x{tile_sizes[1]} "
+                f"less than unroll {unroll_dims[0]}"
+            )
+            break
         total_size = calculate_conv2d_tile_size(
-            node, x_factor, c_outer * c_factor, k_outer * k_factor, y_factor, bank_size
+            node, y_factor, x_factor, 1, k_tile, bank_size,
         )
         if total_size <= cache_size:
-            return yt, xt, ct, kt
+            return tile_sizes
+
+    # Stage 3: tile C dimension
 
     # Stage 4: fallback without bank constraint
-    for (yt, xt, ct, kt), (y_factor, x_factor, c_factor, k_factor) in get_valid_tiling(
-        (Y, X, C // c_outer, K // k_outer),
+    for tile_sizes, (y_factor, x_factor, _, _) in get_valid_tiling(
+        (Y, X, C, K // k_tile),
         min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
-        order=order,
+        order=(0, 1),
         round_robin=True,
     ):
         total_size = calculate_conv2d_tile_size(
-            node, x_factor, c_outer * c_factor, k_outer * k_factor, y_factor
+            node, y_factor, x_factor, 1, k_tile, bank_size=None,
         )
         if total_size <= cache_size:
-            return yt, xt, ct, kt
+            return tile_sizes
 
     # If nothing found
     raise ValueError(
@@ -1308,9 +1299,7 @@ def run_vector_op_l2_tiling(
     graph = model.graph
 
     for node in list(graph.nodes):
-        run_vector_op_node_l2_tiling(
-            node, unroll, cache_size, num_banks
-        )
+        run_vector_op_node_l2_tiling(node, unroll, cache_size, num_banks)
 
     graph.lint()
     graph.eliminate_dead_code()
