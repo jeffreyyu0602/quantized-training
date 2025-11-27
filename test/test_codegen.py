@@ -5,6 +5,7 @@ import re
 import sys
 
 import torch
+import torch.nn as nn
 from datasets import load_dataset
 from torchvision import models, transforms
 from torch.ao.quantization.quantizer.utils import _annotate_output_qspec
@@ -489,6 +490,13 @@ if __name__ == "__main__":
             torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
             attn_implementation="eager", # turn off flash attention
         ).eval()
+
+        if args.remove_duplicate:
+            layers_to_keep = model.model.layers[:1]
+            model.model.layers = nn.ModuleList(layers_to_keep)
+
+            if hasattr(model, 'config'):
+                model.config.num_hidden_layers = len(model.model.layers)
 
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
 
