@@ -1325,10 +1325,11 @@ def run_fused_op_l2_tiling(
 
         if total_size <= allocator.total_memory:
             if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
-                assert len(orig_tiling) == len(tiling), (
-                    f"Original tiling {orig_tiling} and new tiling {tiling} "
-                    "have different ranks"
-                )
+                # Pad the shorter tiling with leading 1s to match lengths
+                if len(orig_tiling) > len(tiling):
+                    tiling = (1,) * (len(orig_tiling) - len(tiling)) + tiling
+                elif len(tiling) > len(orig_tiling):
+                    orig_tiling = (1,) * (len(tiling) - len(orig_tiling)) + orig_tiling
                 tiling = tuple(a * b for a, b in zip(orig_tiling, tiling))
 
             if math.prod(tiling) == 1:

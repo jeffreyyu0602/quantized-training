@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Tuple, Union, Optional, List
 
@@ -6,6 +7,8 @@ import torch.nn.functional as F
 from torch.library import Library, impl
 
 from .mx_utils import _reshape_to_blocks, _shared_exponents
+
+logger = logging.getLogger(__name__)
 
 
 # Note: decomposed means decomposed quantized tensor, using decomposed so that the
@@ -445,7 +448,7 @@ def quantize_mx(
     return scale, input
 
 
-def to_csr(tensor: torch.Tensor):
+def to_csr(tensor: torch.Tensor, max_nnz: int):
     assert not tensor.is_sparse, "Expected a dense tensor (not PyTorch's sparse format)"
 
     tensor = tensor.reshape(-1, tensor.shape[-1])
@@ -469,16 +472,28 @@ def to_csr(tensor: torch.Tensor):
     indices = torch.tensor(indices, dtype=torch.int32)
     indptr = torch.tensor(indptr, dtype=torch.int32)
 
-    return data, indices, indptr
+    actual_nnz = min(nnz, max_nnz)
+    data_padded = torch.zeros((max_nnz,), dtype=tensor.dtype)
+    indices_padded = torch.zeros((max_nnz,), dtype=torch.int32)
+
+    if nnz > max_nnz:
+        logger.warning(
+            f"Number of non-zero elements {nnz} exceeds max_nnz {max_nnz}, truncating."
+        )
+
+    data_padded[:actual_nnz] = data[:actual_nnz]
+    indices_padded[:actual_nnz] = indices[:actual_nnz]
+
+    return data_padded, indices_padded, indptr
 
 
 quantized_decomposed_lib.define(
-    "filter_outlier(Tensor input, float threshold=6.0) -> (Tensor, Tensor, Tensor, Tensor)"
+    "filter_outlier(Tensor input, float threshold, float max_pct=0.05) -> (Tensor, Tensor, Tensor, Tensor)"
 )
 
 
 @impl(quantized_decomposed_lib, "filter_outlier", "CompositeExplicitAutograd")
-def filter_outlier(input: torch.Tensor, threshold: float = 6.0) -> Tuple[torch.Tensor]:
+def filter_outlier(input: torch.Tensor, threshold: float, max_pct: float = 0.05) -> Tuple[torch.Tensor]:
     """Filter out outliers in the input tensor based on a threshold.
 
     Args:
@@ -491,7 +506,7 @@ def filter_outlier(input: torch.Tensor, threshold: float = 6.0) -> Tuple[torch.T
     is_outlier = torch.abs(input) > threshold
     inlier = torch.where(is_outlier, 0, input)
     outliers = torch.where(is_outlier, input, 0)
-    csr = to_csr(outliers)
+    csr = to_csr(outliers, max_nnz=int(input.numel() * max_pct))
     return inlier, *csr
 
 
