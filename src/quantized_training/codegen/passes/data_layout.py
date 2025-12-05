@@ -113,19 +113,19 @@ def extract_conv2d_graph(model: GraphModule, start: Node, visited: Set[Node]) ->
             ):
                 stack.append(user)
 
-    order = {n: i for i, n in enumerate(model.graph.nodes)}
-    return sorted(nodes_in_graph, key=lambda n: order[n])
+    node_position = {n: i for i, n in enumerate(model.graph.nodes)}
+    return sorted(nodes_in_graph, key=lambda n: node_position[n])
 
 
 def remap_pad_after_permute(
-    pad: Tuple[int, ...], order: Tuple[int, ...], ndim: int
+    pad: Tuple[int, ...], dims: Tuple[int, ...], ndim: int
 ) -> Tuple[int, ...]:
     """
     Remap padding after permuting a tensor.
 
     Args:
         pad: Original pad tuple as in torch.nn.functional.pad (starts from last dim).
-        order: Permutation order of dimensions.
+        dims: Permutation dimensions.
         ndim: Number of dimensions in the original tensor.
 
     Returns:
@@ -138,7 +138,7 @@ def remap_pad_after_permute(
     # original padded dims (from last to first)
     original_padded_dims = list(range(ndim - k, ndim))
 
-    dim_to_new_index = {d: order.index(d) for d in range(ndim)}
+    dim_to_new_index = {d: dims.index(d) for d in range(ndim)}
 
     new_pad_pairs = {i: (0, 0) for i in range(ndim)}
 
@@ -174,6 +174,83 @@ def _get_path_to_conv2d(node: torch.fx.Node):
     return None
 
 
+def _process_conv2d_input_nodes(
+    node: Node, model: GraphModule, island_set: Set[Node]
+):
+    graph = model.graph
+    path = _get_path_to_conv2d(node)
+
+    # Case A: Input is a weight (Parameter) or weight scale
+    if node.op == "get_attr" and path is not None:
+        conv2d_node = path[-1]
+        if is_depthwise_conv(conv2d_node) or path[-2] not in (
+            conv2d_node.args[1], conv2d_node.kwargs.get("weight_scale")
+        ):
+            return
+
+        logger.debug(f"Permuting parameter {node}")
+        param = fetch_attr(model, node.target)
+        param.data = param.data.permute(2, 3, 1, 0)
+
+        node.meta["dims"] = WEIGHT_NCHW_TO_HWIO
+
+    # Case B: Input is a node flow from outside the island
+    if node.op != "get_attr" and len(node.shape) == 4:
+        is_weight_node = (
+            path is not None and id(path[-2]) == id(path[-1].args[1])
+        )
+        dims = WEIGHT_NCHW_TO_HWIO if is_weight_node else NCHW_TO_NHWC
+
+        logger.debug(f"Insert permute after {node} with dims {dims}")
+        with graph.inserting_after(node):
+            permute_node = graph.call_function(
+                torch.ops.aten.permute.default, (node, dims),
+            )
+
+        permute_node.meta["dims"] = dims
+        permute_node.meta["dtype"] = node.meta.get("dtype")
+
+        for user in list(node.users.keys()):
+            if user in island_set:
+                user.replace_input_with(node, permute_node)
+
+
+def _rewrite_node_args_for_layout(node: Node) -> None:
+    input_dims = node.all_input_nodes[0].meta.get("dims")
+    node.meta["dims"] = input_dims
+
+    args = tuple(node.args)
+
+    if node.target == torch.ops.aten.pad.default:
+        pad = remap_pad_after_permute(args[1], input_dims, node.value.ndim)
+        node.args = args[:1] + (pad,) + args[2:]
+
+    if is_indexing_or_concatenation_op(node):
+        dim = get_arg_or_kwarg(node, 1, "dim", 0)
+        if dim < 0:
+            dim = dim + len(input_dims)
+        node.args = args[:1] + (input_dims.index(dim),) + args[2:]
+
+    if is_reshape_op(node):
+        if node.target == torch.ops.aten.transpose.int:
+            dims = (args[1], args[2])
+        else:
+            dims = args[1]
+        dims = [d + max(input_dims) + 1 if d < 0 else d for d in dims]
+        dims = tuple(input_dims.index(d) for d in dims)
+        node.args = args[:1] + (dims,) + args[2:]
+
+    idx = AXES_ARG_INDEX_MAP.get(node.target)
+    if idx is not None and idx < len(args) and args[idx] is not None:
+        axes = [a + len(input_dims) if a < 0 else a for a in args[idx]]
+        axes = tuple(input_dims.index(a) for a in axes)
+        node.args = args[:idx] + (axes,) + args[idx + 1:]
+
+    if node.target in TRANSPOSED_OPERATORS:
+        node.target = TRANSPOSED_OPERATORS[node.target]
+        node.meta["transposed"] = True
+
+
 def transpose_conv2d_inputs_and_weights(model: GraphModule):
     graph = model.graph
     visited_nodes: Set[Node] = set()
@@ -194,45 +271,12 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 if input_node in island_set or "dims" in input_node.meta:
                     continue
 
-                path = _get_path_to_conv2d(input_node)
-
-                # Case A: Input is a weight (Parameter) or weight scale
-                if input_node.op == "get_attr" and path is not None:
-                    conv2d_node = path[-1]
-                    if is_depthwise_conv(conv2d_node) or path[-2] not in (
-                        conv2d_node.args[1], conv2d_node.kwargs.get("weight_scale")
-                    ):
-                        continue
-
-                    logger.debug(f"Permuting parameter {input_node}")
-                    param = fetch_attr(model, input_node.target)
-                    param.data = param.data.permute(2, 3, 1, 0)
-
-                    input_node.meta["dims"] = WEIGHT_NCHW_TO_HWIO
-
-                # Case B: Input is a node flow from outside the island
-                if input_node.op != "get_attr" and len(input_node.shape) == 4:
-                    is_weight_node = (
-                        path is not None and id(path[-2]) == id(path[-1].args[1])
-                    )
-                    dims = WEIGHT_NCHW_TO_HWIO if is_weight_node else NCHW_TO_NHWC
-
-                    logger.debug(f"Insert permute after {input_node} with dims {dims}")
-                    with graph.inserting_after(input_node):
-                        permute_node = graph.call_function(
-                            torch.ops.aten.permute.default, (input_node, dims),
-                        )
-
-                    permute_node.meta["dims"] = dims
-                    permute_node.meta["dtype"] = input_node.meta.get("dtype")
-
-                    for user in list(input_node.users.keys()):
-                        if user in island_set:
-                            user.replace_input_with(input_node, permute_node)
+                _process_conv2d_input_nodes(input_node, model, island_set)
 
             for user in list(node_to_treat.users.keys()):
                 if user in island_set or "dims" in user.meta:
                     continue
+
                 logger.debug(f"Insert permute before {user} with dims (0, 3, 1, 2)")
                 with graph.inserting_before(user):
                     permute_node = graph.call_function(
@@ -242,40 +286,7 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                 permute_node.meta["dtype"] = node_to_treat.meta.get("dtype")
                 user.replace_input_with(node_to_treat, permute_node)
 
-            args = tuple(node_to_treat.args)
-            order = node_to_treat.all_input_nodes[0].meta.get("dims")
-            node_to_treat.meta["dims"] = order
-
-            if node_to_treat.target == torch.ops.aten.pad.default:
-                pad = remap_pad_after_permute(
-                    args[1], order, node_to_treat.value.ndim,
-                )
-                node_to_treat.args = args[:1] + (pad,) + args[2:]
-
-            if is_indexing_or_concatenation_op(node_to_treat):
-                dim = get_arg_or_kwarg(node_to_treat, 1, "dim", 0)
-                if dim < 0:
-                    dim = dim + len(order)
-                node_to_treat.args = args[:1] + (order.index(dim),) + args[2:]
-
-            if is_reshape_op(node_to_treat):
-                if node_to_treat.target == torch.ops.aten.transpose.int:
-                    dims = (args[1], args[2])
-                else:
-                    dims = args[1]
-                dims = [d + max(order) + 1 if d < 0 else d for d in dims]
-                dims = tuple(order.index(d) for d in dims)
-                node_to_treat.args = args[:1] + (dims,) + args[2:]
-
-            idx = AXES_ARG_INDEX_MAP.get(node_to_treat.target)
-            if idx is not None and idx < len(args) and args[idx] is not None:
-                axes = [a + len(order) if a < 0 else a for a in args[idx]]
-                axes = tuple(order.index(a) for a in axes)
-                node_to_treat.args = args[:idx] + (axes,) + args[idx + 1:]
-
-            if node_to_treat.target in TRANSPOSED_OPERATORS:
-                node_to_treat.target = TRANSPOSED_OPERATORS[node_to_treat.target]
-                node_to_treat.meta["transposed"] = True
+            _rewrite_node_args_for_layout(node_to_treat)
 
             def permute(t, dims):
                 return tuple(t[i] for i in dims)
@@ -286,13 +297,13 @@ def transpose_conv2d_inputs_and_weights(model: GraphModule):
                     ("input", node_to_treat.args[0]),
                     ("weight", node_to_treat.args[1])
                 ]:
-                    order = arg.meta["dims"]
-                    tiled_shapes[key] = permute(tiled_shapes[key], order)
+                    input_dims = arg.meta["dims"]
+                    tiled_shapes[key] = permute(tiled_shapes[key], input_dims)
 
                     scale_key = f"{key}_scale"
                     if scale_key in tiled_shapes:
                         tiled_shapes[scale_key] = permute(
-                            tiled_shapes[scale_key], order
+                            tiled_shapes[scale_key], input_dims
                         )
 
                 tiled_shapes["output"] = permute(tiled_shapes["output"], NCHW_TO_NHWC)
