@@ -144,13 +144,13 @@ quantized_decomposed_lib.define("vmap(Tensor self, Tensor other) -> Tensor")
 
 
 @impl(quantized_decomposed_lib, "vmap", "CompositeExplicitAutograd")
-def vmap(input: torch.Tensor, qmap: torch.Tensor, chunk_size=65536) -> torch.Tensor:
-    if input.dtype == torch.bfloat16:
-        indices = input.view(torch.int16).to(torch.int32) & 0xffff
-    else:
-        raw_bits = input.to(torch.float32).view(torch.int32)
-        indices = (raw_bits >> 16) & 0xffff
-        indices = indices | ((raw_bits & 0xffff) != 0).to(indices.dtype)
+def vmap(input: torch.Tensor, qmap: torch.Tensor, chunk_size=1024*1024) -> torch.Tensor:
+    input_dtype = input.dtype
+
+    if input.dtype != torch.bfloat16:
+        input = input.to(torch.bfloat16)
+
+    indices = input.view(torch.int16)
 
     output = torch.empty_like(input, memory_format=torch.contiguous_format)
     indices_flat = indices.reshape(-1)
@@ -158,9 +158,10 @@ def vmap(input: torch.Tensor, qmap: torch.Tensor, chunk_size=65536) -> torch.Ten
 
     for start in range(0, indices_flat.numel(), chunk_size):
         end = min(start + chunk_size, indices_flat.numel())
-        output_flat[start:end] = qmap[indices_flat[start:end]]
+        indices_chunk = indices_flat[start:end].to(torch.int32) & 0xffff
+        output_flat[start:end] = qmap[indices_chunk]
 
-    return output
+    return output.to(input_dtype)
 
 
 quantized_decomposed_lib.define(
@@ -304,7 +305,8 @@ def conv2d_mx(
 quantized_decomposed_lib.define(
     "linear_mx(Tensor input, Tensor weight, Tensor? bias=None, *, Tensor? input_scale=None, "
     "Tensor? weight_scale=None, int? block_size=None, Tensor? input_code=None, "
-    "Tensor? weight_code=None) -> Tensor"
+    "Tensor? weight_code=None, Tensor? A_data=None, Tensor? A_indices=None, Tensor? A_indptr=None, "
+    "bool weight_transposed=False) -> Tensor"
 )
 
 
@@ -319,6 +321,10 @@ def linear_mx(
     block_size: Optional[int] = None,
     input_code: Optional[torch.Tensor] = None,
     weight_code: Optional[torch.Tensor] = None,
+    A_data: Optional[torch.Tensor] = None,
+    A_indices: Optional[torch.Tensor] = None,
+    A_indptr: Optional[torch.Tensor] = None,
+    weight_transposed=False
 ) -> torch.Tensor:
     if input_code is not None:
         input = input_code[input.to(torch.long)].to(input.dtype)
@@ -330,7 +336,43 @@ def linear_mx(
     if weight_scale is not None:
         weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    return F.linear(input, weight, bias)
+    dense_out = F.linear(input, weight, bias)
+
+    if A_data is not None:
+        spmm_out = torch.ops.quantized_ops.spmm_csr(
+            A_data,
+            A_indices,
+            A_indptr,
+            weight,
+            weight_scale,
+            weight_code,
+            block_size,
+            weight_transposed,
+        )
+        return dense_out + spmm_out
+
+    return dense_out
+
+
+@torch.library.register_fake("quantized_ops::linear_mx")
+def _(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None,
+    *,
+    input_scale: Optional[torch.Tensor] = None,
+    weight_scale: Optional[torch.Tensor] = None,
+    block_size: Optional[int] = None,
+    input_code: Optional[torch.Tensor] = None,
+    weight_code: Optional[torch.Tensor] = None,
+    A_data: Optional[torch.Tensor] = None,
+    A_indices: Optional[torch.Tensor] = None,
+    A_indptr: Optional[torch.Tensor] = None,
+    weight_transposed=False
+):
+    output_shape = list(input.shape)
+    output_shape[-1] = weight.shape[0]
+    return input.new_empty(output_shape)
 
 
 quantized_decomposed_lib.define(
@@ -469,12 +511,12 @@ def to_csr(tensor: torch.Tensor, max_nnz: int):
         indptr.append(nnz)
 
     data = torch.tensor(data, dtype=tensor.dtype)
-    indices = torch.tensor(indices, dtype=torch.int32)
-    indptr = torch.tensor(indptr, dtype=torch.int32)
+    indices = torch.tensor(indices, dtype=torch.int16)
+    indptr = torch.tensor(indptr, dtype=torch.int16)
 
     actual_nnz = min(nnz, max_nnz)
     data_padded = torch.zeros((max_nnz,), dtype=tensor.dtype)
-    indices_padded = torch.zeros((max_nnz,), dtype=torch.int32)
+    indices_padded = torch.full((max_nnz,), fill_value=-1, dtype=torch.int16)
 
     if nnz > max_nnz:
         logger.warning(
@@ -508,6 +550,120 @@ def filter_outlier(input: torch.Tensor, threshold: float, max_pct: float = 0.05)
     outliers = torch.where(is_outlier, input, 0)
     csr = to_csr(outliers, max_nnz=int(input.numel() * max_pct))
     return inlier, *csr
+
+
+quantized_decomposed_lib.define(
+    "quantize_mx_outlier(Tensor self, Tensor qmap, SymInt[] axes, int block_size, "
+    "float quant_max, bool force_scale_power_of_two=False, Tensor scale_qmap=None, "
+    "Tensor output_code=None, float? threshold=None, float max_pct=0.01) -> (Tensor, Tensor, Tensor, Tensor, Tensor)"
+)
+
+
+@impl(quantized_decomposed_lib, "quantize_mx_outlier", "CompositeExplicitAutograd")
+def quantize_mx_outlier(
+    input: torch.Tensor,
+    qmap: torch.Tensor,
+    axes: Tuple[int],
+    block_size: int,
+    quant_max: float,
+    force_scale_power_of_two: bool = False,
+    scale_qmap: Optional[torch.Tensor] = None,
+    output_code: Optional[torch.Tensor] = None,
+    threshold: Optional[float] = None,
+    max_pct: float = 0.01
+) -> Tuple[torch.Tensor]:
+    inliers, data, indices, indptr = filter_outlier(input, threshold, max_pct)
+
+    scale = calculate_mx_qparam(
+        inliers,
+        axes=axes,
+        block_size=block_size,
+        quant_max=quant_max,
+        force_scale_power_of_two=force_scale_power_of_two,
+        scale_qmap=scale_qmap,
+    )
+    inliers = quantize(inliers, scale, None, axes, block_size, qmap)
+
+    return scale, inliers, data, indices, indptr
+
+
+quantized_decomposed_lib.define(
+    "slice_csr_matrix(Tensor data, Tensor indices, Tensor indptr, int start, int end, "
+    "int dim=0) -> (Tensor, Tensor, Tensor)"
+)
+
+
+@impl(quantized_decomposed_lib, "slice_csr_matrix", "CompositeExplicitAutograd")
+def slice_csr_matrix(
+    data: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    start: int,
+    end: int,
+    dim: int = 0
+) -> Tuple[torch.Tensor]:
+    if dim == 0 or dim == -2:
+        start_idx = indptr[start].item()
+        end_idx = indptr[end].item()
+
+        new_indptr = indptr[start:end + 1] - start_idx
+        data_padded = torch.zeros_like(data)
+        indices_padded = torch.full_like(indices, -1)
+
+        nnz = end_idx - start_idx
+        data_padded[:nnz] = data[start_idx:end_idx]
+        indices_padded[:nnz] = indices[start_idx:end_idx]
+
+        return data_padded, indices_padded, new_indptr
+
+    if dim == 1 or dim == -1:
+        mask = (indices >= start) & (indices < end)
+
+        n_rows = indptr.numel() - 1
+        row_lengths = (indptr[1:] - indptr[:-1]).to(torch.int64)
+
+        row_ids = torch.repeat_interleave(
+            torch.arange(n_rows, device=indptr.device),
+            row_lengths
+        )
+
+        old_nnz = indptr[-1].to(torch.int64)
+        mask_nnz = mask[:old_nnz]
+
+        masked_row_ids = row_ids[mask_nnz]
+        counts = torch.bincount(masked_row_ids, minlength=n_rows)
+
+        new_indptr = torch.empty_like(indptr)
+        new_indptr[0] = 0
+        new_indptr[1:] = counts.cumsum(0).to(indptr.dtype)
+
+        data_padded = torch.zeros_like(data)
+        indices_padded = torch.full_like(indices, -1)
+
+        new_nnz = mask_nnz.sum().item()
+        data_padded[:new_nnz] = data[mask]
+        indices_padded[:new_nnz] = indices[mask] - start
+
+        return data_padded, indices_padded, new_indptr
+
+    raise ValueError("dim must be 0 or 1 (or -2 or -1)")
+
+
+@torch.library.register_fake("quantized_ops::slice_csr_matrix")
+def _(
+    data: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    start: int,
+    end: int,
+    dim: int = 0
+):
+    fake_data = torch.empty_like(data)
+    fake_indices = torch.empty_like(indices)
+    fake_indptr = torch.empty_like(indptr)
+    if dim == 0 or dim == -2:
+        return fake_data, fake_indices, fake_indptr[start:end + 1]
+    return fake_data, fake_indices, fake_indptr
 
 
 quantized_decomposed_lib.define(
@@ -559,3 +715,19 @@ def spmm_csr(
             Y[row] += data[i] * B[:,col]
 
     return Y
+
+
+@torch.library.register_fake("quantized_ops::spmm_csr")
+def _(
+    data: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    B: torch.Tensor,
+    B_scale: Optional[torch.Tensor] = None,
+    B_code: Optional[torch.Tensor] = None,
+    block_size: Optional[int] = None,
+    weight_transposed=False
+):
+    M = indptr.numel() - 1
+    K = B.shape[1] if weight_transposed else B.shape[0]
+    return data.new_empty((M, K))

@@ -2,12 +2,13 @@ import copy
 import logging
 import math
 import re
-from typing import Optional
+from typing import List, Tuple, Generator, Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch.fx import Node
 from torch.fx.node import map_arg
+from torch.fx.operator_schemas import normalize_function
 
 from .utils import get_arg_or_kwarg, _pair
 from ..mapping import (
@@ -21,11 +22,11 @@ from ..mapping_utils import (
     is_conv2d,
     is_depthwise_conv,
     is_elementwise_op,
-    is_gemm_op,
     is_linear,
     is_matmul,
     is_prunable_op,
 )
+from ..banking import get_banking_strategies_for_op, _get_scope
 from ...pt2e_utils import fetch_attr
 from ...quantize_pt2e import create_getattr_from_value, export_model
 
@@ -40,24 +41,96 @@ __all__ = [
 DEFAULT_CACHE_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 
-def create_new_chain(model, node_to_fuse, cat_node, fusable):
-    conv_node = node_to_fuse if is_conv2d(node_to_fuse) else node_to_fuse.args[1]
+def _get_tiling_context(node_to_fuse: torch.fx.Node) -> List[Tuple[int, int, int]]:
+    """
+    Backtracks from node_to_fuse to find slice/pad ops and calculates
+    the equivalent output slice parameters.
+    """
+    conv_node = node_to_fuse
+    if not is_conv2d(conv_node) and len(conv_node.args) > 1:
+         # Fallback for patterns like relu(conv) or add(conv, bias)
+         # Assuming conv is the second arg based on original logic, but safer to check
+         potential_conv = conv_node.args[1]
+         if isinstance(potential_conv, torch.fx.Node) and is_conv2d(potential_conv):
+             conv_node = potential_conv
+
+    if "tiled_shapes" not in conv_node.meta:
+        return []
+
     input_shape = conv_node.meta["tiled_shapes"]["input"]
     output_shape = conv_node.meta["tiled_shapes"]["output"]
 
     slice_args = []
-    input_nodes = conv_node.args[0]
-    while input_nodes.target in [
+
+    # Traverse backwards to find slicing details
+    current_node = conv_node.args[0]
+    while isinstance(current_node, torch.fx.Node) and current_node.target in [
         torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default
     ]:
-        if input_nodes.target == torch.ops.aten.slice.Tensor:
-            dim, start, end = input_nodes.args[1:]
+        if current_node.target == torch.ops.aten.slice.Tensor:
+            dim, start, end = current_node.args[1:]
+            # Ensure we only calculate slices for spatial dims (H=2, W=3)
             if dim in (2, 3):
+                # Calculate tile index relative to the *tile shape* or *full shape*
                 tile_idx = round(float(start) / input_shape[dim])
                 tile_start = tile_idx * output_shape[dim]
                 tile_end = tile_start + output_shape[dim]
                 slice_args.insert(0, (dim, tile_start, tile_end))
-        input_nodes = input_nodes.args[0]
+
+        current_node = current_node.args[0]
+
+    return slice_args
+
+
+def _clone_parameter(
+    model: torch.fx.GraphModule, arg: torch.fx.Node, anchor: torch.fx.Node
+) -> torch.fx.Node:
+    """Creates a new get_attr node for a parameter."""
+    param = fetch_attr(model, arg.target)
+    prefix = arg.name
+
+    if match := re.fullmatch(r'(code|qmap)(_\d+)?', arg.name):
+        prefix = match.group(1)
+
+    with model.graph.inserting_before(anchor):
+        new_attr = create_getattr_from_value(model, model.graph, prefix, param)
+
+    propagate_shape(new_attr, model)
+    new_attr.meta["dtype"] = arg.meta.get("dtype")
+    return new_attr
+
+
+def _slice_side_input(
+    model: torch.fx.GraphModule,
+    arg: torch.fx.Node,
+    slice_args: List[Tuple[int, int, int]],
+    anchor: torch.fx.Node,
+) -> torch.fx.Node:
+    """Slices a side input (e.g. residual connection) to match the current tile."""
+    current_slice_node = arg
+
+    # Optimization: If the side input is not spatial (e.g. 1D bias), do not slice.
+    if len(arg.shape) < 4:
+        return arg
+
+    for dim, start, end in slice_args:
+        with model.graph.inserting_before(anchor):
+            current_slice_node = model.graph.call_function(
+                torch.ops.aten.slice.Tensor,
+                (current_slice_node, dim, start, end),
+            )
+        propagate_shape(current_slice_node, model)
+        current_slice_node.meta["dtype"] = arg.meta.get("dtype")
+
+    return current_slice_node
+
+
+def create_new_chain(model, node_to_fuse, cat_node, fusable):
+    """
+    Replicates the 'fusable' chain of nodes (originally after 'cat_node')
+    to be placed after 'node_to_fuse', applying appropriate spatial tiling.
+    """
+    slice_params = _get_tiling_context(node_to_fuse)
 
     anchor = node_to_fuse.next
     value_remap = {cat_node: node_to_fuse}
@@ -68,29 +141,11 @@ def create_new_chain(model, node_to_fuse, cat_node, fusable):
                 continue
 
             if arg.op == "get_attr":
-                param = fetch_attr(model, arg.target)
-                prefix = arg.name
-                if match := re.fullmatch(r'(code|qmap)(_\d+)?', arg.name):
-                    prefix = match.group(1)
-                with model.graph.inserting_before(anchor):
-                    get_attr = create_getattr_from_value(
-                        model, model.graph, prefix, param
-                    )
-                propagate_shape(get_attr, model)
-                get_attr.meta["dtype"] = arg.meta.get("dtype")
-                value_remap[arg] = get_attr
-                continue
-
-            slice_node = arg
-            for dim, start, end in slice_args:
-                with model.graph.inserting_before(node_to_fuse):
-                    slice_node = model.graph.call_function(
-                        torch.ops.aten.slice.Tensor,
-                        (slice_node, dim, start, end),
-                    )
-                propagate_shape(slice_node, model)
-                slice_node.meta["dtype"] = arg.meta.get("dtype")
-            value_remap[arg] = slice_node
+                value_remap[arg] = _clone_parameter(model, arg, anchor)
+            else:
+                value_remap[arg] = _slice_side_input(
+                    model, arg, slice_params, node_to_fuse
+                )
 
         with model.graph.inserting_before(anchor):
             new_node = model.graph.node_copy(
@@ -98,15 +153,20 @@ def create_new_chain(model, node_to_fuse, cat_node, fusable):
             )
         propagate_shape(new_node, model)
         new_node.meta["dtype"] = n.meta.get("dtype")
+
         if (source_fn_st := n.meta.get("source_fn_stack")) is not None:
             new_node.meta["source_fn_stack"] = [
                 (new_node.name, source_fn_st[0][1])
             ]
         value_remap[n] = new_node
 
+    # Reconnect users of the original node to the end of the new chain
+    last_node = value_remap[fusable[-1]]
+    first_node = value_remap[fusable[0]]
+
     for user in list(node_to_fuse.users):
-        if user != value_remap[fusable[0]]:
-            user.replace_input_with(node_to_fuse, value_remap[fusable[-1]])
+        if user != first_node:
+            user.replace_input_with(node_to_fuse, last_node)
 
 
 def move_fusable_ops_after_conv2d(model, node):
@@ -162,7 +222,7 @@ def _make_conv2d_tiled_module(
     Factory function to create a Conv2dTiled module class with captured parameters.
     """
     class Conv2dTiled(torch.nn.Module):
-        def __init__(self, stride=1, padding=0, dilation=1, groups=1, block_size=1):
+        def __init__(self, stride=1, padding=0, dilation=1, groups=1, block_size=16):
             super().__init__()
             self.stride = _pair(stride)
             self.padding = _pair(padding)
@@ -337,9 +397,21 @@ def _decompose_conv2d_node(model, node, tile_sizes, tiled_shapes, configs):
     value_remap = {}
     output = replace_node_with_graph_module(model, gm, node, value_remap)
 
+    if (source_fn_st := node.meta.get("source_fn_stack")) is not None:
+        source_fn = source_fn_st[-1][1]
+    else:
+        source_fn = node.target
+
     # Update metadata on new nodes in the graph
-    source_fn = node.meta['source_fn_stack'][-1]
     for n in list(value_remap.values()):
+        if n.target == torch.ops.aten.slice.Tensor and n.args[0].op == "get_attr":
+            c_start, c_end = n.args[2], n.args[3]
+            with model.graph.inserting_before(n):
+                sliced_param = _slice_tensor(n.args[0], 1, c_start, c_end, model)
+            n.replace_all_uses_with(sliced_param)
+            model.graph.erase_node(n)
+            continue
+
         if n.target in [
             torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default,
         ]:
@@ -350,7 +422,7 @@ def _decompose_conv2d_node(model, node, tile_sizes, tiled_shapes, configs):
                 "tiled_shapes": tiled_shapes.pop(0),
                 "l2_tiling": (1, K // tile_k, 1, 1),
                 "dtype": node.meta.get("dtype"),
-                "source_fn_stack": [(n.name, source_fn[1])],
+                "source_fn_stack": [(n.name, source_fn)],
             })
 
     if output[0].target == torch.ops.aten.cat.default:
@@ -599,7 +671,7 @@ def construct_tiled_shape(full_shape, tiled_dim: int, dims):
     return tuple(out)
 
 
-def slice_tensor(node, dim, start, end, model):
+def _slice_tensor(node, dim, start, end, model):
     """
     Slice a tensor along a specific dimension using the given start and end indices.
 
@@ -630,420 +702,626 @@ def slice_tensor(node, dim, start, end, model):
     return tiled_node
 
 
-def split_gemm_node(model, node, X, C, K, x_tiled, c_tiled, k_tiled):
+def _make_linear_tiled_module(C, tile_c):
     """
-    Transform a GEMM node (matmul/linear) into a tiled version along the reduction (C) dimension.
-    Emits tiled sub-ops and replaces the original node in the FX graph.
+    Factory function to create a LinearTiled module class with captured parameters.
+    """
+    class LinearTiled(torch.nn.Module):
+        def __init__(self, block_size=16):
+            super().__init__()
+            self.block_size = block_size
+
+        def get_scale_tile(self, input_scale, weight_scale, tidx):
+            if input_scale is None or weight_scale is None:
+                return None, None
+
+            c0, c1 = tidx * tile_c, min((tidx + 1) * tile_c, C)
+            bs = self.block_size
+
+            in_s = input_scale[..., c0 // bs:c1 // bs]
+            wt_s = weight_scale[..., c0 // bs:c1 // bs]
+
+            return in_s, wt_s
+
+        def get_csr_tile(self, A_data, A_indices, A_indptr, c0, c1):
+            if A_data is None:
+                return None, None, None
+
+            return torch.ops.quantized_ops.slice_csr_matrix(
+                A_data, A_indices, A_indptr, c0, c1, dim=1
+            )
+
+        def run_linear(
+            self,
+            input_tile,
+            weight_tile,
+            bias,
+            scales,
+            codes,
+            A_csr,
+        ):
+            args = (input_tile, weight_tile, bias)
+
+            if scales[0] is None or scales[1] is None:
+                return torch.ops.aten.linear.default(*args)
+
+            return torch.ops.quantized_ops.linear_mx(
+                *args,
+                input_scale=scales[0],
+                weight_scale=scales[1],
+                block_size=self.block_size,
+                input_code=codes[0],
+                weight_code=codes[1],
+                A_data=A_csr[0],
+                A_indices=A_csr[1],
+                A_indptr=A_csr[2],
+            )
+
+        def forward(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: Optional[torch.Tensor] = None,
+            input_scale: Optional[torch.Tensor] = None,
+            weight_scale: Optional[torch.Tensor] = None,
+            input_code: Optional[torch.Tensor] = None,
+            weight_code: Optional[torch.Tensor] = None,
+            A_data: Optional[torch.Tensor] = None,
+            A_indices: Optional[torch.Tensor] = None,
+            A_indptr: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            psums = None
+
+            for c in range(0, C, tile_c):
+                c0, c1 = c, min(c + tile_c, C)
+
+                tiled_input = input[..., c0:c1]
+                tiled_weight = weight[..., c0:c1]
+
+                scale_tiles = self.get_scale_tile(
+                    input_scale, weight_scale, c // tile_c
+                )
+
+                csr_tiles = self.get_csr_tile(
+                    A_data, A_indices, A_indptr, c0, c1
+                )
+
+                tiled_gemm = self.run_linear(
+                    tiled_input,
+                    tiled_weight,
+                    bias if c1 == C else None,
+                    scale_tiles,
+                    (input_code, weight_code),
+                    csr_tiles,
+                )
+
+                if psums is not None:
+                    psums = psums + tiled_gemm
+                else:
+                    psums = tiled_gemm
+
+            return psums
+
+    return LinearTiled
+
+
+def _make_matmul_tiled_module(C, tile_c):
+    """
+    Factory function to create a MatmulTiled module class with captured parameters.
+    """
+    class MatmulTiled(torch.nn.Module):
+        def __init__(self, block_size=16):
+            super().__init__()
+            self.block_size = block_size
+
+        def get_scale_tile(self, input_scale, weight_scale, tidx):
+            if input_scale is None or weight_scale is None:
+                return None, None
+
+            c0, c1 = tidx * tile_c, min((tidx + 1) * tile_c, C)
+            bs = self.block_size
+
+            in_s = input_scale[..., c0 // bs:c1 // bs]
+            wt_s = weight_scale[c0 // bs:c1 // bs]
+
+            return in_s, wt_s
+
+        def run_matmul(
+            self,
+            input_tile,
+            weight_tile,
+            scales,
+            codes,
+        ):
+            args = (input_tile, weight_tile)
+
+            if scales[0] is None or scales[1] is None:
+                return torch.ops.aten.matmul.default(*args)
+
+            return torch.ops.quantized_ops.matmul_mx(
+                *args,
+                input_scale=scales[0],
+                weight_scale=scales[1],
+                block_size=self.block_size,
+                input_code=codes[0],
+                weight_code=codes[1],
+            )
+
+        def forward(
+            self,
+            input: torch.Tensor,
+            other: torch.Tensor,
+            input_scale: Optional[torch.Tensor] = None,
+            weight_scale: Optional[torch.Tensor] = None,
+            input_code: Optional[torch.Tensor] = None,
+            weight_code: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            psums = None
+
+            for c in range(0, C, tile_c):
+                c0, c1 = c, min(c + tile_c, C)
+
+                tiled_input = input[..., c0:c1]
+                tiled_weight = other[c0:c1]
+
+                scale_tiles = self.get_scale_tile(
+                    input_scale, weight_scale, c // tile_c
+                )
+
+                tiled_gemm = self.run_matmul(
+                    tiled_input,
+                    tiled_weight,
+                    scale_tiles,
+                    (input_code, weight_code),
+                )
+
+                if psums is not None:
+                    psums = psums + tiled_gemm
+                else:
+                    psums = tiled_gemm
+
+            return psums
+
+    return MatmulTiled
+
+
+def split_gemm_node(model, node, tile_sizes, tiled_shapes):
+    """
+    Transform a GEMM node (matmul/linear) into a tiled version along the
+    reduction (C) dimension. Emits tiled sub-ops and replaces the original
+    node in the FX graph.
 
     Args:
         model: FX GraphModule
         node: GEMM node to tile
-        X, C, K: GEMM dimensions
-        x_tiled, c_tiled, k_tiled: tiling sizes for output-X, reduction-C, and output-K
+        tile_sizes: tiling sizes on X, C, and K dimensions
+        tiled_shapes: shape of inputs and outputs after tiling
     """
-    graph = model.graph
+    x_tiled, c_tiled, k_tiled = tile_sizes
 
-    input_node = node.args[0]
-    weight_node = node.args[1]
-    bias = node.args[2] if len(node.args) > 2 else None
-    input_scale_node = node.kwargs.get("input_scale")
-    weight_scale_node = node.kwargs.get("weight_scale")
-    bs = node.kwargs.get("block_size", 1)
+    input_shape = node.args[0].shape
+    X = math.prod(input_shape[:-1])
+    C = input_shape[-1]
 
-    weight_key = "other" if is_matmul(node) else "weight"
-    weight_dim = -2 if is_matmul(node) else -1
+    is_mat = is_matmul(node)
+    weight_shape = node.args[1].shape
+    K = weight_shape[-1] if is_mat else weight_shape[0]
 
-    # Construct tiled shapes
-    input_value = input_node.value
-    tiled_input_shape = construct_tiled_shape(
-        input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
-    )
+    tiling = (X // x_tiled, K // k_tiled)
 
-    weight_shape = (
-        (c_tiled, k_tiled) if is_matmul(node) else (k_tiled, c_tiled)
-    )
-    weight_scale_shape = (
-        (c_tiled // bs, k_tiled) if is_matmul(node)
-        else (k_tiled, c_tiled // bs)
-    )
-
-    tiled_shapes = {
-        "input": tiled_input_shape[:-1] + (c_tiled,),
-        weight_key: weight_shape,
-        "bias": (k_tiled,),
-        "output": tiled_input_shape[:-1] + (k_tiled,),
-        "input_scale": tiled_input_shape[:-1] + (c_tiled // bs,),
-        "weight_scale": weight_scale_shape,
-    }
-
-    num_x_tiles = X // x_tiled
-    num_k_tiles = K // k_tiled
-    num_c_tiles = C // c_tiled
-
-    if num_c_tiles == 1:
+    if C == c_tiled:
         node.meta["tiled_shapes"] = tiled_shapes
-        node.meta["l2_tiling"] = (num_x_tiles, num_k_tiles)
+        node.meta["l2_tiling"] = tiling
         return
 
+    # Create the tiled module using factory function
+    if is_matmul(node):
+        GemmTiled = _make_matmul_tiled_module(C, c_tiled)
+    else:
+        GemmTiled = _make_linear_tiled_module(C, c_tiled)
+
+    def load_arg(a):
+        return map_arg(a, lambda n: n.value if isinstance(n, Node) else n)
+
+    mod = GemmTiled(block_size=node.kwargs.get("block_size", 1))
+    kwargs = {k: v for k, v in node.kwargs.items() if v is not None}
+    kwargs.pop("block_size", None)
+    gm = export_model(mod, load_arg(node.args[:3]), load_arg(kwargs))
+
+    for n in list(gm.graph.nodes):
+        if is_prunable_op(n):
+            n.replace_all_uses_with(n.all_input_nodes[0])
+            gm.graph.erase_node(n)
+    gm.graph.lint()
+
+    value_remap = {}
+    replace_node_with_graph_module(model, gm, node, value_remap)
+
+    # Update metadata on new nodes in the graph
     if (source_fn_st := node.meta.get("source_fn_stack")) is not None:
         source_fn = source_fn_st[-1][1]
     else:
         source_fn = node.target
 
-    psums = None
-    for c in range(0, C, c_tiled):
-        c_end = min(c + c_tiled, C)
-        scale_c, scale_c_end = int(c / bs), int(c_end / bs)
+    for n in list(value_remap.values()):
+        if n.target == torch.ops.aten.slice.Tensor and n.args[0].op == "get_attr":
+            c_start, c_end = n.args[2], n.args[3]
+            with model.graph.inserting_before(n):
+                sliced_param = _slice_tensor(n.args[0], 1, c_start, c_end, model)
+            n.replace_all_uses_with(sliced_param)
+            model.graph.erase_node(n)
+            continue
 
-        with graph.inserting_before(node):
-            tiled_input = slice_tensor(input_node, -1, c, c_end, model)
-            tiled_weight = slice_tensor(weight_node, weight_dim, c, c_end, model)
-            kwargs = dict(node.kwargs)
-            if input_scale_node is not None:
-                kwargs["input_scale"] = slice_tensor(
-                    input_scale_node, -1, scale_c, scale_c_end, model
-                )
-            if weight_scale_node is not None:
-                kwargs["weight_scale"] = slice_tensor(
-                    weight_scale_node, weight_dim, scale_c, scale_c_end, model
-                )
-            gemm_inputs = [tiled_input, tiled_weight]
-            if not is_matmul(node) and c_end == C:
-                gemm_inputs.append(bias)
-            tiled_gemm = graph.call_function(
-                node.target, tuple(gemm_inputs), kwargs,
-            )
+        if n.target in [
+            torch.ops.aten.slice.Tensor, torch.ops.aten.pad.default,
+        ]:
+            n.meta["dtype"] = n.args[0].meta.get("dtype")
 
-        propagate_shape(tiled_gemm)
-        tiled_gemm.meta.update({
-            "tiled_shapes": copy.deepcopy(tiled_shapes),
-            "l2_tiling": (num_x_tiles, num_k_tiles),
-            "dtype": node.meta.get("dtype"),
-            "source_fn_stack": [(tiled_gemm.name, source_fn)],
-        })
-
-        if psums is not None:
-            with graph.inserting_before(node):
-                psums = graph.call_function(
-                    torch.ops.aten.add.Tensor, (psums, tiled_gemm),
-                )
-            psums.meta["dtype"] = node.meta.get("dtype")
-            psums.meta["source_fn_stack"] = [(psums.name, psums.target)]
-            propagate_shape(psums)
-        else:
-            psums = tiled_gemm
-
-    node.replace_all_uses_with(psums)
-    graph.erase_node(node)
+        if n.target == node.target:
+            n.meta.update({
+                "tiled_shapes": copy.deepcopy(tiled_shapes),
+                "l2_tiling": tiling,
+                "dtype": node.meta.get("dtype"),
+                "source_fn_stack": [(n.name, source_fn)],
+            })
 
 
 def get_valid_tiling(
-    input_shape,
-    fixed_dims=None,
-    last_dim=None,
-    reverse=False,
-    min_sizes=None,
-    order=None,
-    round_robin=False,
-):
+    input_shape: Tuple[int, ...],
+    min_sizes: Optional[Union[List[int], Tuple[int, ...]]] = None,
+    order: Optional[Union[List[int], Tuple[int, ...]]] = None,
+    fixed_dims: Optional[Union[List[int], Tuple[int, ...]]] = None,
+    last_dim: Optional[int] = None,
+    reverse: bool = False,
+    round_robin: bool = False,
+) -> Generator[Tuple[Tuple[int, ...], Tuple[int, ...]], None, None]:
     """
     Yields tile shapes by progressively reducing dimensions in a specified order.
-    Once a dimension is reduced to its minimum size, it stays fixed. Certain dims
-    can be explicitly fixed, or you can specify a single `last_dim` as a shortcut.
-
-    Supports two modes:
-        - Sequential mode (default): fully reduce each dimension in order before moving on.
-        - Round-robin mode: cycle through dimensions, reducing one step at a time.
 
     Args:
-        input_shape (tuple): The original shape.
-        fixed_dims (list or tuple, optional): Indices of dims that should remain fixed.
-        last_dim (int, optional): Convenience arg: fix a single dim (e.g., -1 for last).
-        reverse (bool): If True, reverse the traversal order (ignored if order is given).
-        min_sizes (tuple or list, optional): Minimum size / multiple for each dimension
-                                             (default is 1).
-        order (list or tuple, optional): Explicit order of dimension indices to reduce.
-                                         Example: (2,0,1) means dim2 → dim0 → dim1.
-        round_robin (bool): If True, reduce dims in a cyclic round-robin fashion.
+        input_shape: The original shape (e.g., (1024, 1024)).
+        min_sizes: Minimum size for each dimension. If the list is shorter than
+                   input_shape, it is padded with 1s on the left.
+        order: Explicit order of dimension indices to reduce.
+        fixed_dims: Indices of dims that should remain at full size.
+        last_dim: Convenience arg to fix dimensions starting from this index.
+        reverse: If True, reverses the traversal order (ignored if `order` is provided).
+        round_robin: If True, cycles through dimensions reducing them one step at a time.
+                     If False, fully reduces one dimension before moving to the next.
+
+    Yields:
+        (current_shape, tiling_factors)
     """
-    def get_factors(n, min_size):
-        return [i for i in range(n, min_size - 1, -1) if n % i == 0]
+    ndim = len(input_shape)
 
-    def get_tiling(full_shape, tiled_shape):
-        return tuple(f // t for f, t in zip(full_shape, tiled_shape))
+    # --- 1. Normalize Inputs ---
 
-    dims = len(input_shape)
+    # helper: resolving negative indices to positive
+    def resolve_idx(i): return i + ndim if i < 0 else i
 
-    # Normalize fixed dims
-    fixed = set()
-    if fixed_dims is not None:
-        fixed.update(dims + d if d < 0 else d for d in fixed_dims)
+    # Set up fixed dimensions set
+    fixed_indices = set()
+    if fixed_dims:
+        fixed_indices.update(resolve_idx(d) for d in fixed_dims)
     if last_dim is not None:
-        ld = dims + last_dim if last_dim < 0 else last_dim
-        fixed.update(d for d in range(ld, dims))
+        start = resolve_idx(last_dim)
+        fixed_indices.update(range(start, ndim))
 
-    # Order of dimensions to traverse
-    if order is not None:
-        dim_order = list(order)
+    # Set up traversal order
+    if order:
+        traversal_order = [resolve_idx(i) for i in order]
     else:
-        dim_order = list(range(dims))
+        traversal_order = list(range(ndim))
         if reverse:
-            dim_order = dim_order[::-1]
+            traversal_order.reverse()
 
-    # Apply default min sizes
-    if min_sizes is None:
-        min_sizes = [1] * dims
-    else:
-        min_sizes = [1] * (dims - len(min_sizes)) + list(min_sizes)
+    # Align min_sizes to input_shape length (pad left with 1s)
+    targets = list(min_sizes) if min_sizes else []
+    if len(targets) < ndim:
+        targets = [1] * (ndim - len(targets)) + targets
 
-    current = list(input_shape)
-    yield tuple(current), get_tiling(input_shape, tuple(current))
+    # --- 2. Pre-calculate Valid Factors ---
+
+    # We calculate all valid tiling sizes for every dimension upfront.
+    # A factor is valid if it divides the dimension and >= min_size.
+    # Example: input 128 -> [128, 64, 32, ..., min_size]
+    dim_factors = {}
+    for i in range(ndim):
+        limit = max(1, targets[i]) # Ensure min_size is at least 1
+        size = input_shape[i]
+        limit = min(limit, size)  # Cap limit to size
+
+        if i in fixed_indices:
+            factors = [size]
+        else:
+            # Generate factors in descending order
+            factors = [
+                f for f in range(size, limit - 1, -1)
+                if size % f == 0 and (f % limit == 0) # Enforce limit as a multiple
+            ]
+            # Ensure the limit itself is included if not strictly divisible but valid
+            if not factors or factors[-1] != limit:
+                 factors.append(limit)
+
+        dim_factors[i] = factors
+
+    # --- 3. Traversal Logic ---
+
+    # Current state: indices pointing to the current factor used for each dimension
+    # initialized to 0 (which corresponds to the full input size)
+    current_factor_indices = {i: 0 for i in range(ndim)}
+
+    def get_current_state():
+        """Constructs the shape and tiling tuple based on current indices."""
+        shape = tuple(dim_factors[i][current_factor_indices[i]] for i in range(ndim))
+        tiling = tuple(input_shape[i] // shape[i] for i in range(ndim))
+        return shape, tiling
+
+    # Yield the initial full shape
+    yield get_current_state()
 
     if not round_robin:
-        # --- Sequential mode ---
-        for dim in dim_order:
-            if dim in fixed:
+        # --- Sequential Mode ---
+        # Reduce Dim A fully, then move to Dim B, etc.
+        for dim_idx in traversal_order:
+            if dim_idx in fixed_indices:
                 continue
-            factors = get_factors(input_shape[dim], min_sizes[dim])
-            for f in factors[1:]:  # skip full-size factor
-                if f % min_sizes[dim] != 0:
-                    continue  # enforce unroll multiple
-                current[dim] = f
-                yield tuple(current), get_tiling(input_shape, tuple(current))
-            current[dim] = max(min_sizes[dim], 1)
+
+            factors = dim_factors[dim_idx]
+            # Iterate through the remaining factors for this dimension
+            for i in range(1, len(factors)):
+                current_factor_indices[dim_idx] = i
+                yield get_current_state()
+
     else:
-        # --- Round robin mode ---
-        factor_lists = {
-            d: get_factors(input_shape[d], min_sizes[d])
-            for d in dim_order if d not in fixed
-        }
-        indices = {d: 0 for d in factor_lists}
+        # --- Round Robin Mode ---
+        # Reduce Dim A (step 1), yield. Reduce Dim B (step 1), yield. Repeat.
+        active_dims = [d for d in traversal_order if d not in fixed_indices]
 
-        active = list(factor_lists.keys())
-        while active:
-            next_active = []
-            for d in active:
-                idx = indices[d] + 1
-                if idx < len(factor_lists[d]):
-                    current[d] = factor_lists[d][idx]
-                    yield tuple(current), get_tiling(input_shape, current)
-                    indices[d] = idx
-                    if idx + 1 < len(factor_lists[d]):
-                        next_active.append(d)
-            active = next_active
+        while True:
+            progress_made = False
 
+            for dim_idx in active_dims:
+                current_idx = current_factor_indices[dim_idx]
+                max_idx = len(dim_factors[dim_idx]) - 1
 
-def node_mem(n, tiles, bank_size=None):
-    size = get_node_bytes(n) * n.value.numel() / tiles
-    if bank_size is not None:
-        size = int(math.ceil(size / bank_size) * bank_size)
-    return size
+                # If this dimension can be reduced further
+                if current_idx < max_idx:
+                    # Move one step down in size
+                    current_factor_indices[dim_idx] += 1
+                    progress_made = True
+                    yield get_current_state()
+
+            # If we went through all dims and none could change, we are done
+            if not progress_made:
+                break
 
 
-def calculate_gemm_tile_size(
-    node, x_factor, c_factor, k_factor, bank_size=None
+def get_node_to_key_map(node):
+    args_and_kwargs = normalize_function(
+        node.target,
+        node.args,
+        node.kwargs,
+        normalize_to_only_use_kwargs=True
+    )
+    node_to_key = {
+        n.meta.get('source_node', n): k
+        for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
+    }
+    node_to_key[node] = "output"
+    return node_to_key
+
+
+def normalize_shape(node, shape):
+    node_to_key = get_node_to_key_map(node)
+    shape = {
+        n: shape[k] for n, k in node_to_key.items() if k in shape
+    }
+    return shape
+
+
+def _conv2d_layout(shape, is_weight=False, do_transpose=False):
+    assert len(shape) == 4, "Conv2d shape must be 4D"
+    if not do_transpose:
+        return shape
+    if is_weight:
+        return (shape[2], shape[3], shape[1], shape[0])
+    else:
+        return (shape[0], shape[2], shape[3], shape[1])
+
+
+def _calculate_conv2d_shapes(node, tile_sizes):
+    bs = node.kwargs.get("block_size", 1)
+    transposed = node.meta.get("transposed", False)
+
+    y_tile, x_tile, c_tile, k_tile = tile_sizes
+    c_scaled = c_tile // bs
+
+    stride = _pair(get_arg_or_kwarg(node, 3, "stride", 1))
+    padding = _pair(get_arg_or_kwarg(node, 4, "padding", 0))
+    dilation = _pair(get_arg_or_kwarg(node, 5, "dilation", 1))
+
+    weight_shape = node.args[1].shape
+    kH, kW, _, _ = _conv2d_layout(weight_shape, True, not transposed)
+
+    iy_tile = (
+        (y_tile - 1) * stride[0] - 2 * padding[0]
+        + dilation[0] * (kH - 1) + 1
+    )
+    ix_tile = (
+        (x_tile - 1) * stride[1] - 2 * padding[1]
+        + dilation[1] * (kW - 1) + 1
+    )
+
+    def apply_layout(shape, is_weight):
+        return _conv2d_layout(shape, is_weight, transposed)
+
+    return {
+        "input": apply_layout((1, c_tile, iy_tile, ix_tile), False),
+        "weight": apply_layout((k_tile, c_tile, kH, kW), True),
+        "bias": (k_tile,),
+        "input_scale": apply_layout((1, c_scaled, iy_tile, ix_tile), False),
+        "weight_scale": apply_layout((k_tile, c_scaled, kH, kW), True),
+        "output": apply_layout((1, k_tile, y_tile, x_tile), False),
+    }
+
+
+def _calculate_gemm_shapes(node, tile_sizes):
+    bs = node.kwargs.get("block_size", 1)
+
+    x_tiled, c_tiled, k_tiled = tile_sizes
+    c_scaled = c_tiled // bs
+
+    input_shape = node.args[0].shape
+    tiled_input_shape = construct_tiled_shape(
+        input_shape, x_tiled, list(range(len(input_shape) - 1))
+    )
+
+    batch_dims = tiled_input_shape[:-1]
+
+    is_mat = is_matmul(node)
+    weight_transposed = is_mat ^ node.meta.get("transposed", False)
+
+    if weight_transposed:
+        weight_shape = (c_tiled, k_tiled)
+        weight_scale_shape = (c_scaled, k_tiled)
+    else:
+        weight_shape = (k_tiled, c_tiled)
+        weight_scale_shape = (k_tiled, c_scaled)
+
+    A_data = node.kwargs.get("A_data")
+    A_indices = node.kwargs.get("A_indices")
+
+    return {
+        "input": batch_dims + (c_tiled,),
+        "other" if is_mat else "weight": weight_shape,
+        "bias": (k_tiled,),
+        "input_scale": batch_dims + (c_scaled,),
+        "weight_scale": weight_scale_shape,
+        "A_data": tuple(A_data.shape) if A_data else None,
+        "A_indices": tuple(A_indices.shape) if A_indices else None,
+        "A_indptr": (x_tiled + 1,),
+        "output": batch_dims + (k_tiled,),
+    }
+
+
+def _search_tiling(
+    node,
+    full_shape,
+    min_sizes,
+    order,
+    shape_func,
+    cache_size,
+    bank_width,
+    bank_size,
 ):
-    total_bytes = 0
-    input_node, weight_node = node.args[0], node.args[1]
+    """
+    Generic driver that iterates over banking strategies and valid tilings.
+    """
+    op_scope = _get_scope(node.target)
+    node_to_key = get_node_to_key_map(node)
+    key_to_node = {f"{op_scope}::{v}": k for k, v in node_to_key.items()}
 
-    input_tiles = x_factor * c_factor
-    weight_tiles = c_factor * k_factor
-    output_tiles = x_factor * k_factor
+    strategies = get_banking_strategies_for_op(node.target)
 
-    # Input, weight, and output memory
-    total_bytes += node_mem(input_node, input_tiles, bank_size)
-    total_bytes += node_mem(weight_node, weight_tiles, bank_size)
-    total_bytes += node_mem(node, output_tiles, bank_size)
+    for strategy in strategies:
+        for tile_sizes, _ in get_valid_tiling(
+            full_shape, min_sizes=min_sizes, order=order
+        ):
+            tiled_shapes = shape_func(node, tile_sizes)
+            node_to_shape = normalize_shape(node, tiled_shapes)
 
-    # Bias if present
-    if not is_matmul(node) and len(node.args) > 2:
-        total_bytes += node_mem(node.args[2], k_factor, bank_size)
+            total_size, _ = strategy.evaluate(
+                key_to_node, node, node_to_shape, bank_width, bank_size
+            )
 
-    # Optional scale factors
-    input_scale_node = node.kwargs.get("input_scale")
-    if input_scale_node is not None:
-        total_bytes += node_mem(input_scale_node, input_tiles, bank_size)
+            if total_size <= cache_size:
+                def fmt(s): return str(tuple(s)).replace(" ", "")
 
-    weight_scale_node = node.kwargs.get("weight_scale")
-    if weight_scale_node is not None:
-        total_bytes += node_mem(weight_scale_node, weight_tiles, bank_size)
+                # Get Original Shapes
+                orig_in = fmt(node.args[0].shape)
+                orig_w = fmt(node.args[1].shape)
+                orig_out = fmt(node.shape)
 
-    return total_bytes
+                # Get Tiled Buffer Shapes
+                tile_in = fmt(node_to_shape[node.args[0]])
+                tile_w = fmt(node_to_shape[node.args[1]])
+                tile_out = fmt(node_to_shape[node])
+
+                logger.info(
+                    f"Selected tiling for {node.name} (Strategy: {strategy}): "
+                    f"In[{orig_in}->{tile_in}], "
+                    f"Wt[{orig_w}->{tile_w}], "
+                    f"Out[{orig_out}->Block{tile_out}]"
+                )
+                return tile_sizes, tiled_shapes
+
+    logger.warning(f"Failed to tile {node} with cache size {cache_size}.")
+    return None
 
 
-def select_gemm_tiling(node, X, C, K, cache_size, unroll_dims, bank_size=None):
+def select_conv2d_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    # Stage 1: pick a reduction dim that fits in a bank
-    c_tile = 1
-    if bank_size is not None:
-        for (c,), (c_tile,) in get_valid_tiling(
-            (C,), min_sizes=(unroll_dims[0],)
-        ):
-            if min(128, X) * c * get_node_bytes(node.args[0]) <= bank_size:
-                break
+    N, K, Y, X = node.shape
+    C = node.args[0].shape[1]
 
-    # Stage 2: search tilings for (X, C, K) in given order
-    for tile_sizes, (x_factor, c_factor, k_factor) in get_valid_tiling(
-        (X, C // c_tile, K),
-        min_sizes=(1, unroll_dims[0], unroll_dims[1]),
-        order=(2, 0, 1),
-    ):
-        total_size = calculate_gemm_tile_size(
-            node, x_factor, c_tile * c_factor, k_factor, bank_size,
-        )
-        if total_size <= cache_size:
-            return tile_sizes
+    full_shape = (Y, X, C, K)
 
-    # Stage 3: search tilings without bank constraint
-    for tile_sizes, (x_factor, c_factor, k_factor) in get_valid_tiling(
-        (X, C // c_tile, K),
-        min_sizes=(1, unroll_dims[0], unroll_dims[1]),
-        order=(2, 0, 1),
-    ):
-        total_size = calculate_gemm_tile_size(
-            node, x_factor, c_tile * c_factor, k_factor, bank_size=None
-        )
-        if total_size <= cache_size:
-            return tile_sizes
+    min_xy = int(math.sqrt(unroll_dims[0]))
+    min_sizes = (min_xy, min_xy, unroll_dims[0], unroll_dims[1])
 
-    # If no valid tiling found
-    raise ValueError(
-        f"Cannot tile X={X}, C={C}, K={K} to fit cache size {cache_size}."
+    order = (3, 0, 1, 2)
+
+    return _search_tiling(
+        node=node,
+        full_shape=full_shape,
+        min_sizes=min_sizes,
+        order=order,
+        shape_func=_calculate_conv2d_shapes,
+        cache_size=cache_size,
+        bank_width=bank_width,
+        bank_size=bank_size
     )
 
 
-def calculate_conv2d_tile_size(
-    node, y_factor, x_factor, c_factor, k_factor, bank_size=None
-):
-    """
-    Calculate memory footprint of a conv2d under tiling (batch=1).
-
-    Args:
-        node: conv2d node
-        y_factor: tiling factor for output height
-        x_factor: tiling factor for output width
-        c_factor: tiling factor for input channels
-        k_factor: tiling factor for output channels
-        bank_size: optional, round each memory block up to multiple of bank_size
-    """
-    stride = get_arg_or_kwarg(node, 3, "stride", (1, 1))
-    padding = get_arg_or_kwarg(node, 4, "padding", (0, 0))
-    dilation = get_arg_or_kwarg(node, 5, "dilation", (1, 1))
-    bs = node.kwargs.get("batch_size", 1)
-
-    stride = _pair(stride)
-    padding = _pair(padding)
-    dilation = _pair(dilation)
-
-    input_node, weight_node = node.args[0], node.args[1]
-    bias_node = node.args[2] if len(node.args) > 2 else None
-
-    # Input/output dimensions
-    N, K, Y, X = node.shape
-    _, C, kH, kW = weight_node.shape
-
-    # Input memory: depends on receptive field for output tiles
-    input_y = (Y // y_factor - 1) * stride[0] + (kH - 1) * dilation[0] + 1
-    input_x = (X // x_factor - 1) * stride[1] + (kW - 1) * dilation[1] + 1
-    input_size = 1 * (C // c_factor) * input_y * input_x
-    total_bytes = get_node_bytes(input_node) * input_size
-
-    if bank_size is not None:
-        total_bytes = int(math.ceil(total_bytes / bank_size) * bank_size)
-
-    # Weight memory
-    weight_tiles = c_factor * k_factor
-    total_bytes += node_mem(weight_node, weight_tiles, bank_size)
-
-    # Output memory
-    output_tiles = k_factor * y_factor * x_factor
-    total_bytes += node_mem(node, output_tiles, bank_size)
-
-    # Bias
-    if bias_node is not None:
-        total_bytes += node_mem(bias_node, k_factor)
-
-    # Optional scale factors
-    input_scale_node = node.kwargs.get("input_scale")
-    if input_scale_node is not None:
-        total_bytes += (
-            get_node_bytes(input_scale_node) * input_size / bs
-        )
-
-    weight_scale_node = node.kwargs.get("weight_scale")
-    if weight_scale_node is not None:
-        total_bytes += node_mem(weight_scale_node, weight_tiles, bank_size)
-
-    return total_bytes
-
-
-def select_conv2d_tiling(
-    node, Y, X, C, K, cache_size, unroll_dims, bank_size=None
-):
-    """
-    Pick tiling for conv2d layers to fit in cache.
-
-    Args:
-        node: conv2d node
-        Y, X, C, K: conv2d dimensions
-        cache_size: max allowed memory
-        unroll_dims: (c_unroll, k_unroll)
-        bank_size: optional bank constraint
-    """
+def select_gemm_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
     if isinstance(unroll_dims, int):
         unroll_dims = (unroll_dims, unroll_dims)
 
-    # Stage 1: exhaustive K first
-    for tile_sizes, (_, _, _, k_tile) in get_valid_tiling(
-        (Y, X, C, K),
-        min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
-        order=(3,),
-    ):
-        total_size = calculate_conv2d_tile_size(
-            node, 1, 1, 1, k_tile, bank_size,
-        )
-        if total_size <= cache_size:
-            return tile_sizes
+    input_shape = node.args[0].shape
+    X = math.prod(input_shape[:-1])
+    C = input_shape[-1]
 
-    # Stage 2: round robin on Y and X
-    for tile_sizes, (y_factor, x_factor, _, _) in get_valid_tiling(
-        (Y, X, C, K // k_tile),
-        min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
-        order=(0, 1),
-        round_robin=True,
-    ):
-        if tile_sizes[0] * tile_sizes[1] < unroll_dims[0]:
-            logger.warning(
-                f"Conv2D {node}: YxX tile {tile_sizes[0]}x{tile_sizes[1]} "
-                f"less than unroll {unroll_dims[0]}"
-            )
-            break
-        total_size = calculate_conv2d_tile_size(
-            node, y_factor, x_factor, 1, k_tile, bank_size,
-        )
-        if total_size <= cache_size:
-            return tile_sizes
+    is_mat = is_matmul(node)
+    weight_shape = node.args[1].shape
+    K = weight_shape[-1] if is_mat else weight_shape[0]
 
-    # Stage 3: tile C dimension
+    # Pick a reduction dim that fits in a bank
+    min_x_tile = min(sum(unroll_dims), X)
+    input_bytes = get_node_bytes(node.args[0])
+    num_c_tile = 1
+    if bank_size is not None:
+        for (c,), (num_c_tile,) in get_valid_tiling(
+            (C,), min_sizes=(unroll_dims[0],)
+        ):
+            if min_x_tile * c * input_bytes <= bank_size:
+                break
 
-    # Stage 4: fallback without bank constraint
-    for tile_sizes, (y_factor, x_factor, _, _) in get_valid_tiling(
-        (Y, X, C, K // k_tile),
-        min_sizes=(1, 1, unroll_dims[0], unroll_dims[1]),
-        order=(0, 1),
-        round_robin=True,
-    ):
-        total_size = calculate_conv2d_tile_size(
-            node, y_factor, x_factor, 1, k_tile, bank_size=None,
-        )
-        if total_size <= cache_size:
-            return tile_sizes
+    full_shape = (X, C // num_c_tile, K)
+    min_sizes = (min_x_tile, unroll_dims[0], unroll_dims[1])
+    order = (2, 0, 1)
 
-    # If nothing found
-    raise ValueError(
-        f"Cannot tile Conv2D Y={Y}, X={X}, C={C}, K={K} to fit cache {cache_size}."
+    return _search_tiling(
+        node=node,
+        full_shape=full_shape,
+        min_sizes=min_sizes,
+        order=order,
+        shape_func=_calculate_gemm_shapes,
+        cache_size=cache_size,
+        bank_width=bank_width,
+        bank_size=bank_size
     )
 
 
@@ -1051,93 +1329,32 @@ def run_matrix_op_l2_tiling(
     model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
 ):
     """
-    Perform tiling on GEMM operations in a model to fit intermediate data into cache.
-
-    Tiling is applied across the output (K), input (X), and channel (C) dimensions with
-    the following strategy:
-    - Maximize tile size along X (batch * spatial)
-    - Minimize splits along C to avoid overhead from summing partial results
-    - Ensure K and C tile sizes are multiples of specified minimums
-    - Cache is divided across multiple banks
+    Perform tiling on GEMM operations to fit intermediate data into cache.
 
     Args:
         model: A model object with a FX Graph containing GEMM nodes.
-        cache_size (int): Total cache size in bytes.
         unroll (int): Systolic array input and output channel unrolling dimension. 
+        cache_size (int): Total cache size in bytes.
+        num_banks (int, optional): Number of cache banks for bank-aligned tiling.
     """
     graph = model.graph
 
+    bank_size = None if num_banks is None else cache_size // num_banks
+
     for node in list(graph.nodes):
-        if not is_gemm_op(node):
-            continue
-
-        input_node = node.args[0]
-        weight_node = node.args[1]
-        bank_size = None if num_banks is None else cache_size // num_banks
-
         if is_conv2d(node):
-            _, K, Y, X = node.shape
-            C = weight_node.shape[1]
-
-            total_size = calculate_conv2d_tile_size(
-                node, 1, 1, 1, 1, bank_size=bank_size
+            tile_sizes, tiled_shape = select_conv2d_tiling(
+                node, unroll, cache_size, None, bank_size
             )
 
-            if total_size <= cache_size:
-                logger.info(
-                    f"{node} ({Y}, {X}, {C}, {K}), total_size={total_size} fits "
-                    "in cache."
-                )
-                continue
+            split_conv2d_node(model, node, tile_sizes)
 
-            logger.info(
-                f"{node} ({Y}, {X}, {C}, {K}), total_size={total_size} does not "
-                "fit in cache."
+        if is_linear(node) or is_matmul(node):
+            tile_sizes, tiled_shape = select_gemm_tiling(
+                node, unroll, cache_size, None, bank_size
             )
 
-            y_tiled, x_tiled, c_tiled, k_tiled = select_conv2d_tiling(
-                node, Y, X, C, K, cache_size, unroll, bank_size
-            )
-
-            weight_shape = tuple(weight_node.shape)
-            output_shape = tuple(node.shape)
-
-            weight_tiled = (k_tiled, c_tiled, weight_shape[2], weight_shape[3])
-            output_tiled = (1, k_tiled, y_tiled, x_tiled)
-
-            logger.info(
-                f"{node}: weight {weight_shape} -> {weight_tiled}, "
-                f"output {output_shape} -> {output_tiled}"
-            )
-
-            split_conv2d_node(model, node, (y_tiled, x_tiled, c_tiled, k_tiled))
-        else:
-            if is_linear(node):
-                K, C = weight_node.shape
-            elif is_matmul(node):
-                C, K = weight_node.shape[-2:]
-            X = int(input_node.value.numel() / C)
-
-            total_size = calculate_gemm_tile_size(node, 1, 1, 1, bank_size=bank_size)
-
-            if total_size <= cache_size:
-                logger.info(
-                    f"{node} ({X} x {C} x {K}), total_size={total_size} fits in cache."
-                )
-                continue
-
-            logger.info(
-                f"{node} ({X} x {C} x {K}), total_size={total_size} does not fit "
-                "in cache."
-            )
-
-            x_tiled, c_tiled, k_tiled = select_gemm_tiling(
-                node, X, C, K, cache_size, unroll, bank_size
-            )
-
-            logger.info(f"{node} ({X} x {C} x {K}) -> ({x_tiled} x {c_tiled} x {k_tiled})")
-
-            split_gemm_node(model, node, X, C, K, x_tiled, c_tiled, k_tiled)
+            split_gemm_node(model, node, tile_sizes, tiled_shape)
 
     graph.lint()
     graph.eliminate_dead_code()
@@ -1160,17 +1377,12 @@ def get_tiled_shape(shape, tiling):
     return tuple(tiled_shape[-ndim:])
 
 
-def get_node_to_key(node):
-    from torch.fx.operator_schemas import normalize_function
-
-    args_and_kwargs = normalize_function(
-        node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
+def _need_allocate(node):
+    return (
+        not re.fullmatch(r'(code|qmap)(_\d+)?', node.name)
+        and isinstance(node.value, torch.Tensor)
+        and (node.value.numel() > 1 or node.op != "get_attr")
     )
-    node_to_key = {
-        n.meta.get('source_node', n): k
-        for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
-    }
-    return node_to_key
 
 
 def run_vector_op_node_l2_tiling(
@@ -1187,6 +1399,7 @@ def run_vector_op_node_l2_tiling(
         torch.ops.quantized_ops.layer_norm.default,
         torch.ops.quantized_ops.calculate_mx_qparam.default,
         torch.ops.quantized_ops.quantize_mx.default,
+        torch.ops.quantized_ops.quantize_mx_outlier.default,
     ]:
         return
 
@@ -1194,22 +1407,19 @@ def run_vector_op_node_l2_tiling(
     last_dim = -1
     if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
         last_dim = min(node.args[1])
-    elif node.target == torch.ops.quantized_ops.quantize_mx.default:
+    elif node.target in [
+        torch.ops.quantized_ops.quantize_mx.default,
+        torch.ops.quantized_ops.quantize_mx_outlier.default,
+    ]:
         last_dim = min(node.args[2])
     elif node.target == torch.ops.aten.transpose.int:
         last_dim = min(*node.args[1:])
     elif node.target == torch.ops.aten.permute.default:
         last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
 
-    node_to_key = get_node_to_key(node)
+    node_to_key = get_node_to_key_map(node)
     input_nodes = [
-        n for n in node.all_input_nodes
-        if (
-            "qmap" not in n.name
-            and "code" not in n.name
-            and isinstance(n.value, torch.Tensor)
-            and (n.value.numel() > 1 or n.op != "get_attr")
-        )
+        n for n in node.all_input_nodes if _need_allocate(n)
     ]
     output_shape = (
         node.value.shape if isinstance(node.value, torch.Tensor)
@@ -1235,7 +1445,7 @@ def run_vector_op_node_l2_tiling(
             else None
         )
         for tiled_output_shape, tiling in get_valid_tiling(
-            output_shape, last_dim=last_dim, min_sizes=(unroll,)
+            output_shape, min_sizes=(unroll,), last_dim=last_dim,
         ):
             tiled_shapes = {
                 node_to_key.get(n): get_tiled_shape(tuple(n.shape), tiling)

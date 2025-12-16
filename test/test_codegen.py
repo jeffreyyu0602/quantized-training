@@ -350,7 +350,7 @@ if __name__ == "__main__":
 
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
             attn_implementation="eager", # turn off flash attention
         )
 
@@ -398,8 +398,6 @@ if __name__ == "__main__":
 
         if args.model == "llm_prefill":
             causal_mask = causal_mask[:, :, :, : args.context_length]
-
-        hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)

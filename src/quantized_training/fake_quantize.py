@@ -295,6 +295,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
         self.scale_dtype = scale_dtype
         self.force_scale_power_of_two = force_scale_power_of_two
         self.outlier_threshold = outlier_threshold
+        self.outlier_max_pct = 0.0
         device = kwargs.get("device", None)
         # Generate a quantization map from bfloat16 to quantized values of the given dtype
         quant_map = get_quantization_map(dtype, device)
@@ -356,7 +357,7 @@ class FusedAmaxObsFakeQuantize(FakeQuantizeBase):
             X = torch.where(mask, X, torch.zeros_like(X))
 
             outlier_pct = mask.bitwise_not().sum().item() / X.numel()
-            self.max_outlier_pct = max(outlier_pct, getattr(self, "max_outlier_pct", 0.0))
+            self.outlier_max_pct = max(outlier_pct, self.outlier_max_pct)
 
         if self.qscheme == qt.microscaling:
             X = MXFakeQuantFunction.apply(

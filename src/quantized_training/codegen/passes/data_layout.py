@@ -783,7 +783,10 @@ def transpose_linear_weights(
 
         # Mark spmm_csr users as having a transposed weight.
         for user in list(weight_node.users):
-            if user.target == torch.ops.quantized_ops.spmm_csr.default:
+            if user.target in [
+                torch.ops.quantized_ops.linear_mx.default,
+                torch.ops.quantized_ops.spmm_csr.default,
+            ]:
                 user.kwargs = {**user.kwargs, "weight_transposed": True}
 
         if node.target == torch.ops.aten.linear.default:

@@ -46,9 +46,12 @@ class Segment:
         self.end = e
 
 
-def find_user_with_target(node: torch.fx.Node, targets):
-    if not isinstance(targets, (list, tuple)):
-        targets = [targets]
+def _find_user_with_target(node: torch.fx.Node, targets):
+    if not isinstance(targets, set):
+        if isinstance(targets, (list, tuple)):
+            targets = set(targets)
+        else:
+            targets = {targets}
 
     for user in node.users:
         if user.target in targets and user.args[0] == node:
@@ -59,16 +62,81 @@ def find_user_with_target(node: torch.fx.Node, targets):
             user.target == torch.ops.quantized_ops.dequantize.default
             and user.meta.get("fused") is True
         ):
-            dequant_user = find_user_with_target(user, targets)
-            if dequant_user is not None:
-                return dequant_user
+            found = _find_user_with_target(user, targets)
+            if found is not None:
+                return found
 
         if user.op == 'call_module':
             gm = user.meta['submodule']
             placeholder = next(n for n in gm.graph.nodes if n.name == node.name)
-            submod_user = find_user_with_target(placeholder, targets)
-            if submod_user is not None:
-                return submod_user
+
+            found = _find_user_with_target(placeholder, targets)
+            if found is not None:
+                return found
+
+    return None
+
+
+def _align_size(size, width):
+    if width is None:
+        return size
+    return (size + width - 1) // width * width
+
+
+def _get_tensor_size(node, shape, is_output=False, bank_width=None):
+    val = node.value
+    if isinstance(val, torch.Tensor):
+        dtype = node.meta.get('dtype') or val.dtype
+        numel = math.prod(shape) if shape is not None else val.numel()
+        tensor_size = numel * dtype_byte_size(dtype)
+
+        conv_targets = (
+            torch.ops.aten.conv2d.default,
+            torch.ops.quantized_ops.conv2d.default
+        )
+        conv_user = _find_user_with_target(node, conv_targets)
+
+        if conv_user is not None:
+            dim = 1 if conv_user.target == torch.ops.aten.conv2d.default else -1
+            if val.shape[dim] == 3:
+                logger.info(f"Increase memory for conv2d input {node} by 3x")
+                tensor_size *= 3
+
+        # If this is an output during scratchpad allocation, we don't care
+        # downstream layers
+        if is_output:
+            return tensor_size
+
+        # TODO: handle the case where one node has multiple users
+        if _find_user_with_target(node, torch.ops.aten.softmax.int):
+            logger.info(f"Increase memory for softmax input {node} by 2x")
+            return tensor_size * 2
+
+        if _find_user_with_target(node, torch.ops.aten.layer_norm.default):
+            logger.info(f"Increase memory for layer_norm input {node} by 2x")
+            return (tensor_size + numel) * 2
+
+        return tensor_size
+
+    if isinstance(val, (tuple, list)):
+        if shape is not None and isinstance(shape, (tuple, list)):
+            key = "tiled_output_sizes"
+            numel_iter = (math.prod(s) for s in shape)
+        else:
+            key = "output_sizes"
+            numel_iter = (t.numel() for t in val)
+
+        dtype_iter = node.meta.get('dtype') or (None for _ in val)
+
+        sizes = [
+            _align_size(n * dtype_byte_size(dt or t.dtype), bank_width)
+            for t, n, dt in zip(val, numel_iter, dtype_iter)
+        ]
+
+        node.meta[key] = sizes
+        return _align_size(sum(sizes), bank_width)
+
+    logger.warning(f"Node {node} has a non-tensor output")
     return None
 
 
@@ -100,54 +168,15 @@ class MemoryAllocator:
             alignment = self.bank_width
         else:
             return size
-        return (size + alignment - 1) // alignment * alignment
+        return _align_size(size, alignment)
 
-    def get_tensor_size(self, node, shape, align_bank=False, is_scratch_output=False):
-        if isinstance(node.value, torch.Tensor):
-            dtype = node.meta.get('dtype') or node.value.dtype
-            numel = math.prod(shape) if shape is not None else node.value.numel()
-            tensor_size = numel * dtype_byte_size(dtype)
+    def get_tensor_size(self, node, shape, align_bank=False, is_output=False):
+        size = _get_tensor_size(node, shape, is_output, self.bank_width)
 
-            conv2d_node = find_user_with_target(node, (
-                torch.ops.aten.conv2d.default,
-                torch.ops.quantized_ops.conv2d.default,
-            ))
-            if conv2d_node is not None:
-                dim = 1 if conv2d_node.target == torch.ops.aten.conv2d.default else -1
-                if node.value.shape[dim] == 3:
-                    logger.info(f"Increasing size for conv2d input {node} by 3x")
-                    tensor_size *= 3
+        if size is None:
+            return self.align_size(size, align_bank)
 
-            # TODO: handle the case where one node has multiple users
-            if not is_scratch_output:
-                user = find_user_with_target(node, (
-                    torch.ops.aten.softmax.int, torch.ops.aten.layer_norm.default,
-                ))
-                if user is not None:
-                    if user.target == torch.ops.aten.layer_norm.default:
-                        logger.info(f"Increasing size for layernorm input {node} by {tensor_size + numel * 2} bytes")
-                        tensor_size += tensor_size + numel * 2
-                    else:
-                        logger.info(f"Increasing size for softmax input {node} by {tensor_size} bytes")
-                        tensor_size *= 2
-
-            return self.align_size(tensor_size, align_bank)
-
-        if isinstance(node.value, (tuple, list)):
-            dtypes = node.meta.get('dtype', [None] * len(node.value))
-            if shape is not None and isinstance(shape, (tuple, list)):
-                numel = [math.prod(s) for s in shape]
-            else:
-                numel = [t.numel() for t in node.value]
-            key = "tiled_output_sizes" if shape is not None else "output_sizes"
-            node.meta[key] = [
-                self.align_size(numel[i] * dtype_byte_size(dtypes[i] or t.dtype))
-                for i, t in enumerate(node.value)
-            ]
-            return self.align_size(sum(node.meta[key]), align_bank=align_bank)
-
-        logger.warning(f"Node {node} has a non-tensor output")
-        return None
+        return size
 
     def allocate_memory(
         self,
@@ -156,10 +185,10 @@ class MemoryAllocator:
         shape=None,
         align_bank=False,
         expand_on_failure=False,
-        is_scratch_output=False,
+        is_output=False,
     ):
         if not hasattr(node, 'value'):
-            print(f"Node {node} does not have a value attribute")
+            logger.warning(f"Node {node} does not have a value attribute")
             return None
 
         # Skip allocation for quantization scaling factors
@@ -173,7 +202,7 @@ class MemoryAllocator:
 
         tensor_size = (
             size if size is not None else
-            self.get_tensor_size(node, shape, align_bank, is_scratch_output)
+            self.get_tensor_size(node, shape, align_bank, is_output)
         )
 
         if tensor_size is None:

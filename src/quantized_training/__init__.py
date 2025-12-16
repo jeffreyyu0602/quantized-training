@@ -83,7 +83,11 @@ OPERATOR_MAPPINGS = {
     "avgpool2d": [nn.AdaptiveAvgPool2d, F.adaptive_avg_pool2d],
     "layer_norm": ["layer_norm", nn.LayerNorm, F.layer_norm],
     "softmax": ["softmax", nn.Softmax, F.softmax],
-    "quantize": [quantized_ops.quantize.default, quantized_ops.quantize_mx.default],
+    "quantize": [
+        quantized_ops.quantize.default,
+        quantized_ops.quantize_mx.default,
+        quantized_ops.quantize_mx_outlier.default
+    ],
     "dequantize": [quantized_ops.dequantize.default],
 }
 
@@ -162,7 +166,7 @@ def transform(
     eliminate_reshape_with_no_effect(model)
 
     if cache_size is not None:
-        run_vector_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
+        run_vector_op_l2_tiling(model, unroll_dims[1], cache_size, num_banks)
 
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)

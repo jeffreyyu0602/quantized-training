@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import List, Dict, Callable, Union, Any
 
 import graphviz
+import numpy as np
 import torch
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
@@ -16,6 +17,7 @@ from torch.fx.operator_schemas import normalize_function
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 from transformers.utils.import_utils import is_torch_greater_or_equal
 
+from .banking import _get_scope, get_banking_strategies_for_op
 from .mapping_utils import (
     is_conv2d,
     is_elementwise_op,
@@ -1130,17 +1132,7 @@ def get_tiled_tensor(arg, tiled_shapes=None):
     return tensor[tuple(slices)]
 
 
-def conv2d_layout(shape, is_weight=False, do_transpose=False):
-    assert len(shape) == 4, "Conv2d shape must be 4D"
-    if not do_transpose:
-        return shape
-    if is_weight:
-        return (shape[2], shape[3], shape[1], shape[0])
-    else:
-        return (shape[0], shape[2], shape[3], shape[1])
-
-
-def normalize_shape(node, shape):
+def get_node_to_key_map(node):
     args_and_kwargs = normalize_function(
         node.target,
         node.args,
@@ -1152,6 +1144,11 @@ def normalize_shape(node, shape):
         for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
     }
     node_to_key[node] = "output"
+    return node_to_key
+
+
+def normalize_shape(node, shape):
+    node_to_key = get_node_to_key_map(node)
     shape = {
         n: shape[k] for n, k in node_to_key.items() if k in shape
     }
@@ -1171,69 +1168,62 @@ def get_reference_node(nodes):
     return first_node
 
 
-def _calculate_gemm_new_shapes(node, output_shape, tiling):
-    """Calculates specific shape layouts for GEMM (Conv2d or MatMul)."""
-    from .passes.tiling import construct_tiled_shape
+def _need_allocate(node):
+    return (
+        not re.fullmatch(r'(code|qmap)(_\d+)?', node.name)
+        and isinstance(node.value, torch.Tensor)
+        and (node.value.numel() > 1 or node.op != "get_attr")
+    )
 
-    bs = node.kwargs.get("block_size", 1)
+
+def _calculate_gemm_new_shapes(node, output_shape):
+    from .passes.tiling import _conv2d_layout, _calculate_gemm_shapes
+
+    input_node = node.args[0]
     transposed = node.meta.get("transposed", False)
-    effective_tiling = tiling
+    bs = node.meta.get("block_size", 1)
 
     if is_conv2d(node):
-        N, tile_iy, tile_ix, tile_c = conv2d_layout(
+        # Certain conv2d layers (e.g. conv1) have extra pixels for alignment
+        # purpose. We directly take the input shape from the input node.
+        N, iy_tiled, ix_tiled, c_tiled = _conv2d_layout(
             node.args[0].shape, False, not transposed
         )
-        kH, kW, _, _ = conv2d_layout(
-            node.args[1].shape, True, not transposed
-        )
-        _, _, _, tile_k = conv2d_layout(output_shape, False, not transposed)
+        kH, kW, _, _ = _conv2d_layout(node.args[1].shape, True, not transposed)
+        _, _, _, k_tiled = _conv2d_layout(output_shape, False, not transposed)
 
         new_shapes = {
-            "input": (N, tile_c, tile_iy, tile_ix),
-            "weight": (tile_k, tile_c, kH, kW),
-            "bias": (tile_k,),
-            "input_scale": (N, tile_c // bs, tile_iy, tile_ix),
-            "weight_scale": (tile_k, tile_c // bs, kH, kW),
+            "input": (N, c_tiled, iy_tiled, ix_tiled),
+            "weight": (k_tiled, c_tiled, kH, kW),
+            "bias": (k_tiled,),
+            "input_scale": (N, c_tiled // bs, iy_tiled, ix_tiled),
+            "weight_scale": (k_tiled, c_tiled // bs, kH, kW),
         }
 
         new_shapes = {
-            k: conv2d_layout(v, "weight" in k, transposed) if k != "bias" else v
+            k: _conv2d_layout(v, "weight" in k, transposed) if k != "bias" else v
             for k, v in new_shapes.items()
         }
     else:
         x_tiled = math.prod(output_shape[:-1])
         k_tiled = output_shape[-1]
-        c_tiled = node.args[0].value.shape[-1]
+        c_tiled = input_node.shape[-1]
 
-        input_value = node.args[0].value
-        tiled_input_shape = construct_tiled_shape(
-            input_value.shape, x_tiled, list(range(input_value.ndim))[:-1]
-        )
+        new_shapes = _calculate_gemm_shapes(node, (x_tiled, c_tiled, k_tiled))
 
-        weight_transposed = is_matmul(node) ^ transposed
-        weight_shape = (c_tiled, k_tiled) if weight_transposed else (k_tiled, c_tiled)
-        weight_scale_shape = (
-            (c_tiled // bs, k_tiled) if weight_transposed else (k_tiled, c_tiled // bs)
-        )
-
-        weight_key = "other" if is_matmul(node) else "weight"
-
-        new_shapes = {
-            "input": tiled_input_shape[:-1] + (c_tiled,),
-            weight_key: weight_shape,
-            "bias": (k_tiled,),
-            "input_scale": tiled_input_shape[:-1] + (c_tiled // bs,),
-            "weight_scale": weight_scale_shape,
-        }
-
-        # Tiling tuple adjustment for linear layers
-        effective_tiling = (math.prod(tiling[:-1]), tiling[-1])
-
-    return normalize_shape(node, new_shapes), effective_tiling
+    return normalize_shape(node, new_shapes)
 
 
 def run_fused_op_l2_tiling(
-    node, module, tiled_shapes, allocator, unroll_dims, align_banks=True,
+    node,
+    module,
+    key_to_node,
+    tiled_shapes,
+    unroll_dims,
+    strategy,
+    scratchpad_size,
+    bank_width,
+    bank_size,
 ):
     from .passes.tiling import get_valid_tiling, get_tiled_shape
 
@@ -1242,6 +1232,11 @@ def run_fused_op_l2_tiling(
 
     first_node = get_reference_node(module.graph.nodes)
 
+    total_size, scratchpad_map = strategy.evaluate(
+        key_to_node, node, tiled_shapes, bank_width, bank_size
+    )
+
+    # Unsupported operations for L2 tiling adjustment
     if (
         not is_gemm_op(first_node) and
         not is_elementwise_op(first_node) and
@@ -1252,27 +1247,16 @@ def run_fused_op_l2_tiling(
             torch.ops.quantized_ops.quantize_mx.default,
         ]
     ):
-        return tiled_shapes
+        return tiled_shapes, total_size, scratchpad_map
 
+    # Skip if GEMM already has reshape/dequantize fused
     is_gemm = is_gemm_op(first_node)
     if is_gemm and any(
         "reshape" in n.meta or "dequantize" in n.meta
         for n in list(module.graph.nodes) + [node]
     ):
         logger.info(f"Submodule {node} is GEMM with fused reshape/dequantize")
-        return tiled_shapes
-
-    if not tiled_shapes:
-        tiled_shapes = {n: n.value.shape for n in node.all_input_nodes}
-        if isinstance(node.value, torch.Tensor):
-            tiled_shapes[node] = node.value.shape
-        else:
-            tiled_shapes[node] = tuple(t.shape for t in node.value)
-    else:
-        tiled_shapes = {
-            n: k for n, k in tiled_shapes.items()
-            if n in node.all_input_nodes or n == node
-        }
+        return tiled_shapes, total_size, scratchpad_map
 
     min_sizes = None
     transposed = first_node.meta.get("transposed", False)
@@ -1295,51 +1279,48 @@ def run_fused_op_l2_tiling(
 
     tilings = get_valid_tiling(output_shape, reverse=is_gemm, min_sizes=min_sizes)
 
-    for tiled_output_shape, tiling in tilings:
+    for tile_sizes, tiling in tilings:
         new_shapes = {}
 
         if is_gemm:
-            new_shapes, tiling = _calculate_gemm_new_shapes(
-                first_node, tiled_output_shape, tiling
-            )
+            new_shapes = _calculate_gemm_new_shapes(first_node, tile_sizes)
 
         for n in node.all_input_nodes:
-            if (
-                n not in new_shapes
-                and not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
-                and isinstance(n.value, torch.Tensor)
-                and (n.value.numel() > 1 or n.op != "get_attr")
-            ):
+            if n not in new_shapes and _need_allocate(n):
                 new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
 
-        if isinstance(node.value, (tuple, list)):
-            new_shapes[node] = [get_tiled_shape(s, tiling) for s in tiled_shapes[node]]
+        if isinstance(node.value, torch.Tensor):
+            new_shapes[node] = tile_sizes
         else:
-            assert isinstance(node.value, torch.Tensor)
-            new_shapes[node] = tiled_output_shape
+            new_shapes[node] = [
+                get_tiled_shape(s, tiling) for s in tiled_shapes[node]
+            ]
 
-        total_size = sum(
-            allocator.get_tensor_size(n, s, align_banks, n == node)
-            for n, s in new_shapes.items() if n in node.all_input_nodes or n == node
+        total_size, scratchpad_map = strategy.evaluate(
+            key_to_node, node, new_shapes, bank_width, bank_size
         )
 
-        if total_size <= allocator.total_memory:
+        logger.debug("Proposed new shapes:")
+        for n, s in new_shapes.items():
+            logger.debug(f"  {n}: {s}")
+        logger.debug(f"  Total size: {total_size}, Available: {scratchpad_size}\n")
+
+        if total_size <= scratchpad_size:
+            # Tiling tuple adjustment for linear and matmul layers
+            if is_gemm and not is_conv2d(first_node):
+                tiling = (math.prod(tiling[:-1]), tiling[-1])
+
             if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
-                # Pad the shorter tiling with leading 1s to match lengths
-                if len(orig_tiling) > len(tiling):
-                    tiling = (1,) * (len(orig_tiling) - len(tiling)) + tiling
-                elif len(tiling) > len(orig_tiling):
-                    orig_tiling = (1,) * (len(tiling) - len(orig_tiling)) + orig_tiling
-                tiling = tuple(a * b for a, b in zip(orig_tiling, tiling))
+                tiling = tuple(np.multiply(orig_tiling, tiling))
 
             if math.prod(tiling) == 1:
-                return {}
-
-            first_node.meta["l2_tiling"] = tiling
-            return new_shapes
+                new_shapes = None
+            else:
+                first_node.meta["l2_tiling"] = tiling
+            return new_shapes, total_size, scratchpad_map
 
     logger.warning(f"Failed to adjust tiling for {node}")
-    return {}
+    return None, total_size, scratchpad_map
 
 
 def get_tiled_input_shape(shape1, shape2):
@@ -1446,13 +1427,14 @@ def run_memory_mapping(
             return
 
         bank_size = cache_size // num_banks if num_banks is not None else None
-        sp_alloc = MemoryAllocator(
-            cache_size, bank_width, bank_size, MemorySpace.SCRATCHPAD
-        )
 
         if node.op == "call_module":
             mod = named_modules[node.target]
             first_node = get_reference_node(mod.graph.nodes)
+
+            for n in list(mod.graph.nodes):
+                if n != first_node:
+                    n.meta.pop("l2_tiling", None)
         else:
             first_node = node
 
@@ -1460,16 +1442,18 @@ def run_memory_mapping(
             first_node, first_node.meta.get("tiled_shapes", {})
         )
 
-        # Calculate tiled shape for other input/output nodes
-        if node.op == "call_module" and tiled_shapes:
+        if not tiled_shapes:
+            tiled_shapes = {n: n.shape for n in node.all_input_nodes}
+            if isinstance(node.value, torch.Tensor):
+                tiled_shapes[node] = node.shape
+            else:
+                tiled_shapes[node] = tuple(t.shape for t in node.value)
+        elif node.op == "call_module":
             output_shape = tiled_shapes[first_node]
+
+            # Calculate tiled shape for other input/output nodes
             for n in node.all_input_nodes:
-                if (
-                    n not in tiled_shapes
-                    and not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
-                    and isinstance(n.value, torch.Tensor)
-                    and (n.value.numel() > 1 or n.op != "get_attr")
-                ):
+                if n not in tiled_shapes:
                     tiled_shapes[n] = get_tiled_input_shape(output_shape, n.value.shape)
 
             l2_tiling = first_node.meta.get("l2_tiling")
@@ -1480,22 +1464,50 @@ def run_memory_mapping(
                     get_tiled_shape(t.shape, l2_tiling) for t in node.value
                 )
 
-        if node.op == "call_module":
-            mod = named_modules[node.target]
-            new_shapes = run_fused_op_l2_tiling(
-                node, mod, tiled_shapes, sp_alloc, unroll_dims
-            )
+        input_nodes = set(node.all_input_nodes)
 
-            if not new_shapes:
-                new_shapes = run_fused_op_l2_tiling(
-                    node, mod, tiled_shapes, sp_alloc, unroll_dims, False
+        tiled_shapes = {
+            n: s for n, s in tiled_shapes.items()
+            if n in input_nodes and _need_allocate(n) or n is node
+        }
+
+        op_scope = _get_scope(first_node.target)
+        node_to_key = get_node_to_key_map(first_node)
+        key_to_node = {f"{op_scope}::{v}": k for k, v in node_to_key.items()}
+
+        strategies = get_banking_strategies_for_op(first_node.target)
+
+        logger.debug(f"Allocating scratchpad for {node} with strategies:")
+
+        for strategy in strategies:
+            if node.op == "call_module":
+                new_shapes, total_size, scratchpad_map = run_fused_op_l2_tiling(
+                    node,
+                    mod,
+                    key_to_node,
+                    tiled_shapes,
+                    unroll_dims,
+                    strategy,
+                    scratchpad_size=cache_size,
+                    bank_width=bank_width,
+                    bank_size=bank_size,
                 )
 
-            tiled_shapes = new_shapes
+                if total_size <= cache_size and new_shapes is not None:
+                    tiled_shapes = new_shapes
+            else:
+                total_size, scratchpad_map = strategy.evaluate(
+                    key_to_node, node, tiled_shapes, bank_width, bank_size
+                )
 
-            for n in list(mod.graph.nodes):
-                if n != first_node:
-                    n.meta.pop("l2_tiling", None)
+            if total_size <= cache_size:
+                logger.info(f"  Successful tiling with strategy: {strategy}")
+                break
+
+        logger.debug("Scratchpad allocation result:")
+        for n, s in scratchpad_map.items():
+            logger.debug(f"  {n}: {s}")
+        logger.debug("\n\n")
 
         if tiled_shapes:
             node.meta["tiled_shapes"] = tiled_shapes
@@ -1504,70 +1516,10 @@ def run_memory_mapping(
         if strides is not None:
             node.meta["tile_strides"] = normalize_shape(first_node, strides)
 
-        tensor_sizes = {
-            n: sp_alloc.get_tensor_size(n, tiled_shapes.get(n))
-            for n in node.all_input_nodes
-            if (
-                not re.fullmatch(r'(code|qmap)(_\d+)?', n.name)
-                and isinstance(n.value, torch.Tensor)
-                and (n.value.numel() > 1 or n.op != "get_attr")
-            )
-        }
-
-        if isinstance(node.value, torch.Tensor):
-            tensor_sizes[node] = sp_alloc.get_tensor_size(
-                node, tiled_shapes.get(node), is_scratch_output=True
-            )
-        elif isinstance(node.value, (tuple, list)):
-            output_shapes = tiled_shapes.get(node, [tuple(t.shape) for t in node.value])
-            tensor_sizes[node] = sp_alloc.get_tensor_size(
-                node, output_shapes, is_scratch_output=True
-            )
-
-        tensor_sizes = dict(sorted(tensor_sizes.items(), key=lambda x: x[1], reverse=True))
-
-        if num_banks is not None and len(tensor_sizes) > num_banks:
+        if total_size > cache_size:
             logger.warning(
-                f"{node}: number of tensors ({len(tensor_sizes)}) exceeds number "
-                f"of banks ({num_banks})"
-            )
-
-        bytes_to_allocate = sum(tensor_sizes.values())
-        remaining_cache_size = cache_size
-
-        scratchpad_map = {}
-        unaligned_nodes = []
-
-        # Allocate large tensors first for better cache utilization
-        for n, size in tensor_sizes.items():
-            aligned_size = sp_alloc.align_size(size, True)
-
-            bytes_to_allocate -= size
-            align_bank = bytes_to_allocate <= remaining_cache_size - aligned_size
-            remaining_cache_size -= aligned_size if align_bank else size
-
-            if not align_bank:
-                unaligned_nodes.append(n.name)
-
-            scratchpad_map[n] = sp_alloc.allocate_memory(
-                n,
-                shape=tiled_shapes.get(n),
-                align_bank=align_bank,
-                expand_on_failure=True,
-                is_scratch_output=(n == node),
-            )
-
-        if sp_alloc.total_memory != cache_size:
-            logger.warning(
-                f"[MEM_ALLOC_FAIL] {node}: expanding cache size from "
-                f"{cache_size} to {sp_alloc.total_memory}."
-            )
-
-        if unaligned_nodes:
-            names = ', '.join(unaligned_nodes)
-            logger.warning(
-                f"[BANK_ASSIGN_FAIL] {node}: tensors {names} could not "
-                f"be assigned to individual banks"
+                f"[MEM_ALLOC_FAIL] {node}: Could not allocate scratchpad "
+                f"memory of size {total_size} bytes (limit: {cache_size} bytes)"
             )
 
         node.meta["scratchpad_map"] = scratchpad_map
@@ -1702,7 +1654,7 @@ def run_memory_mapping(
                 continue
 
             if node.meta.get("memory") is None:
-                print(f"WARNING: stack node {node} does not have memory allocated")
+                logger.warning(f"WARNING: stack node {node} does not have memory allocated")
 
         allocate_for_stack_op(node)
 
@@ -1791,16 +1743,24 @@ def gen_compute_graph(model, output_file="compute_graph", max_users=10):
     nodes = {}
     edges = []
     named_modules = dict(model.named_modules(remove_duplicate=False))
+
+    def compress(s, max_len=15):
+        if len(s) <= max_len:
+            return s
+        return s[:10] + "…" + s[-6:]
+
     for node in model.graph.nodes:
         if node.op == "get_attr" and "qmap" in node.name:
             continue
 
-        header = node.name
+        header = compress(node.name)
 
         if isinstance(node.value, torch.Tensor):
             header += f"&#92;n{str(tuple(node.value.shape))}"
             if (dtype := node.meta.get("dtype", None)) is not None:
                 header += f"&#92;n{dtype}"
+            elif node.value.dtype not in [torch.float, torch.bfloat16]:
+                header += f"&#92;n{node.value.dtype}"
         elif isinstance(node.value, (tuple, list)):
             shape_str = ", ".join([str(tuple(t.shape)) for t in node.value])
             header += f"&#92;n{shape_str}"

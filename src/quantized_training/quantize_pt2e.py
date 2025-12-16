@@ -486,29 +486,6 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 )
             )
 
-    if activation_post_process.outlier_threshold is not None:
-        assert input_node.op != "get_attr", (
-            "Outlier suppression is not supported for weight quantization."
-        )
-        with graph.inserting_before(node):
-            filter_node = graph.call_function(
-                torch.ops.quantized_ops.filter_outlier.default,
-                (input_node, activation_post_process.outlier_threshold),
-                {}
-            )
-            node_to_quantize = graph.call_function(
-                operator.getitem, (filter_node, 0), {}
-            )
-            csr_data_node = graph.call_function(
-                operator.getitem, (filter_node, 1), {}
-            )
-            indices_node = graph.call_function(
-                operator.getitem, (filter_node, 2), {}
-            )
-            indptr_node = graph.call_function(
-                operator.getitem, (filter_node, 3), {}
-            )
-
     quant_map = get_quantization_map(activation_post_process.dtype, device)
     dequant_code, quant_code = None, None
 
@@ -569,21 +546,39 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                 scale_qmap = create_getattr_from_value(
                     model, model.graph, "qmap", activation_post_process.scale_qmap)
 
-            quantize_mx_node = model.graph.call_function(
-                torch.ops.quantized_ops.quantize_mx.default,
-                (
-                    node_to_quantize,
-                    get_attr_node,
-                    activation_post_process.ch_axis,
-                    activation_post_process.block_size,
-                    activation_post_process.quant_max,
-                    activation_post_process.force_scale_power_of_two,
-                    scale_qmap,
-                    quant_code,
-                ),
-            )
+            target = torch.ops.quantized_ops.quantize_mx.default
+            args = [
+                node_to_quantize,
+                get_attr_node,
+                activation_post_process.ch_axis,
+                activation_post_process.block_size,
+                activation_post_process.quant_max,
+                activation_post_process.force_scale_power_of_two,
+                scale_qmap,
+                quant_code,
+            ]
+
+            if activation_post_process.outlier_threshold is not None:
+                target = torch.ops.quantized_ops.quantize_mx_outlier.default
+                args.extend([
+                    activation_post_process.outlier_threshold,
+                    max(activation_post_process.outlier_max_pct, 0.01),
+                ])
+
+            quantize_mx_node = model.graph.call_function(target, tuple(args))
             scale_node = graph.call_function(operator.getitem, (quantize_mx_node, 0))
             quantized_node = graph.call_function(operator.getitem, (quantize_mx_node, 1))
+
+            if activation_post_process.outlier_threshold is not None:
+                csr_data_node = graph.call_function(
+                    operator.getitem, (quantize_mx_node, 2)
+                )
+                indices_node = graph.call_function(
+                    operator.getitem, (quantize_mx_node, 3)
+                )
+                indptr_node = graph.call_function(
+                    operator.getitem, (quantize_mx_node, 4)
+                )
 
         quantize_mx_node.meta["dtype"] = (
             (
@@ -594,10 +589,35 @@ def _replace_observer_with_quantize_mx_node_decomposed(
             activation_post_process.dtype,
         )
 
+        if activation_post_process.outlier_threshold is not None:
+            quantize_mx_node.meta["dtype"] += (None, "int16", "int16")
+
         source_fn_st = quantize_mx_node.meta.setdefault("source_fn_stack", [])
         source_fn_st.append((quantize_mx_node.name, quantize_mx_node.target))
     else:
         with model.graph.inserting_before(node):
+            if activation_post_process.outlier_threshold is not None:
+                filter_outlier_node = graph.call_function(
+                    torch.ops.quantized_ops.filter_outlier.default,
+                    (
+                        input_node,
+                        activation_post_process.outlier_threshold,
+                        max(activation_post_process.outlier_max_pct, 0.01),
+                    ),
+                )
+                input_node = graph.call_function(
+                    operator.getitem, (filter_outlier_node, 0)
+                )
+                csr_data_node = graph.call_function(
+                    operator.getitem, (filter_outlier_node, 1)
+                )
+                indices_node = graph.call_function(
+                    operator.getitem, (filter_outlier_node, 2)
+                )
+                indptr_node = graph.call_function(
+                    operator.getitem, (filter_outlier_node, 3)
+                )
+
             calculate_qparam_op_inputs = [
                 input_node,
                 activation_post_process.ch_axis,
@@ -635,6 +655,9 @@ def _replace_observer_with_quantize_mx_node_decomposed(
                     quant_code
                 ),
             )
+
+        if activation_post_process.outlier_threshold is not None:
+            filter_outlier_node.meta["dtype"] = (None, None, "int16", "int16")
 
         source_fn_st = quantized_node.meta.setdefault("source_fn_stack", [])
         source_fn_st.append((quantized_node.name, quantized_node.target))
@@ -729,26 +752,36 @@ def _replace_observer_with_quantize_mx_node_decomposed(
 
             weight_node = mx_op_node.args[1]
 
-            with graph.inserting_after(mx_op_node):
-                spmm_node = graph.call_function(
-                    torch.ops.quantized_ops.spmm_csr.default,
-                    (csr_data_node, indices_node, indptr_node, weight_node),
-                    {
-                        "B_scale": kwargs.get("weight_scale"),
-                        "B_code": kwargs.get("weight_code"),
-                        "block_size": activation_post_process.block_size,
-                    },
-                )
+            if mx_op_node.target == torch.ops.quantized_ops.linear_mx.default:
+                mx_op_node.kwargs = {
+                    **mx_op_node.kwargs,
+                    "A_data": csr_data_node,
+                    "A_indices": indices_node,
+                    "A_indptr": indptr_node,
+                }
+            else:
+                with graph.inserting_before(mx_op_node):
+                    spmm_node = graph.call_function(
+                        torch.ops.quantized_ops.spmm_csr.default,
+                        (csr_data_node, indices_node, indptr_node, weight_node),
+                        {
+                            "B_scale": kwargs.get("weight_scale"),
+                            "B_code": kwargs.get("weight_code"),
+                            "block_size": activation_post_process.block_size,
+                        },
+                    )
 
-            with graph.inserting_after(spmm_node):
-                add_node = graph.call_function(
-                    torch.ops.aten.add.Tensor,
-                    (spmm_node, mx_op_node),
-                    {},
-                )
+                with graph.inserting_after(mx_op_node):
+                    add_node = graph.call_function(
+                        torch.ops.aten.add.Tensor,
+                        (spmm_node, mx_op_node),
+                        {},
+                    )
 
-            mx_op_node.replace_all_uses_with(add_node)
-            add_node.replace_input_with(add_node, mx_op_node)
+                add_node.meta["source_fn_stack"] = [(add_node.name, add_node.target)]
+
+                mx_op_node.replace_all_uses_with(add_node)
+                add_node.replace_input_with(add_node, mx_op_node)
 
 
 def _replace_observer_with_group_wise_affine_quantize_dequantize_node_decomposed(
