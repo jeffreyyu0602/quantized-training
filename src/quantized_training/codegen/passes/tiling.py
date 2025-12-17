@@ -1349,7 +1349,7 @@ def run_matrix_op_l2_tiling(
 
             split_conv2d_node(model, node, tile_sizes)
 
-        if is_linear(node) or is_matmul(node):
+        elif is_linear(node) or is_matmul(node):
             tile_sizes, tiled_shape = select_gemm_tiling(
                 node, unroll, cache_size, None, bank_size
             )

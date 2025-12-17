@@ -737,116 +737,130 @@ def fold_transpose_into_constant(
     return True
 
 
+def _update_tiled_shapes(node: Node) -> None:
+    """Updates the tiled_shapes metadata for a transposed node."""
+    if (tiled_shapes := node.meta.get("tiled_shapes")) is None:
+        return
+
+    for key in ["weight", "other", "weight_scale"]:
+        if key in tiled_shapes:
+            d0, d1 = tiled_shapes[key]
+            tiled_shapes[key] = (d1, d0)
+
+
+def _insert_transpose_op(
+    model: GraphModule,
+    node: Node,
+    user: Node,
+    transposed_nodes: dict
+) -> Optional[List[Node]]:
+    """Inserts a transpose operation before the user node."""
+    with model.graph.inserting_before(user):
+        new_node = model.graph.call_function(
+            torch.ops.aten.transpose.int, (node, -2, -1)
+        )
+
+    new_node.meta["dtype"] = node.meta.get("dtype")
+    propagate_shape(new_node, model)
+    user.replace_input_with(node, new_node)
+
+    path = find_upstream_matching_transpose(new_node)
+    if not path:
+        return None
+
+    node_order = {n: i for i, n in enumerate(model.graph.nodes)}
+    sorted_path = sorted(path, key=lambda n: node_order[n])
+
+    success = process_double_transpose_chain(
+        model, sorted_path, transposed_nodes
+    )
+    return None if success else sorted_path
+
+
+def _process_linear_node(
+    model: GraphModule,
+    node: Node,
+    transpose_weight: bool,
+    skip_fc: bool
+) -> None:
+    """Handles weight mutation for Linear nodes."""
+    is_fc = math.prod(node.args[0].shape[:-1]) == 1
+    if (is_fc and skip_fc) or (not is_fc and not transpose_weight):
+        return
+
+    weight_node = node.args[1]
+    weight = fetch_attr(model, weight_node.target)
+    weight.data = weight.data.T
+
+    if (scale_node := node.kwargs.get("weight_scale")) is not None:
+        scale = fetch_attr(model, scale_node.target)
+        scale.data = scale.data.T
+
+    # Mark spmm_csr users as having a transposed weight
+    for user in list(weight_node.users):
+        if user.target in [
+            torch.ops.quantized_ops.linear_mx.default,
+            torch.ops.quantized_ops.spmm_csr.default,
+        ]:
+            user.kwargs = {**user.kwargs, "weight_transposed": True}
+
+    if node.target == torch.ops.aten.linear.default:
+        node.target = torch.ops.quantized_ops.linear.default
+
+    _update_tiled_shapes(node)
+    node.meta["transposed"] = True
+
+
+def _process_matmul_node(
+    model: GraphModule,
+    node: Node,
+    transpose_weight: bool,
+    transpose_fc: bool,
+    transposed_nodes: dict
+) -> None:
+    """Handles graph transformation for MatMul nodes."""
+    is_fc = math.prod(node.args[0].shape[:-1]) == 1
+    # Note: Logic preserved from original (returns if FC and we WANT transpose_fc)
+    if (is_fc and transpose_fc) or (not is_fc and transpose_weight):
+        return
+
+    weight_node = node.args[1]
+    path = _insert_transpose_op(model, weight_node, node, transposed_nodes)
+    if path is not None:
+        move_transpose_before_dq(model, path, transposed_nodes)
+
+    if (scale_node := node.kwargs.get("weight_scale")) is not None:
+        path = _insert_transpose_op(model, scale_node, node, transposed_nodes)
+        if path is not None:
+            fold_transpose_into_constant(model, path, transposed_nodes)
+
+    if node.target == torch.ops.aten.matmul.default:
+        node.target = torch.ops.quantized_ops.matmul.default
+
+    _update_tiled_shapes(node)
+    node.meta["transposed"] = True
+
+
 def transpose_linear_weights(
-    model: GraphModule, transpose_weight, transpose_fc: bool = False
-):
+    model: GraphModule, transpose_weight: bool, transpose_fc: bool = False
+) -> GraphModule:
     """
     Transpose the weights of linear layers in the given FX graph module.
-
-    Args:
-        model (GraphModule): The FX graph module to transform.
-        transpose_weight (bool): Whether to transpose weights of linear layers.
-        transpose_fc (bool): Whether to transpose weights of fully connected layers.
-
-    Returns:
-        GraphModule: The transformed FX graph module with transposed weights.
     """
     skip_fc = not transpose_fc
+
     torch.nn.functional.linear = make_linear_wrapper(transpose_weight, skip_fc)
     torch.matmul = make_matmul_wrapper(transpose_weight, skip_fc)
 
     transposed_nodes = {}
 
-    def _update_tiled_shapes(node: Node):
-        if (tiled_shapes := node.meta.get("tiled_shapes")) is None:
-            return
-
-        if "weight" in tiled_shapes:
-            w0, w1 = tiled_shapes["weight"]
-            tiled_shapes["weight"] = (w1, w0)
-
-        if "weight_scale" in tiled_shapes:
-            s0, s1 = tiled_shapes["weight_scale"]
-            tiled_shapes["weight_scale"] = (s1, s0)
-
-    def _handle_linear(node: Node, is_fc) -> None:
-        if (is_fc and skip_fc) or (not is_fc and not transpose_weight):
-            return
-
-        weight_node = node.args[1]
-        weight = fetch_attr(model, weight_node.target)
-        weight.data = weight.data.T
-
-        if (scale_node := node.kwargs.get("weight_scale")) is not None:
-            scale = fetch_attr(model, scale_node.target)
-            scale.data = scale.data.T
-
-        # Mark spmm_csr users as having a transposed weight.
-        for user in list(weight_node.users):
-            if user.target in [
-                torch.ops.quantized_ops.linear_mx.default,
-                torch.ops.quantized_ops.spmm_csr.default,
-            ]:
-                user.kwargs = {**user.kwargs, "weight_transposed": True}
-
-        if node.target == torch.ops.aten.linear.default:
-            node.target = torch.ops.quantized_ops.linear.default
-
-        _update_tiled_shapes(node)
-        node.meta["transposed"] = True
-
-    def _transpose_node(node: Node, user: Node):
-        with model.graph.inserting_before(user):
-            new_node = model.graph.call_function(
-                torch.ops.aten.transpose.int, (node, -2, -1)
-            )
-
-        new_node.meta["dtype"] = node.meta.get("dtype")
-        propagate_shape(new_node, model)
-        user.replace_input_with(node, new_node)
-
-        path = find_upstream_matching_transpose(new_node)
-        if not path:
-            return None
-
-        node_order = {n: i for i, n in enumerate(model.graph.nodes)}
-        sorted_path = sorted(path, key=lambda n: node_order[n])
-
-        success = process_double_transpose_chain(
-            model, sorted_path, transposed_nodes
-        )
-        return None if success else sorted_path
-
-    def _handle_matmul(node: Node, is_fc) -> None:
-        if (is_fc and transpose_fc) or (not is_fc and transpose_weight):
-            return
-
-        weight_node = node.args[1]
-        path = _transpose_node(weight_node, node)
-        if path is not None:
-            move_transpose_before_dq(model, path, transposed_nodes)
-
-        if (scale_node := node.kwargs.get("weight_scale")) is not None:
-            path = _transpose_node(scale_node, node)
-            if path is not None:
-                fold_transpose_into_constant(model, path, transposed_nodes)
-
-        if node.target == torch.ops.aten.matmul.default:
-            node.target = torch.ops.quantized_ops.matmul.default
-
-        _update_tiled_shapes(node)
-        node.meta["transposed"] = True
-
     for node in list(model.graph.nodes):
-        if is_gemm_op(node):
-            input_node = node.args[0]
-            is_fc = math.prod(input_node.shape[:-1]) == 1
-
-            if is_linear(node):
-                _handle_linear(node, is_fc)
-
-            if is_matmul(node):
-                _handle_matmul(node, is_fc)
+        if is_linear(node):
+            _process_linear_node(model, node, transpose_weight, skip_fc)
+        elif is_matmul(node):
+            _process_matmul_node(
+                model, node, transpose_weight, transpose_fc, transposed_nodes
+            )
 
     deduplicate_nodes(model.graph)
     _fuse_quantize_mx_last_axis(model)

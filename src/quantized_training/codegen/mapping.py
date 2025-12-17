@@ -1303,7 +1303,7 @@ def run_fused_op_l2_tiling(
         logger.debug("Proposed new shapes:")
         for n, s in new_shapes.items():
             logger.debug(f"  {n}: {s}")
-        logger.debug(f"  Total size: {total_size}, Available: {scratchpad_size}\n")
+        logger.debug(f"  Total size: {total_size}, Available: {scratchpad_size}")
 
         if total_size <= scratchpad_size:
             # Tiling tuple adjustment for linear and matmul layers
@@ -1507,7 +1507,6 @@ def run_memory_mapping(
         logger.debug("Scratchpad allocation result:")
         for n, s in scratchpad_map.items():
             logger.debug(f"  {n}: {s}")
-        logger.debug("\n\n")
 
         if tiled_shapes:
             node.meta["tiled_shapes"] = tiled_shapes
