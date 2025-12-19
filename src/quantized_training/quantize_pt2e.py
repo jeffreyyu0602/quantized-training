@@ -892,7 +892,7 @@ def fuse_quantize_dequantize_with_previous_op(model: GraphModule):
     previous operation (e.g. matmul, conv2d, etc.), so that the quantize and
     dequantize can be fused with the previous operation.
     """
-    from .codegen.mapping import propagate_shape
+    from .pt2e_utils import propagate_shape
 
     graph = model.graph
 
