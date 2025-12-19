@@ -8,10 +8,6 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 
 from .utils import get_arg_or_kwarg
-from ..mapping import (
-    get_parameter_or_buffer,
-    propagate_shape,
-)
 from ..mapping_utils import (
     is_conv2d,
     is_depthwise_conv,
@@ -19,7 +15,7 @@ from ..mapping_utils import (
     is_gemm_op,
     is_matmul,
 )
-from ...pt2e_utils import get_aten_graph_module, fetch_attr
+from ...pt2e_utils import get_aten_graph_module, fetch_attr, propagate_shape
 from ...quantize_pt2e import create_getattr_from_value
 
 logger = logging.getLogger(__name__)
@@ -49,6 +45,107 @@ def slicing_and_padding_cancel_out(shape, slice_dim, start, end, pad):
     return True
 
 
+def pad_input_node(model, node, input, pad, scale, scale_pad):
+    pad_quantize_mx_input = (
+        scale is not None and
+        input.target == operator.getitem and
+        scale.target == operator.getitem and
+        input.args[0] == scale.args[0] and
+        input.args[0].target == torch.ops.quantized_ops.quantize_mx.default
+    )
+
+    node_to_pad = input.args[0].args[0] if pad_quantize_mx_input else input
+
+    skip_padding = False
+    if node_to_pad.target == torch.ops.aten.slice.Tensor:
+        arg = node_to_pad.args[0]
+        skip_padding = slicing_and_padding_cancel_out(
+            arg.value.shape, *node_to_pad.args[1:], pad
+        )
+
+    if skip_padding:
+        new_input = node_to_pad.args[0]
+    else:
+        with model.graph.inserting_after(node_to_pad):
+            new_input = model.graph.call_function(
+                torch.ops.aten.pad.default, (node_to_pad, pad),
+            )
+
+        propagate_shape(new_input)
+        new_input.meta["dtype"] = node_to_pad.meta.get("dtype")
+
+    if pad_quantize_mx_input:
+        input.args[0].replace_input_with(node_to_pad, new_input)
+        propagate_shape(input.args[0])
+        propagate_shape(input)
+        propagate_shape(scale)
+    else:
+        node.replace_input_with(node_to_pad, new_input)
+
+        if scale is not None and any(x for x in scale_pad):
+            with model.graph.inserting_before(node):
+                padded_scale = model.graph.call_function(
+                    torch.ops.aten.pad.default, (scale, scale_pad),
+                )
+
+            node.replace_input_with(scale, padded_scale)
+
+            propagate_shape(padded_scale)
+            padded_scale.meta["dtype"] = scale.meta.get("dtype")
+
+
+def slice_output(model, output_node, slice_args):
+    sliced_output_users = []
+
+    for user in list(output_node.users.keys()):
+        # Cannot slice microscaling quantization ops.
+        if user.target in [
+            torch.ops.quantized_ops.dequantize.default,
+            torch.ops.quantized_ops.quantize.default,
+        ]:
+            bs = get_arg_or_kwarg(user, 4, "block_size")
+            if bs is None:
+                slice_output(user, slice_args)
+                continue
+
+        if is_elementwise_op(user):
+            if len(user.all_input_nodes) == 1:
+                propagate_shape(user)
+                slice_output(user, slice_args)
+                continue
+
+            # If all inputs have the same slice args, strip the redundant slice.
+            if all(
+                n == output_node
+                or (
+                    n.target == torch.ops.aten.slice.Tensor and
+                    n.args[1:] == slice_args
+                )
+                for n in user.all_input_nodes
+            ):
+                for n in user.all_input_nodes:
+                    if n.target == torch.ops.aten.slice.Tensor:
+                        user.replace_input_with(n, n.args[0])
+
+                propagate_shape(user)
+                slice_output(user, slice_args)
+                continue
+
+        sliced_output_users.append(user)
+
+    if sliced_output_users:
+        with model.graph.inserting_after(output_node):
+            slice_node = model.graph.call_function(
+                torch.ops.aten.slice.Tensor, (output_node, *slice_args),
+            )
+
+        for n in sliced_output_users:
+            n.replace_input_with(output_node, slice_node)
+
+        propagate_shape(slice_node)
+        slice_node.meta["dtype"] = output_node.meta.get("dtype")
+
+
 def pad_matrix_op_dimensions(
     model: GraphModule,
     C_unroll,
@@ -67,185 +164,97 @@ def pad_matrix_op_dimensions(
     Returns:
         torch.fx.GraphModule: The transformed FX graph module.
     """
-
-    def pad_input_node(input, pad, scale, scale_pad):
-        pad_quantize_mx_input = (
-            scale is not None and
-            input.target == operator.getitem and
-            scale.target == operator.getitem and
-            input.args[0] == scale.args[0] and
-            input.args[0].target == torch.ops.quantized_ops.quantize_mx.default
-        )
-
-        node_to_pad = input.args[0].args[0] if pad_quantize_mx_input else input
-
-        skip_padding = False
-        if node_to_pad.target == torch.ops.aten.slice.Tensor:
-            arg = node_to_pad.args[0]
-            skip_padding = slicing_and_padding_cancel_out(
-                arg.value.shape, *node_to_pad.args[1:], pad
-            )
-
-        if skip_padding:
-            new_input = node_to_pad.args[0]
-        else:
-            with model.graph.inserting_after(node_to_pad):
-                new_input = model.graph.call_function(
-                    torch.ops.aten.pad.default, (node_to_pad, pad),
-                )
-
-            propagate_shape(new_input)
-            new_input.meta["dtype"] = node_to_pad.meta.get("dtype")
-
-        if pad_quantize_mx_input:
-            input.args[0].replace_input_with(node_to_pad, new_input)
-            propagate_shape(input.args[0])
-            propagate_shape(input)
-            propagate_shape(scale)
-        else:
-            node.replace_input_with(node_to_pad, new_input)
-
-            if scale is not None and any(x for x in scale_pad):
-                with model.graph.inserting_before(node):
-                    padded_scale = model.graph.call_function(
-                        torch.ops.aten.pad.default, (scale, scale_pad),
-                    )
-
-                node.replace_input_with(scale, padded_scale)
-
-                propagate_shape(padded_scale)
-                padded_scale.meta["dtype"] = scale.meta.get("dtype")
-
     for node in list(model.graph.nodes):
         if not is_gemm_op(node):
             continue
 
+        is_dw = is_depthwise_conv(node)
+        is_conv = is_conv2d(node)
+        is_mm = is_matmul(node)
+
         input = node.args[0]
-        C_in = input.shape[1] if is_conv2d(node) else input.shape[-1]
+        C_in = input.shape[1] if is_conv else input.shape[-1]
 
         # Skip CNN first layer with input channels equal to 3
-        if is_conv2d(node) and C_in == 3:
+        if is_conv and C_in == 3:
             continue
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
 
+        bs = node.kwargs.get("block_size", 1)
+
         # Pad input along C dimension
         if pad_C:
-            input_pad = [0, 0, 0, 0, 0, pad_C] if is_conv2d(node) else [0, pad_C]
-            bs = node.kwargs.get("block_size", 1)
             input_scale = node.kwargs.get("input_scale")
-            input_scale_pad = (
-                [0, 0, 0, 0, 0, int(pad_C / bs)] if is_conv2d(node) else [0, int(pad_C / bs)]
+
+            if is_conv:
+                input_pad = [0, 0, 0, 0, 0, pad_C]
+                scale_pad = [0, 0, 0, 0, 0, pad_C // bs]
+            else:
+                input_pad = [0, pad_C]
+                scale_pad = [0, pad_C // bs]
+
+            pad_input_node(
+                model, node, input, input_pad, input_scale, scale_pad
             )
-            pad_input_node(input, input_pad, input_scale, input_scale_pad)
 
         weight = node.args[1]
-        C_in = weight.shape[-2] if is_matmul(node) else weight.shape[1]
-        C_out = weight.shape[-1] if is_matmul(node) else weight.shape[0]
+        C_in = weight.shape[-2] if is_mm else weight.shape[1]
+        C_out = weight.shape[-1] if is_mm else weight.shape[0]
 
-        if is_depthwise_conv(node):
+        if is_dw:
             C_in *= node.args[6]
-            args = list(node.args)
-            args[-1] += pad_C
-            node.args = tuple(args)
+            node.args = node.args[:-1] + (node.args[-1] + pad_C,)
 
         pad_C = (C_unroll - (C_in % C_unroll)) % C_unroll
         pad_K = (K_unroll - (C_out % K_unroll)) % K_unroll
 
-        if is_depthwise_conv(node):
+        if is_dw:
             pad_K = pad_C
 
-        # Pad weight along K and C
+        # Pad weight along K and C dimensions
         if pad_C or pad_K:
-            bs = node.kwargs.get("block_size", 1)
             weight_scale = node.kwargs.get("weight_scale")
 
-            if is_depthwise_conv(node):
+            if is_dw:
                 weight_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
-                weight_scale_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
-            elif is_conv2d(node):
+                ws_pad = [0, 0, 0, 0, 0, 0, 0, pad_K]
+            elif is_conv:
                 weight_pad = [0, 0, 0, 0, 0, pad_C, 0, pad_K]
-                weight_scale_pad = [0, 0, 0, 0, 0, int(pad_C / bs), 0, pad_K]
-            elif is_matmul(node):
+                ws_pad = [0, 0, 0, 0, 0, pad_C // bs, 0, pad_K]
+            elif is_mm:
                 weight_pad = [0, pad_K, 0, pad_C]
-                weight_scale_pad = [0, pad_K, 0, int(pad_C / bs)]
+                ws_pad = [0, pad_K, 0, pad_C // bs]
             else:
                 weight_pad = [0, pad_C, 0, pad_K]
-                weight_scale_pad = [0, int(pad_C / bs), 0, pad_K]
+                ws_pad = [0, pad_C // bs, 0, pad_K]
 
             if weight.op == "get_attr":
                 logger.debug(f"Pad {weight} with {weight_pad}")
-                param = get_parameter_or_buffer(model, weight.target)
+                param = fetch_attr(model, weight.target)
                 param.data = F.pad(param.data, weight_pad)
                 propagate_shape(weight, model)
 
                 if weight_scale is not None:
-                    scale_param = get_parameter_or_buffer(model, weight_scale.target)
-                    scale_param.data = F.pad(scale_param.data, weight_scale_pad)
+                    scale_param = fetch_attr(model, weight_scale.target)
+                    scale_param.data = F.pad(scale_param.data, ws_pad)
                     propagate_shape(weight_scale, model)
             else:
-                pad_input_node(weight, weight_pad, weight_scale, weight_scale_pad)
+                pad_input_node(
+                    model, node, weight, weight_pad, weight_scale, ws_pad
+                )
 
-            if len(node.args) > 2 and node.args[2] is not None and pad_K:
+            if pad_K and len(node.args) > 2 and node.args[2] is not None:
                 bias = node.args[2]
-                bias_param = get_parameter_or_buffer(model, bias.target)
+                bias_param = fetch_attr(model, bias.target)
                 bias_param.data = F.pad(bias_param.data, [0, pad_K])
                 propagate_shape(bias, model)
 
         propagate_shape(node)
 
-        def slice_output(output_node, slice_args):
-            nodes_require_slice = []
-            for user in list(output_node.users.keys()):
-                # quantize dequantize ops have to be per-tensor
-                if user.target in [
-                    torch.ops.quantized_ops.dequantize.default,
-                    torch.ops.quantized_ops.quantize.default,
-                ]:
-                    bs = get_arg_or_kwarg(user, 4, "block_size")
-                    if bs is None:
-                        slice_output(user, slice_args)
-                        continue
-
-                if is_elementwise_op(user):
-                    if len(user.all_input_nodes) == 1:
-                        propagate_shape(user)
-                        slice_output(user, slice_args)
-                        continue
-
-                    # if all inputs are a matching slice, then strip the redundant slice.
-                    if all(
-                        n == output_node or (
-                            n.target == torch.ops.aten.slice.Tensor and
-                            n.args[1:] == slice_args
-                        )
-                        for n in user.all_input_nodes
-                    ):
-                        for n in user.all_input_nodes:
-                            if n.target == torch.ops.aten.slice.Tensor:
-                                user.replace_input_with(n, n.args[0])
-
-                        propagate_shape(user)
-                        slice_output(user, slice_args)
-                        continue
-
-                nodes_require_slice.append(user)
-
-            if nodes_require_slice:
-                with model.graph.inserting_after(output_node):
-                    slice_node = model.graph.call_function(
-                        torch.ops.aten.slice.Tensor, (output_node, *slice_args),
-                    )
-
-                for n in nodes_require_slice:
-                    n.replace_input_with(output_node, slice_node)
-
-                propagate_shape(slice_node)
-                slice_node.meta["dtype"] = output_node.meta.get("dtype")
-
         if pad_K:
-            slice_dim = 1 if is_conv2d(node) else -1
-            slice_output(node, (slice_dim, 0, C_out))
+            slice_dim = 1 if is_conv else -1
+            slice_output(model, node, (slice_dim, 0, C_out))
 
     model.graph.lint()
     model.graph.eliminate_dead_code()

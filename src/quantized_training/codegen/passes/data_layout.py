@@ -7,10 +7,7 @@ import torch
 from torch.fx import GraphModule, Node
 
 from .utils import get_arg_or_kwarg, _pair
-from ..mapping import (
-    duplicate_shared_nodes,
-    propagate_shape,
-)
+from ..mapping import duplicate_shared_nodes
 from ..mapping_utils import (
     is_conv2d,
     is_depthwise_conv,
@@ -22,7 +19,7 @@ from ..mapping_utils import (
     is_nop,
     is_reshape_op,
 )
-from ...pt2e_utils import deduplicate_nodes, fetch_attr
+from ...pt2e_utils import deduplicate_nodes, fetch_attr, propagate_shape
 from ...quantize_pt2e import create_getattr_from_value
 
 logger = logging.getLogger(__name__)

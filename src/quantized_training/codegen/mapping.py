@@ -36,7 +36,7 @@ from .mapping_utils import (
 from .memory import MemoryAllocator, Segment
 from .param_pb2 import Model, Operation, Tensor
 from .shape_prop import ShapeProp
-from ..pt2e_utils import dtype_byte_size
+from ..pt2e_utils import dtype_byte_size, fetch_attr, propagate_shape
 from ..quantize_pt2e import create_getattr_from_value, export_model
 
 logger = logging.getLogger(__name__)
@@ -69,56 +69,6 @@ def eliminate_dead_code(self):
     return changed
 
 
-def propagate_shape(node: Node, model: GraphModule = None):
-    def load_arg(a):
-        return torch.fx.graph.map_arg(a, lambda n: getattr(n, "value", n.meta.get("val")))
-
-    def fetch_attr(target : str):
-        target_atoms = target.split('.')
-        attr_itr = model
-        for i, atom in enumerate(target_atoms):
-            if not hasattr(attr_itr, atom):
-                raise RuntimeError(
-                    f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}"
-                )
-            attr_itr = getattr(attr_itr, atom)
-        return attr_itr
-
-    modules = dict(model.named_modules()) if model is not None else {}
-
-    if node.op == 'get_attr':
-        result = fetch_attr(node.target)
-    elif node.op == 'call_function':
-        result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
-    elif node.op == 'call_method':
-        self_obj, *args = load_arg(node.args)
-        kwargs = load_arg(node.kwargs)
-        result = getattr(self_obj, node.target)(*args, **kwargs)
-    elif node.op == 'call_module':
-        result = modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
-    elif node.op == 'output':
-        result = load_arg(node.args[0])
-
-    if isinstance(result, torch.Tensor):
-        node.shape = result.shape
-        node.value = result.cpu().clone()
-    elif isinstance(result, (tuple, list)):
-        node.value = [x.cpu().clone() if isinstance(x, torch.Tensor) else x for x in result]
-    else:
-        node.value = result
-
-
-def get_parameter_or_buffer(model: torch.nn.Module, name: str):
-    """Retrieve a parameter or buffer from the model by name."""
-    if name in dict(model.named_parameters()):
-        return model.get_parameter(name)
-    if name in dict(model.named_buffers()):
-        return model.get_buffer(name)
-    if hasattr(model, name):
-        return getattr(model, name)
-    raise ValueError(f"Parameter or buffer '{name}' not found in the model.")
-
-
 def replace_node_with_graph_module(
     self: GraphModule, module: GraphModule, source: Node, value_remap=None
 ) -> List[Node]:
@@ -141,7 +91,7 @@ def replace_node_with_graph_module(
         else:
             with self.graph.inserting_before(source):
                 if node.op == 'get_attr':
-                    param = get_parameter_or_buffer(module, node.target)
+                    param = fetch_attr(module, node.target)
                     value_remap[node] = create_getattr_from_value(
                         self, self.graph, "_tensor_constant_", param
                     )

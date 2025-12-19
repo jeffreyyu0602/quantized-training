@@ -13,8 +13,6 @@ from torch.fx.operator_schemas import normalize_function
 from .utils import get_arg_or_kwarg, _pair
 from ..mapping import (
     get_node_bytes,
-    get_parameter_or_buffer,
-    propagate_shape,
     replace_node_with_graph_module,
     _nodes_sequential,
 )
@@ -31,7 +29,7 @@ from ..banking import (
     require_allocation,
     _get_scope,
 )
-from ...pt2e_utils import fetch_attr
+from ...pt2e_utils import fetch_attr, propagate_shape
 from ...quantize_pt2e import create_getattr_from_value, export_model
 
 logger = logging.getLogger(__name__)
@@ -691,7 +689,7 @@ def _slice_tensor(node, dim, start, end, model):
     """
     graph = model.graph
     if node.op == "get_attr":
-        param = get_parameter_or_buffer(model, node.target)
+        param = fetch_attr(model, node.target)
         sliced_data = param.data.narrow(dim, start, end - start)
 
         tiled_node = create_getattr_from_value(

@@ -20,11 +20,13 @@ __all__ = [
     "deduplicate_nodes",
     "dispatch_model",
     "dtype_byte_size",
+    "fetch_attr",
     "get_device_map",
     "get_aten_graph_module",
     "get_node_name_to_scope",
     "insert_align_device_nodes",
     "print_node_scope_tabular",
+    "propagate_shape",
     "sink_obs_or_fq",
 ]
 
@@ -57,6 +59,35 @@ def fetch_attr(module, target):
             raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
         attr_itr = getattr(attr_itr, atom)
     return attr_itr
+
+
+def propagate_shape(node: Node, model: GraphModule = None):
+    def load_arg(a):
+        return map_arg(a, lambda n: getattr(n, "value", n.meta.get("val")))
+
+    modules = dict(model.named_modules()) if model is not None else {}
+
+    if node.op == 'get_attr':
+        result = fetch_attr(model, node.target)
+    elif node.op == 'call_function':
+        result = node.target(*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'call_method':
+        self_obj, *args = load_arg(node.args)
+        kwargs = load_arg(node.kwargs)
+        result = getattr(self_obj, node.target)(*args, **kwargs)
+    elif node.op == 'call_module':
+        result = modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
+    elif node.op == 'output':
+        result = load_arg(node.args[0])
+
+    if isinstance(result, torch.Tensor):
+        node.shape = result.shape
+        node.value = result.cpu().clone()
+    elif isinstance(result, (tuple, list)):
+        node.shape = tuple(x.shape for x in result)
+        node.value = tuple(x.cpu().clone() for x in result)
+    else:
+        node.value = result
 
 
 def get_device_map(model: GraphModule, max_memory=None, verbose=False):
