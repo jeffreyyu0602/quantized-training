@@ -129,7 +129,7 @@ if __name__ == "__main__":
         help="Whether to dump the dataset to disk for later use."
     )
     parser.add_argument(
-        "--dump_verification_file",
+        "--dump_tensors",
         action="store_true",
         help="Whether to save tensors for verification."
     )
@@ -224,6 +224,11 @@ if __name__ == "__main__":
         "--residual",
         help="Quantization spec for residual inputs.",
     )
+    parser.add_argument(
+        "--split_spmm",
+        action="store_true",
+        help="Whether to split linear_mx with outliers into dense and SpMM operations.",
+    )
     add_qspec_args(parser)
     args = parser.parse_args()
 
@@ -257,6 +262,7 @@ if __name__ == "__main__":
             not args.dont_fuse_reshape
             and (args.hardware_unrolling is None or max(args.hardware_unrolling) < 64)
         ),
+        "split_spmm": args.split_spmm,
     }
 
     compile_args = {
@@ -266,7 +272,7 @@ if __name__ == "__main__":
         "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
-        "dump_verification_file": args.dump_verification_file,
+        "dump_tensors": args.dump_tensors,
     }
 
     if args.model in models.__dict__:

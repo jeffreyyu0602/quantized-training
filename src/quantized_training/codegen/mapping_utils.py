@@ -95,8 +95,10 @@ def set_tensor_field(field, node, output_dir=None, is_output=False):
 
     if tiled_shapes is not None and node in tiled_shapes:
         field.tiled_shape.extend(tiled_shapes[node])
+
     if tile_strides is not None and node in tile_strides:
         field.tile_strides.extend(tile_strides[node])
+
     if scratchpad_map is not None and node in scratchpad_map:
         _set_meminfo(field.scratchpad, scratchpad_map[node])
 
@@ -120,7 +122,9 @@ def set_output_field(param, node, output_dir):
     if isinstance(node.value, torch.Tensor):
         node.meta["_tiled_shapes"] = node.meta.get("tiled_shapes")
         node.meta["_scratchpad_map"] = node.meta.get("scratchpad_map")
+
         set_tensor_field(param.output, node, output_dir, True)
+
         node.meta.pop("_tiled_shapes", None)
         node.meta.pop("_scratchpad_map", None)
     elif isinstance(node.value, (tuple, list)):
@@ -256,6 +260,7 @@ def map_node(node: torch.fx.Node, output_dir=None) -> OpOverload:
 
     for n in node.all_input_nodes:
         n.meta.pop("_tiled_shapes", None)
+        n.meta.pop("_tile_strides", None)
         n.meta.pop("_scratchpad_map", None)
 
     if "l2_tiling" in node.meta:

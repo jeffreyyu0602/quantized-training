@@ -115,14 +115,15 @@ def transform(
     example_args,
     example_kwargs=None,
     patterns=None,
-    fuse_operator=True,
+    unroll_dims=None,
+    conv2d_im2col=False,
     transpose_weight=False,
     transpose_fc=False,
     cache_size=None,
     num_banks=None,
-    unroll_dims=None,
-    conv2d_im2col=False,
+    fuse_operator=True,
     fuse_reshape=True,
+    split_spmm=False,
 ):
     if example_kwargs is None:
         example_kwargs = {}
@@ -130,7 +131,12 @@ def transform(
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
     ShapeProp(model).propagate(*flatten_args)
 
-    # Decompose BMM in multi-head attention into individual matmuls
+    # -------------------------------------------------------------------------
+    # 1. Lowering & Decomposition
+    # -------------------------------------------------------------------------
+    # Break down complex operators (like MultiHeadAttention) into simpler
+    # primitives and handle memory copy/concat operations.
+
     split_multi_head_attention(model)
 
     # TODO Disabled for large models. This will be removed in the future once
@@ -140,38 +146,68 @@ def transform(
         convert_cat_and_stack_as_stack_on_dim0(model)
         convert_cat_with_mismatched_shapes_to_stack(model)
 
-    # Move quantize/dequantize ops after BMM decomposition
     fuse_quantize_dequantize_with_previous_op(model)
 
-    # Replace Conv2d with im2col + GEMM for hardware without replication
     if conv2d_im2col:
         replace_conv2d_with_im2col(model)
 
+    # -------------------------------------------------------------------------
+    # 2. Hardware Alignment (Padding)
+    # -------------------------------------------------------------------------
+    # Pad dimensions to align with hardware unrolling constraints (SIMD, systolic
+    # array dimensions, etc.) to ensure efficient execution.
     if unroll_dims is not None:
-        pad_gemm_inputs_to_hardware_unroll_size(model, *unroll_dims)
-        pad_vector_ops_to_hardware_unroll_size(model, unroll_dims[1])
+        pad_matrix_op_dimensions(model, *unroll_dims)
+        pad_vector_op_dimensions(model, unroll_dims[1])
 
+    # -------------------------------------------------------------------------
+    # 3. Matrix Operation Tiling
+    # -------------------------------------------------------------------------
+    # Apply L2 tiling logic specifically for matrix operations (GEMM/Conv) to
+    # optimize for the specific cache size and memory bank configuration.
     if cache_size is not None:
         run_matrix_op_l2_tiling(model, unroll_dims, cache_size, num_banks)
 
-    # Transform GEMM and convolution inputs and weights into layouts friendly
-    # for systolic-array based hardware
-    transpose_linear_weights(model, transpose_weight, transpose_fc)
+    # -------------------------------------------------------------------------
+    # 4. Data Layout Transformation
+    # -------------------------------------------------------------------------
+    # Transform GEMM and convolution inputs/weights into layouts friendly
+    # for systolic-array based hardware (e.g., transposing weights).
+
     if transpose_weight:
         transpose_conv2d_inputs_and_weights(model)
+
+    transpose_linear_weights(model, transpose_weight, transpose_fc)
 
     ShapeProp(model).propagate(*flatten_args)
 
     # Remove redundant reshapes that have no effect on tensor semantics
     eliminate_reshape_with_no_effect(model)
 
+    # -------------------------------------------------------------------------
+    # 5. Vector Operation Tiling
+    # -------------------------------------------------------------------------
+    # Apply L2 tiling logic for vector-based operations.
     if cache_size is not None:
         run_vector_op_l2_tiling(model, unroll_dims[1], cache_size, num_banks)
+
+    # TODO: Used for unit test. Will be removed in the future
+    from .codegen.passes.lowering import split_dense_spmm_node
+
+    if split_spmm:
+        split_dense_spmm_node(model)
+
+    # -------------------------------------------------------------------------
+    # 6. Operator Fusion
+    # -------------------------------------------------------------------------
+    # Perform final operator lowering and fuse sequences of operations (e.g.,
+    # Conv+ReLU) into single kernels to reduce memory access overhead.
 
     if fuse_operator:
         fuse(model, patterns, flatten_args, fuse_reshape=fuse_reshape)
 
     rename_nodes_with_param_names(model)
+
     return model
 
 
@@ -186,9 +222,11 @@ def compile(
     unroll_dims=None,
     output_dir=None,
     output_file="compute_graph",
+    dump_tensors=True,
     dump_snapshot=False,
-    dump_verification_file=True,
 ):
+    os.makedirs(output_dir, exist_ok=True)
+
     flatten_args, spec = tree_flatten((example_args, example_kwargs))
     ShapeProp(model).propagate(*flatten_args)
 
@@ -197,16 +235,11 @@ def compile(
         model, allocator, cache_size, num_banks, bank_width, unroll_dims
     )
 
-    os.makedirs(output_dir, exist_ok=True)
-
     if dump_snapshot:
         allocator.dump_snapshots(os.path.join(output_dir, "memory.png"))
 
-    path = (
-        os.path.join(output_dir, "tensor_files")
-        if dump_verification_file else None
-    )
-    params = gen_code(model, flatten_args, path)
+    path = os.path.join(output_dir, "tensor_files")
+    params = gen_code(model, flatten_args, path if dump_tensors else None)
 
     with open(os.path.join(output_dir, 'model.txt'), "w") as f:
         f.write(text_format.MessageToString(params))

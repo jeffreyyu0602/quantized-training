@@ -12,10 +12,10 @@ from torch.fx.operator_schemas import normalize_function
 
 from .utils import get_arg_or_kwarg, _pair
 from ..mapping import (
+    get_node_bytes,
     get_parameter_or_buffer,
     propagate_shape,
     replace_node_with_graph_module,
-    get_node_bytes,
     _nodes_sequential,
 )
 from ..mapping_utils import (
@@ -26,7 +26,11 @@ from ..mapping_utils import (
     is_matmul,
     is_prunable_op,
 )
-from ..banking import get_banking_strategies_for_op, _get_scope
+from ..banking import (
+    get_banking_strategies_for_op,
+    require_allocation,
+    _get_scope,
+)
 from ...pt2e_utils import fetch_attr
 from ...quantize_pt2e import create_getattr_from_value, export_model
 
@@ -1130,7 +1134,7 @@ def _conv2d_layout(shape, is_weight=False, do_transpose=False):
         return (shape[0], shape[2], shape[3], shape[1])
 
 
-def _calculate_conv2d_shapes(node, tile_sizes):
+def _calculate_conv2d_shapes(node, tile_sizes, divisor=None):
     bs = node.kwargs.get("block_size", 1)
     transposed = node.meta.get("transposed", False)
 
@@ -1166,7 +1170,7 @@ def _calculate_conv2d_shapes(node, tile_sizes):
     }
 
 
-def _calculate_gemm_shapes(node, tile_sizes):
+def _calculate_gemm_shapes(node, tile_sizes, divisor=None):
     bs = node.kwargs.get("block_size", 1)
 
     x_tiled, c_tiled, k_tiled = tile_sizes
@@ -1205,15 +1209,34 @@ def _calculate_gemm_shapes(node, tile_sizes):
     }
 
 
+def _log_tiling_details(node, tiled_shapes, strategy):
+    def fmt(s):
+        if s is None: return "?"
+        return str(tuple(s)).replace(" ", "")
+
+    logger.info(f"Selected tiling for {node} (Strategy: {strategy}):")
+
+    for n in node.all_input_nodes:
+        if n in tiled_shapes and require_allocation(n):
+            orig_shape = fmt(n.shape)
+            tile_shape = fmt(tiled_shapes[n])
+            logger.info(f"  In[{n}]: {orig_shape} -> {tile_shape}")
+
+    orig_shape = fmt(node.shape)
+    tile_shape = fmt(tiled_shapes[node])
+    logger.info(f"  Out[{node}]: {orig_shape} -> {tile_shape}")
+
+
 def _search_tiling(
     node,
     full_shape,
     min_sizes,
-    order,
     shape_func,
     cache_size,
     bank_width,
     bank_size,
+    order=None,
+    last_dim=None,
 ):
     """
     Generic driver that iterates over banking strategies and valid tilings.
@@ -1225,10 +1248,12 @@ def _search_tiling(
     strategies = get_banking_strategies_for_op(node.target)
 
     for strategy in strategies:
-        for tile_sizes, _ in get_valid_tiling(
-            full_shape, min_sizes=min_sizes, order=order
+        for tile_sizes, tiling in get_valid_tiling(
+            full_shape, min_sizes=min_sizes, order=order, last_dim=last_dim
         ):
-            tiled_shapes = shape_func(node, tile_sizes)
+            logger.info(f"Trying tiling {tiling} with tile sizes {tile_sizes}")
+
+            tiled_shapes = shape_func(node, tile_sizes, tiling)
             node_to_shape = normalize_shape(node, tiled_shapes)
 
             total_size, _ = strategy.evaluate(
@@ -1236,28 +1261,11 @@ def _search_tiling(
             )
 
             if total_size <= cache_size:
-                def fmt(s): return str(tuple(s)).replace(" ", "")
-
-                # Get Original Shapes
-                orig_in = fmt(node.args[0].shape)
-                orig_w = fmt(node.args[1].shape)
-                orig_out = fmt(node.shape)
-
-                # Get Tiled Buffer Shapes
-                tile_in = fmt(node_to_shape[node.args[0]])
-                tile_w = fmt(node_to_shape[node.args[1]])
-                tile_out = fmt(node_to_shape[node])
-
-                logger.info(
-                    f"Selected tiling for {node.name} (Strategy: {strategy}): "
-                    f"In[{orig_in}->{tile_in}], "
-                    f"Wt[{orig_w}->{tile_w}], "
-                    f"Out[{orig_out}->Block{tile_out}]"
-                )
+                _log_tiling_details(node, node_to_shape, strategy)
                 return tile_sizes, tiled_shapes
 
     logger.warning(f"Failed to tile {node} with cache size {cache_size}.")
-    return None
+    return None, None
 
 
 def select_conv2d_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
@@ -1273,6 +1281,8 @@ def select_conv2d_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
     min_sizes = (min_xy, min_xy, unroll_dims[0], unroll_dims[1])
 
     order = (3, 0, 1, 2)
+
+    logger.info(f"Running L2 tiling for matrix op: {node}")
 
     return _search_tiling(
         node=node,
@@ -1313,6 +1323,8 @@ def select_gemm_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
     min_sizes = (min_x_tile, unroll_dims[0], unroll_dims[1])
     order = (2, 0, 1)
 
+    logger.info(f"Running L2 tiling for matrix op: {node}")
+
     return _search_tiling(
         node=node,
         full_shape=full_shape,
@@ -1326,7 +1338,7 @@ def select_gemm_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
 
 
 def run_matrix_op_l2_tiling(
-    model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
+    model, unroll, cache_size=None, num_banks=None, bank_width=None,
 ):
     """
     Perform tiling on GEMM operations to fit intermediate data into cache.
@@ -1336,8 +1348,12 @@ def run_matrix_op_l2_tiling(
         unroll (int): Systolic array input and output channel unrolling dimension. 
         cache_size (int): Total cache size in bytes.
         num_banks (int, optional): Number of cache banks for bank-aligned tiling.
+        bank_width (int, optional): Width of memory for bank-aligned tiling.
     """
     graph = model.graph
+
+    if cache_size is None:
+        cache_size = DEFAULT_CACHE_SIZE
 
     bank_size = None if num_banks is None else cache_size // num_banks
 
@@ -1362,34 +1378,42 @@ def run_matrix_op_l2_tiling(
     return model
 
 
-def get_tiled_shape(shape, tiling):
-    if not shape or tiling is None:
-        return shape
+def get_tiled_shape(shape, divisor):
     ndim = len(shape)
-    m = len(tiling)
+    m = len(divisor)
     if ndim > m:
-        tiling = (1,) * (ndim - m) + tiling
+        divisor = (1,) * (ndim - m) + divisor
     elif ndim < m:
         shape = (1,) * (m - ndim) + shape
     tiled_shape = []
     for i in range(len(shape)):
-        tiled_shape.append(shape[i] // tiling[i] if shape[i] > 1 else shape[i])
+        tiled_shape.append(shape[i] // divisor[i] if shape[i] > 1 else shape[i])
     return tuple(tiled_shape[-ndim:])
 
 
-def _need_allocate(node):
-    return (
-        not re.fullmatch(r'(code|qmap)(_\d+)?', node.name)
-        and isinstance(node.value, torch.Tensor)
-        and (node.value.numel() > 1 or node.op != "get_attr")
-    )
+def _calculate_vector_op_shapes(node, tile_sizes, divisor):
+    node_to_key = get_node_to_key_map(node)
+    shape = {}
+    for n, k in node_to_key.items():
+        if k == "output":
+            if isinstance(node.value, torch.Tensor):
+                shape[k] = tile_sizes
+            elif isinstance(node.value, (tuple, list)):
+                shape[k] = tuple(
+                    get_tiled_shape(t.shape, divisor)
+                    for t in node.value
+                )
+        else:
+            shape[k] = get_tiled_shape(tuple(n.shape), divisor)
+    return shape
 
 
 def run_vector_op_node_l2_tiling(
     node,
     unroll,
-    cache_size=DEFAULT_CACHE_SIZE,
+    cache_size=None,
     num_banks=None,
+    bank_width=None,
 ):
     if not is_elementwise_op(node) and node.target not in [
         torch.ops.aten.softmax.int,
@@ -1403,7 +1427,7 @@ def run_vector_op_node_l2_tiling(
     ]:
         return
 
-    # Certain dimensions cannot be tiled, e.g., transpose or reduction dims
+    # Certain dimensions cannot be tiled, e.g., transpose and reduction dims
     last_dim = -1
     if node.target == torch.ops.quantized_ops.calculate_mx_qparam.default:
         last_dim = min(node.args[1])
@@ -1417,96 +1441,48 @@ def run_vector_op_node_l2_tiling(
     elif node.target == torch.ops.aten.permute.default:
         last_dim = next((i for i, d in enumerate(node.args[1]) if i != d), None)
 
-    node_to_key = get_node_to_key_map(node)
-    input_nodes = [
-        n for n in node.all_input_nodes if _need_allocate(n)
-    ]
     output_shape = (
         node.value.shape if isinstance(node.value, torch.Tensor)
         else node.value[1].shape
     )
 
-    def get_node_size(n, shape, node, bank_size):
-        size = get_node_bytes(n) * math.prod(shape)
-        if bank_size is not None:
-            size = int(math.ceil(size / bank_size) * bank_size)
-        # Double input size for softmax/layernorm (scratch space)
-        if n == node.args[0] and node.target in [
-            torch.ops.aten.softmax.int,
-            torch.ops.aten.layer_norm.default,
-            torch.ops.quantized_ops.layer_norm.default,
-        ]:
-            size *= 2
-        return size
+    logger.info(f"Running L2 tiling for vector op: {node}")
 
-    def try_tiling(align_bank):
-        bank_size = (
-            cache_size // num_banks if align_bank and num_banks is not None
-            else None
+    tile_sizes, tiled_shapes = _search_tiling(
+        node=node,
+        full_shape=output_shape,
+        min_sizes=(unroll,),
+        last_dim=last_dim,
+        shape_func=_calculate_vector_op_shapes,
+        cache_size=cache_size,
+        bank_width=bank_width,
+        bank_size=None if num_banks is None else cache_size // num_banks,
+    )
+
+    if tile_sizes is not None:
+        node.meta["tiled_shapes"] = tiled_shapes
+        node.meta["l2_tiling"] = tuple(
+            s // ts for s, ts in zip(output_shape, tile_sizes)
         )
-        for tiled_output_shape, tiling in get_valid_tiling(
-            output_shape, min_sizes=(unroll,), last_dim=last_dim,
-        ):
-            tiled_shapes = {
-                node_to_key.get(n): get_tiled_shape(tuple(n.shape), tiling)
-                for n in input_nodes
-            }
-            total_size = sum(
-                get_node_size(n, tiled_shapes[node_to_key[n]], node, bank_size)
-                for n in input_nodes
-            )
-
-            if isinstance(node.value, (tuple, list)):
-                tiled_shapes["output"] = [
-                    get_tiled_shape(t.shape, tiling) for t in node.value
-                ]
-                total_size += sum(
-                    b * math.prod(s)
-                    for b, s in zip(get_node_bytes(node), tiled_shapes["output"])
-                )
-            else:
-                tiled_shapes["output"] = tiled_output_shape
-                total_size += get_node_size(
-                    node, tiled_output_shape, node, bank_size
-                )
-
-            logger.debug(
-                f"Trying tiling {tiling} for {node} "
-                f"(bank_size={bank_size}), total_size={total_size}"
-            )
-
-            if total_size <= cache_size:
-                if math.prod(tiling) > 1:
-                    logger.info(f"Selected tiling {tiling} for {node}")
-                    node.meta["tiled_shapes"] = tiled_shapes
-                    node.meta["l2_tiling"] = tiling
-                return True
-        return False
-
-    if try_tiling(True) or try_tiling(False):
-        return True
-
-    logger.warning(f"No L2 tiling found for {node.name}")
-    return False
 
 
 def run_vector_op_l2_tiling(
-    model, unroll, cache_size=DEFAULT_CACHE_SIZE, num_banks=None
+    model, unroll, cache_size=None, num_banks=None, bank_width=None,
 ):
     """
     Perform tiling on vector operations in a model to fit intermediate data into cache.
 
-    Tiling is applied across all non-reduction dimensions with the following strategy:
-    - Maximize tile size along the last dimension
-    - Ensure tile sizes are multiples of specified minimums
-    - Cache is divided across multiple banks
-
     Args:
         model: A model object with a FX Graph containing vector operation nodes.
-        cache_size (int): Total cache size in bytes.
         unroll (int): Minimum unrolling dimension for vector operations.
+        cache_size (int): Total cache size in bytes.
+        bank_width (int, optional): Width of memory for bank-aligned tiling.
+        num_banks (int, optional): Number of memory banks for bank-aligned tiling.
     """
     graph = model.graph
+
+    if cache_size is None:
+        cache_size = DEFAULT_CACHE_SIZE
 
     for node in list(graph.nodes):
         run_vector_op_node_l2_tiling(node, unroll, cache_size, num_banks)

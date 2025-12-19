@@ -25,8 +25,8 @@ from ...quantize_pt2e import create_getattr_from_value
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "pad_gemm_inputs_to_hardware_unroll_size",
-    "pad_vector_ops_to_hardware_unroll_size",
+    "pad_matrix_op_dimensions",
+    "pad_vector_op_dimensions",
     "pad_vit_embeddings_output",
 ]
 
@@ -49,7 +49,7 @@ def slicing_and_padding_cancel_out(shape, slice_dim, start, end, pad):
     return True
 
 
-def pad_gemm_inputs_to_hardware_unroll_size(
+def pad_matrix_op_dimensions(
     model: GraphModule,
     C_unroll,
     K_unroll,
@@ -371,7 +371,7 @@ def pad_calculate_mx_qparam(model, node, unroll):
             user.replace_input_with(node, scale_node)
 
 
-def pad_vector_ops_to_hardware_unroll_size(
+def pad_vector_op_dimensions(
     model: GraphModule,
     K_unroll,
 ) -> GraphModule:

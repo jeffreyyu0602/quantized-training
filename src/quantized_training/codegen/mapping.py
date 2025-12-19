@@ -4,12 +4,10 @@ import logging
 import math
 import operator
 import os
-import re
 from collections import defaultdict
 from typing import List, Dict, Callable, Union, Any
 
 import graphviz
-import numpy as np
 import torch
 from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_arg
@@ -17,7 +15,11 @@ from torch.fx.operator_schemas import normalize_function
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 from transformers.utils.import_utils import is_torch_greater_or_equal
 
-from .banking import _get_scope, get_banking_strategies_for_op
+from .banking import (
+    _get_scope,
+    get_banking_strategies_for_op,
+    require_allocation,
+)
 from .mapping_utils import (
     is_conv2d,
     is_elementwise_op,
@@ -31,9 +33,8 @@ from .mapping_utils import (
     set_output_field,
     set_tensor_field,
 )
-from .memory import MemoryAllocator, Segment, MemorySpace
+from .memory import MemoryAllocator, Segment
 from .param_pb2 import Model, Operation, Tensor
-from .passes.utils import get_arg_or_kwarg
 from .shape_prop import ShapeProp
 from ..pt2e_utils import dtype_byte_size
 from ..quantize_pt2e import create_getattr_from_value, export_model
@@ -1168,14 +1169,6 @@ def get_reference_node(nodes):
     return first_node
 
 
-def _need_allocate(node):
-    return (
-        not re.fullmatch(r'(code|qmap)(_\d+)?', node.name)
-        and isinstance(node.value, torch.Tensor)
-        and (node.value.numel() > 1 or node.op != "get_attr")
-    )
-
-
 def _calculate_gemm_new_shapes(node, output_shape):
     from .passes.tiling import _conv2d_layout, _calculate_gemm_shapes
 
@@ -1249,13 +1242,11 @@ def run_fused_op_l2_tiling(
     ):
         return tiled_shapes, total_size, scratchpad_map
 
-    # Skip if GEMM already has reshape/dequantize fused
+    # Skip if GEMM already has fused reshape op
     is_gemm = is_gemm_op(first_node)
-    if is_gemm and any(
-        "reshape" in n.meta or "dequantize" in n.meta
-        for n in list(module.graph.nodes) + [node]
-    ):
-        logger.info(f"Submodule {node} is GEMM with fused reshape/dequantize")
+    submod_nodes = list(module.graph.nodes) + [node]
+    if is_gemm and any("reshape" in n.meta for n in submod_nodes):
+        logger.info(f"Skip submodule {node} which is a GEMM fused with reshape")
         return tiled_shapes, total_size, scratchpad_map
 
     min_sizes = None
@@ -1277,24 +1268,25 @@ def run_fused_op_l2_tiling(
     else:
         output_shape = tiled_shapes[node][1]
 
-    tilings = get_valid_tiling(output_shape, reverse=is_gemm, min_sizes=min_sizes)
-
-    for tile_sizes, tiling in tilings:
+    for tile_sizes, tiling in get_valid_tiling(
+        output_shape, min_sizes=min_sizes, reverse=is_gemm
+    ):
         new_shapes = {}
 
         if is_gemm:
             new_shapes = _calculate_gemm_new_shapes(first_node, tile_sizes)
+            propagate_tiled_shapes_upstream(first_node, new_shapes)
 
         for n in node.all_input_nodes:
-            if n not in new_shapes and _need_allocate(n):
-                new_shapes[n] = get_tiled_shape(tuple(tiled_shapes[n]), tiling)
+            if n not in new_shapes and require_allocation(n):
+                new_shapes[n] = get_tiled_shape(tiled_shapes[n], tiling)
 
         if isinstance(node.value, torch.Tensor):
             new_shapes[node] = tile_sizes
         else:
-            new_shapes[node] = [
+            new_shapes[node] = tuple(
                 get_tiled_shape(s, tiling) for s in tiled_shapes[node]
-            ]
+            )
 
         total_size, scratchpad_map = strategy.evaluate(
             key_to_node, node, new_shapes, bank_width, bank_size
@@ -1311,7 +1303,14 @@ def run_fused_op_l2_tiling(
                 tiling = (math.prod(tiling[:-1]), tiling[-1])
 
             if (orig_tiling := first_node.meta.get("l2_tiling")) is not None:
-                tiling = tuple(np.multiply(orig_tiling, tiling))
+                diff = len(orig_tiling) - len(tiling)
+
+                tiling = tuple(
+                    a * b for a, b in zip(
+                        (1,) * -diff + orig_tiling,
+                        (1,) * diff + tiling
+                    )
+                )
 
             if math.prod(tiling) == 1:
                 new_shapes = None
@@ -1323,26 +1322,50 @@ def run_fused_op_l2_tiling(
     return None, total_size, scratchpad_map
 
 
-def get_tiled_input_shape(shape1, shape2):
+def propagate_tiled_shapes_upstream(start_node, tiled_shapes):
     """
-    Given:
-      - shape1: tiled shape of tensor A
-      - shape2: original shape of tensor B (broadcastable to the original shape
-                of tensor A)
+    Propagates tiling constraints backwards from the start_node's inputs
+    (e.g., GEMM inputs) to their upstream dependencies (e.g., Dequantize inputs).
 
-    Returns:
-      - shape2_tiled: shape for B that is broadcastable to the tiled shape of A
+    Args:
+        start_node: The main operation node (e.g., GEMM) whose inputs
+                    already have defined tiled shapes.
+        tiled_shapes: Dictionary mapping nodes to their tiled shapes.
     """
-    # Align shape2 to the same number of dims as new_shape1
-    shape2 = list(shape2)
-    ndiff = len(shape1) - len(shape2)
-    # For each dim, if shape2 dim is 1 or matches, keep it, else set to 1
-    shape2_tiled = []
-    for i in range(len(shape2)):
-        shape2_tiled.append(
-            shape1[i + ndiff] if i + ndiff >= 0 and shape2[i] != 1 else shape2[i]
+    from .passes.tiling import get_tiled_shape
+
+    queue = list(start_node.all_input_nodes)
+    visited = set(queue)
+
+    while queue:
+        node = queue.pop(0)
+
+        if node not in tiled_shapes:
+            continue
+
+        orig_shape = node.shape
+        tiled_shape = tiled_shapes[node]
+
+        assert len(tiled_shape) == len(orig_shape), (
+            f"Rank mismatch: {len(tiled_shape)} vs {len(orig_shape)}"
         )
-    return tuple(shape2_tiled)
+        divisors = tuple(o // s for o, s in zip(orig_shape, tiled_shape))
+
+        for input_node in node.all_input_nodes:
+            if input_node in tiled_shapes or not require_allocation(input_node):
+                continue
+
+            new_shape = get_tiled_shape(input_node.shape, divisors)
+
+            node_key = input_node
+            if input_node.op == "placeholder":
+                node_key = input_node.meta.get("source_node", input_node)
+
+            tiled_shapes[node_key] = new_shape
+
+            if input_node not in visited and input_node.all_input_nodes:
+                visited.add(input_node)
+                queue.append(input_node)
 
 
 def run_memory_mapping(
@@ -1449,14 +1472,18 @@ def run_memory_mapping(
             else:
                 tiled_shapes[node] = tuple(t.shape for t in node.value)
         elif node.op == "call_module":
-            output_shape = tiled_shapes[first_node]
+            # TODO Skip if GEMM does not have fused dequantize op
+            args = map_arg(node.args, lambda n: get_tiled_tensor(n))
+            ShapeProp(mod).propagate(*args)
+            propagate_tiled_shapes_upstream(first_node, tiled_shapes)
+
+            l2_tiling = first_node.meta.get("l2_tiling")
 
             # Calculate tiled shape for other input/output nodes
             for n in node.all_input_nodes:
                 if n not in tiled_shapes:
-                    tiled_shapes[n] = get_tiled_input_shape(output_shape, n.value.shape)
+                    tiled_shapes[n] = get_tiled_shape(n.shape, l2_tiling)
 
-            l2_tiling = first_node.meta.get("l2_tiling")
             if isinstance(node.value, torch.Tensor):
                 tiled_shapes[node] = get_tiled_shape(node.shape, l2_tiling)
             else:
@@ -1468,7 +1495,7 @@ def run_memory_mapping(
 
         tiled_shapes = {
             n: s for n, s in tiled_shapes.items()
-            if n in input_nodes and _need_allocate(n) or n is node
+            if n in input_nodes and require_allocation(n) or n is node
         }
 
         op_scope = _get_scope(first_node.target)

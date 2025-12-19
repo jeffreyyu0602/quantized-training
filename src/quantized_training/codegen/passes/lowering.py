@@ -8,14 +8,10 @@ from torch.fx.node import map_arg
 from torch.fx.passes.utils.matcher_utils import InternalMatch, SubgraphMatcher
 from torch.fx.passes.utils.source_matcher_utils import get_source_partitions
 
-from .utils import _pair
-from ..mapping import (
-    get_parameter_or_buffer,
-    propagate_shape,
-    replace_node_with_graph_module,
-)
+from .utils import _pair, get_arg_or_kwarg
+from ..mapping import replace_node_with_graph_module
 from ..mapping_utils import is_nop
-from ...pt2e_utils import get_aten_graph_module
+from ...pt2e_utils import get_aten_graph_module, fetch_attr, propagate_shape
 from ...quantize_pt2e import create_getattr_from_value, export_model
 from ...quantizer.xnnpack_quantizer_utils import _convert_scalars_to_attrs
 
@@ -358,28 +354,22 @@ def replace_conv2d_with_im2col(model: GraphModule, unroll=16):
 
         input_node = node.args[0]
         weight_node = node.args[1]
+        bias_node = node.args[2]
+
+        stride = _pair(get_arg_or_kwarg(node, 3, "stride"))
+        padding = _pair(get_arg_or_kwarg(node, 4, "padding"))
+        dilation = _pair(get_arg_or_kwarg(node, 5, "dilation"))
 
         if input_node.value.shape[1] >= unroll:
             continue
 
-        N, C_in, H_in, W_in = input_node.value.shape
         C_out, _, kH, kW = weight_node.value.shape
-
-        args = [None, None, None, 1, 0, 1, 1]
-        args[:len(node.args)] = node.args
-
-        stride = _pair(args[3])
-        padding = _pair(args[4])
-        dilation = _pair(args[5])
-
-        H_out = (H_in + 2 * padding[0] - dilation[0] * (kH - 1) - 1) // stride[0] + 1
-        W_out = (W_in + 2 * padding[1] - dilation[1] * (kW - 1) - 1) // stride[1] + 1
+        N, _, H_out, W_out = node.shape
 
         param = model.get_parameter(weight_node.target)
         param.data = param.data.reshape(C_out, -1)
         propagate_shape(weight_node, model)
 
-        bias_node = args[2]
         if bias_node is not None:
             param = model.get_parameter(bias_node.target)
             param.data = param.data.reshape(C_out, 1)
@@ -462,7 +452,7 @@ def extract_input_preprocessor(model: GraphModule):
             value_remap[node] = new_graph.node_copy(node, lambda n: value_remap[n])
 
             if node.op == "get_attr":
-                param = get_parameter_or_buffer(model, node.target)
+                param = fetch_attr(model, node.target)
                 m.register_buffer(node.target, param)
     new_graph.output(value_remap[preprocess_nodes[-1]])
     new_graph.lint()
@@ -570,18 +560,24 @@ def inline_autocast_modules(model: torch.fx.GraphModule):
     """
     graph = model.graph
     named_modules = dict(model.named_modules())
+
     for node in list(graph.nodes):
         if isinstance(node.target, torch._higher_order_ops.wrap.WrapWithAutocast):
             wrapped_func = node.args[4]
             mod = named_modules.get(wrapped_func.target, None)
-            if mod is not None:
-                with graph.inserting_before(node):
-                    new_node = graph.call_module(
-                        wrapped_func.target, tuple(node.args[5:])
-                    )
-                    node.replace_all_uses_with(new_node)
-                    replace_node_with_graph_module(model, mod, new_node)
-                graph.erase_node(node)
+
+            if mod is None:
+                continue
+
+            with graph.inserting_before(node):
+                new_node = graph.call_module(
+                    wrapped_func.target, tuple(node.args[5:])
+                )
+            node.replace_all_uses_with(new_node)
+            graph.erase_node(node)
+
+            replace_node_with_graph_module(model, mod, new_node)
+
     graph.eliminate_dead_code()
     model.graph.lint()
     model.compile()
@@ -594,5 +590,57 @@ def remove_softmax_dtype_cast(model: torch.fx.GraphModule):
             node.args = node.args[:2]
 
     graph.lint()
+    model.recompile()
+    return model
+
+
+def split_dense_spmm_node(model: GraphModule):
+    for node in list(model.graph.nodes):
+        if node.target != torch.ops.quantized_ops.linear_mx.default:
+            continue
+
+        if "A_data" not in node.kwargs:
+            continue
+
+        kwargs = dict(node.kwargs)
+        A_data = kwargs.pop("A_data")
+        A_indices = kwargs.pop("A_indices")
+        A_indptr = kwargs.pop("A_indptr")
+        weight_transposed = kwargs.pop("weight_transposed", False)
+
+        node.kwargs = kwargs
+
+        with model.graph.inserting_before(node):
+            spmm_node = model.graph.call_function(
+                torch.ops.quantized_ops.spmm_csr.default,
+                (
+                    A_data,
+                    A_indices,
+                    A_indptr,
+                    node.args[1],
+                    kwargs.get("weight_scale"),
+                    kwargs.get("weight_code"),
+                    kwargs.get("block_size"),
+                    weight_transposed,
+                ),
+            )
+
+        with model.graph.inserting_after(node):
+            add_node = model.graph.call_function(
+                torch.ops.aten.add.Tensor,
+                (node, spmm_node),
+            )
+
+        for user in list(node.users):
+            if id(user) != id(add_node):
+                user.replace_input_with(node, add_node)
+
+        add_node.meta["source_fn_stack"] = [(add_node.name, add_node.target)]
+
+        propagate_shape(spmm_node)
+        propagate_shape(node)
+        propagate_shape(add_node)
+
+    model.graph.lint()
     model.recompile()
     return model

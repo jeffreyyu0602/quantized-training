@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
@@ -36,6 +37,23 @@ class BankPartition:
     align: bool = True
 
 
+def require_allocation(node: torch.fx.Node) -> bool:
+    if re.fullmatch(r'(code|qmap)(_\d+)?', node.name):
+        return False
+
+    val = getattr(node, 'value', None)
+    if val is None:
+        return True
+
+    if not isinstance(val, torch.Tensor):
+        return False
+
+    if node.op == "get_attr" and val.numel() == 1:
+        return False
+
+    return True
+
+
 @dataclass(frozen=True)
 class BankingStrategy:
     """
@@ -55,7 +73,7 @@ class BankingStrategy:
         input_nodes = set(node.all_input_nodes)
         tile_shapes = {
             n: s for n, s in tile_shapes.items()
-            if n in input_nodes or n is node
+            if n in input_nodes and require_allocation(n) or n is node
         }
 
         logger.debug(f"Evaluating banking strategy:")

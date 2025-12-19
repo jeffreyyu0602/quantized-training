@@ -328,15 +328,18 @@ def linear_mx(
 ) -> torch.Tensor:
     if input_code is not None:
         input = input_code[input.to(torch.long)].to(input.dtype)
-    if weight_code is not None:
-        weight = weight_code[weight.to(torch.long)].to(weight.dtype)
 
     if input_scale is not None:
         input = input * expand(input_scale, input.shape, block_size)
-    if weight_scale is not None:
-        weight = weight * expand(weight_scale, weight.shape, block_size)
 
-    dense_out = F.linear(input, weight, bias)
+    decoded_weight = weight
+    if weight_code is not None:
+        decoded_weight = weight_code[weight.to(torch.long)].to(weight.dtype)
+
+    if weight_scale is not None:
+        decoded_weight = decoded_weight * expand(weight_scale, weight.shape, block_size)
+
+    dense_out = F.linear(input, decoded_weight, bias)
 
     if A_data is not None:
         spmm_out = torch.ops.quantized_ops.spmm_csr(
@@ -508,7 +511,7 @@ def to_csr(tensor: torch.Tensor, max_nnz: int):
                 data.append(val)
                 indices.append(col)
                 nnz += 1
-        indptr.append(nnz)
+        indptr.append(min(nnz, max_nnz))
 
     data = torch.tensor(data, dtype=tensor.dtype)
     indices = torch.tensor(indices, dtype=torch.int16)
