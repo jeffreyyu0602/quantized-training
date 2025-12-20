@@ -1038,12 +1038,8 @@ def get_valid_tiling(
         else:
             # Generate factors in descending order
             factors = [
-                f for f in range(size, limit - 1, -1)
-                if size % f == 0 and (f % limit == 0) # Enforce limit as a multiple
+                f for f in range(size, limit - 1, -1) if size % f == 0
             ]
-            # Ensure the limit itself is included if not strictly divisible but valid
-            if not factors or factors[-1] != limit:
-                 factors.append(limit)
 
         dim_factors[i] = factors
 

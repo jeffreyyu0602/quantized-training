@@ -236,6 +236,7 @@ def pad_matrix_op_dimensions(
                 propagate_shape(weight, model)
 
                 if weight_scale is not None:
+                    logger.debug(f"Pad {weight_scale} with {ws_pad}")
                     scale_param = fetch_attr(model, weight_scale.target)
                     scale_param.data = F.pad(scale_param.data, ws_pad)
                     propagate_shape(weight_scale, model)
