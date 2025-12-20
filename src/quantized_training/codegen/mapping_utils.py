@@ -175,18 +175,20 @@ def convert_arg(value, output_dir=None) -> Argument:
     arg = Argument()
 
     if isinstance(value, torch.fx.Node):
-        if isinstance(value.value, torch.Tensor):
+        val = getattr(value, 'value', None)
+
+        if isinstance(val, torch.Tensor):
             set_tensor_field(arg.tensor, value, output_dir)
-        elif isinstance(value.value, (tuple, list)):
+        elif isinstance(val, (tuple, list)):
             arg.tensor_list.tensors.extend([
-                Tensor(node=f"{value.name}_{i}") for i in range(len(value.value))
+                Tensor(node=f"{value.name}_{i}") for i in range(len(val))
             ])
+    elif isinstance(value, bool):
+        arg.bool_value = value
     elif isinstance(value, int):
         arg.int_value = value
     elif isinstance(value, float):
         arg.float_value = value
-    elif isinstance(value, bool):
-        arg.bool_value = value
     elif isinstance(value, str):
         arg.str_value = value
     elif isinstance(value, (
@@ -199,10 +201,10 @@ def convert_arg(value, output_dir=None) -> Argument:
                 convert_arg(x).tensor if x is not None else Tensor(is_none=True)
                 for x in value
             ])
-        elif all(isinstance(x, int) for x in value):
-            arg.int_list.values.extend(value)
         elif all(isinstance(x, bool) for x in value):
             arg.bool_list.values.extend(value)
+        elif all(isinstance(x, int) for x in value):
+            arg.int_list.values.extend(value)
         elif all(isinstance(x, (int, float, bool)) for x in value):
             arg.scalar_list.values.extend(value)
         else:

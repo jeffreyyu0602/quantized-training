@@ -1468,24 +1468,20 @@ def run_memory_mapping(
                     bank_width=bank_width,
                     bank_size=bank_size,
                 )
-
-                if total_size <= cache_size and new_shapes is not None:
-                    tiled_shapes = new_shapes
             else:
                 total_size, scratchpad_map = strategy.evaluate(
                     key_to_node, node, tiled_shapes, bank_width, bank_size
                 )
+                new_shapes = tiled_shapes
 
             if total_size <= cache_size:
+                node.meta["tiled_shapes"] = new_shapes
                 logger.info(f"  Successfully tiled {node} with strategy: {strategy}")
                 break
 
         logger.debug("Scratchpad allocation result:")
         for n, s in scratchpad_map.items():
             logger.debug(f"  {n}: {s}")
-
-        if tiled_shapes:
-            node.meta["tiled_shapes"] = tiled_shapes
 
         strides = first_node.meta.get("tile_strides")
         if strides is not None:

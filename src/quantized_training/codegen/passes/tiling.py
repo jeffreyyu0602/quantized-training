@@ -1037,9 +1037,7 @@ def get_valid_tiling(
             factors = [size]
         else:
             # Generate factors in descending order
-            factors = [
-                f for f in range(size, limit - 1, -1) if size % f == 0
-            ]
+            factors = [f for f in range(size, limit - 1, -1) if size % f == 0]
 
         dim_factors[i] = factors
 
