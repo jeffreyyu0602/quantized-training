@@ -1124,7 +1124,7 @@ def _calculate_gemm_new_shapes(node, output_shape):
 
     input_node = node.args[0]
     transposed = node.meta.get("transposed", False)
-    bs = node.meta.get("block_size", 1)
+    bs = node.kwargs.get("block_size", 1)
 
     if is_conv2d(node):
         # Certain conv2d layers (e.g. conv1) have extra pixels for alignment
@@ -1238,14 +1238,14 @@ def run_fused_op_l2_tiling(
                 get_tiled_shape(s, tiling) for s in tiled_shapes[node]
             )
 
-        total_size, scratchpad_map = strategy.evaluate(
-            key_to_node, node, new_shapes, bank_width, bank_size
-        )
-
         logger.debug("Proposed new shapes:")
         for n, s in new_shapes.items():
             logger.debug(f"  {n}: {s}")
         logger.debug(f"  Total size: {total_size}, Available: {scratchpad_size}")
+
+        total_size, scratchpad_map = strategy.evaluate(
+            key_to_node, node, new_shapes, bank_width, bank_size
+        )
 
         if total_size <= scratchpad_size:
             # Tiling tuple adjustment for linear and matmul layers
