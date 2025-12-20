@@ -1190,22 +1190,25 @@ def run_fused_op_l2_tiling(
             torch.ops.quantized_ops.quantize_mx.default,
         ]
     ):
-        return tiled_shapes, total_size, scratchpad_map
+        return total_size, tiled_shapes, scratchpad_map
 
     # Skip if GEMM already has fused reshape op
     is_gemm = is_gemm_op(first_node)
     submod_nodes = list(module.graph.nodes) + [node]
     if is_gemm and any("reshape" in n.meta for n in submod_nodes):
         logger.info(f"Skip submodule {node} which is a GEMM fused with reshape")
-        return tiled_shapes, total_size, scratchpad_map
+        return total_size, tiled_shapes, scratchpad_map
 
     min_sizes = None
     transposed = first_node.meta.get("transposed", False)
 
+    output_shape = tiled_shapes[node]
+    if isinstance(node.value, (list, tuple)):
+        output_shape = output_shape[1]
+
     if is_gemm:
         args = map_arg(node.args, lambda n: get_tiled_tensor(n, tiled_shapes))
         ShapeProp(module).propagate(*args)
-        output_shape = first_node.value.shape
 
         # We are not doing tiling on Y, X and C dimensions for conv layers here
         if is_conv2d(first_node):
@@ -1213,10 +1216,6 @@ def run_fused_op_l2_tiling(
             min_sizes = output_shape[:dim] + (unroll_dims[0],) + output_shape[dim + 1:]
         else:
             min_sizes = (unroll_dims[0],)
-    elif isinstance(node.value, torch.Tensor):
-        output_shape = tiled_shapes[node]
-    else:
-        output_shape = tiled_shapes[node][1]
 
     for tile_sizes, tiling in get_valid_tiling(
         output_shape, min_sizes=min_sizes, reverse=is_gemm
@@ -1266,10 +1265,10 @@ def run_fused_op_l2_tiling(
                 new_shapes = None
             else:
                 first_node.meta["l2_tiling"] = tiling
-            return new_shapes, total_size, scratchpad_map
+            return total_size, new_shapes, scratchpad_map
 
     logger.warning(f"Failed to adjust tiling for {node}")
-    return None, total_size, scratchpad_map
+    return total_size, None, None
 
 
 def propagate_tiled_shapes_upstream(start_node, tiled_shapes):
@@ -1458,7 +1457,7 @@ def run_memory_mapping(
 
         for strategy in strategies:
             if node.op == "call_module":
-                new_shapes, total_size, scratchpad_map = run_fused_op_l2_tiling(
+                total_size, new_shapes, scratchpad_map = run_fused_op_l2_tiling(
                     node,
                     mod,
                     key_to_node,
@@ -1478,7 +1477,7 @@ def run_memory_mapping(
                 )
 
             if total_size <= cache_size:
-                logger.info(f"  Successful tiling with strategy: {strategy}")
+                logger.info(f"  Successfully tiled {node} with strategy: {strategy}")
                 break
 
         logger.debug("Scratchpad allocation result:")

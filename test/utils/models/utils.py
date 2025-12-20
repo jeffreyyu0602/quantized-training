@@ -22,5 +22,6 @@ def get_compile_args(args):
         "unroll_dims": args.hardware_unrolling,
         "output_dir": args.model_output_dir,
         "output_file": args.model,
+        "dump_tensors": args.dump_tensors,
     }
     return compile_args
