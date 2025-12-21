@@ -591,8 +591,8 @@ def quantize_mx_outlier(
 
 
 quantized_decomposed_lib.define(
-    "slice_csr_tensor(Tensor data, Tensor indices, Tensor indptr, int start, int end, "
-    "int dim=0) -> (Tensor, Tensor, Tensor)"
+    "slice_csr_tensor(Tensor data, Tensor indices, Tensor indptr, int dim=0, "
+    "SymInt? start=None, SymInt? end=None) -> (Tensor, Tensor, Tensor)"
 )
 
 
@@ -601,15 +601,16 @@ def slice_csr_tensor(
     data: torch.Tensor,
     indices: torch.Tensor,
     indptr: torch.Tensor,
-    start: int,
-    end: int,
-    dim: int = 0
+    dim: int = 0,
+    start: int = None,
+    end: int = None,
 ) -> Tuple[torch.Tensor]:
     if dim == 0 or dim == -2:
         start_idx = indptr[start].item()
         end_idx = indptr[end].item()
 
         new_indptr = indptr[start:end + 1] - start_idx
+
         data_padded = torch.zeros_like(data)
         indices_padded = torch.full_like(indices, -1)
 
@@ -618,23 +619,17 @@ def slice_csr_tensor(
         indices_padded[:nnz] = indices[start_idx:end_idx]
 
         return data_padded, indices_padded, new_indptr
-
-    if dim == 1 or dim == -1:
+    elif dim == 1 or dim == -1:
         mask = (indices >= start) & (indices < end)
 
-        n_rows = indptr.numel() - 1
         row_lengths = (indptr[1:] - indptr[:-1]).to(torch.int64)
 
-        row_ids = torch.repeat_interleave(
-            torch.arange(n_rows, device=indptr.device),
-            row_lengths
-        )
-
-        old_nnz = indptr[-1].to(torch.int64)
-        mask_nnz = mask[:old_nnz]
-
-        masked_row_ids = row_ids[mask_nnz]
-        counts = torch.bincount(masked_row_ids, minlength=n_rows)
+        counts = torch.segment_reduce(
+            mask.to(torch.float32),
+            reduce="sum",
+            lengths=row_lengths,
+            unsafe=True # Faster, assumes lengths sum to mask.numel()
+        ).to(indptr.dtype)
 
         new_indptr = torch.empty_like(indptr)
         new_indptr[0] = 0
@@ -643,13 +638,15 @@ def slice_csr_tensor(
         data_padded = torch.zeros_like(data)
         indices_padded = torch.full_like(indices, -1)
 
-        new_nnz = mask_nnz.sum().item()
+        valid_indices = indices[mask]
+        new_nnz = valid_indices.numel()
+
         data_padded[:new_nnz] = data[mask]
-        indices_padded[:new_nnz] = indices[mask] - start
+        indices_padded[:new_nnz] = valid_indices - start
 
         return data_padded, indices_padded, new_indptr
-
-    raise ValueError("dim must be 0 or 1 (or -2 or -1)")
+    else:
+        raise ValueError(f"dim must be 0, 1, -2, or -1. Got {dim}")
 
 
 @torch.library.register_fake("quantized_ops::slice_csr_tensor")
@@ -657,9 +654,9 @@ def _(
     data: torch.Tensor,
     indices: torch.Tensor,
     indptr: torch.Tensor,
-    start: int,
-    end: int,
-    dim: int = 0
+    dim: int = 0,
+    start: int = None,
+    end: int = None,
 ):
     fake_data = torch.empty_like(data)
     fake_indices = torch.empty_like(indices)
