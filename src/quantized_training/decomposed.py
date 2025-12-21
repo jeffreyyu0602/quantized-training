@@ -591,13 +591,13 @@ def quantize_mx_outlier(
 
 
 quantized_decomposed_lib.define(
-    "slice_csr_matrix(Tensor data, Tensor indices, Tensor indptr, int start, int end, "
+    "slice_csr_tensor(Tensor data, Tensor indices, Tensor indptr, int start, int end, "
     "int dim=0) -> (Tensor, Tensor, Tensor)"
 )
 
 
-@impl(quantized_decomposed_lib, "slice_csr_matrix", "CompositeExplicitAutograd")
-def slice_csr_matrix(
+@impl(quantized_decomposed_lib, "slice_csr_tensor", "CompositeExplicitAutograd")
+def slice_csr_tensor(
     data: torch.Tensor,
     indices: torch.Tensor,
     indptr: torch.Tensor,
@@ -652,7 +652,7 @@ def slice_csr_matrix(
     raise ValueError("dim must be 0 or 1 (or -2 or -1)")
 
 
-@torch.library.register_fake("quantized_ops::slice_csr_matrix")
+@torch.library.register_fake("quantized_ops::slice_csr_tensor")
 def _(
     data: torch.Tensor,
     indices: torch.Tensor,

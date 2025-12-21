@@ -734,7 +734,7 @@ def _make_linear_tiled_module(C, tile_c):
             if A_data is None:
                 return None, None, None
 
-            return torch.ops.quantized_ops.slice_csr_matrix(
+            return torch.ops.quantized_ops.slice_csr_tensor(
                 A_data, A_indices, A_indptr, c0, c1, dim=1
             )
 
