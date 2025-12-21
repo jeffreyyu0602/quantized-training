@@ -465,6 +465,9 @@ def split_conv2d_node(model, node, tile_sizes):
     _, _, IX, IY = node.args[0].shape
     tile_y, tile_x, tile_c, tile_k = tile_sizes
 
+    if tile_y == Y and tile_x == X and tile_c == C and tile_k == K:
+        return  # No tiling needed
+
     pad_value = 0
     if (input_code := node.kwargs.get("input_code")) is not None:
         code = model.get_buffer(input_code.target)
@@ -688,6 +691,7 @@ def _slice_tensor(node, dim, start, end, model):
         Node: A new node representing the sliced tensor.
     """
     graph = model.graph
+
     if node.op == "get_attr":
         param = fetch_attr(model, node.target)
         sliced_data = param.data.narrow(dim, start, end - start)
@@ -699,6 +703,7 @@ def _slice_tensor(node, dim, start, end, model):
         tiled_node = graph.call_function(
             torch.ops.aten.slice.Tensor, (node, dim, start, end),
         )
+
     propagate_shape(tiled_node, model)
     tiled_node.meta["dtype"] = node.meta.get("dtype")
     return tiled_node
@@ -910,6 +915,9 @@ def split_gemm_node(model, node, tile_sizes, tiled_shapes):
     K = weight_shape[-1] if is_mat else weight_shape[0]
 
     tiling = (X // x_tiled, K // k_tiled)
+
+    if x_tiled == X and c_tiled == C and k_tiled == K:
+        return
 
     if C == c_tiled:
         node.meta["tiled_shapes"] = tiled_shapes
@@ -1270,6 +1278,11 @@ def select_conv2d_tiling(node, unroll_dims, cache_size, bank_width, bank_size):
     full_shape = (Y, X, C, K)
 
     min_xy = int(math.sqrt(unroll_dims[0]))
+
+    # conv1 has special hardware constraints
+    if C == 3:
+        min_xy = 56
+
     min_sizes = (min_xy, min_xy, unroll_dims[0], unroll_dims[1])
 
     order = (3, 0, 1, 2)
