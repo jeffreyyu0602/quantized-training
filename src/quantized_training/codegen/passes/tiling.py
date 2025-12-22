@@ -13,6 +13,8 @@ from torch.fx.operator_schemas import normalize_function
 from .utils import get_arg_or_kwarg, _pair
 from ..mapping import (
     get_node_bytes,
+    get_node_to_key_map,
+    normalize_shape,
     replace_node_with_graph_module,
     _nodes_sequential,
 )
@@ -1099,29 +1101,6 @@ def get_valid_tiling(
             # If we went through all dims and none could change, we are done
             if not progress_made:
                 break
-
-
-def get_node_to_key_map(node):
-    args_and_kwargs = normalize_function(
-        node.target,
-        node.args,
-        node.kwargs,
-        normalize_to_only_use_kwargs=True
-    )
-    node_to_key = {
-        n.meta.get('source_node', n): k
-        for k, n in args_and_kwargs.kwargs.items() if isinstance(n, Node)
-    }
-    node_to_key[node] = "output"
-    return node_to_key
-
-
-def normalize_shape(node, shape):
-    node_to_key = get_node_to_key_map(node)
-    shape = {
-        n: shape[k] for n, k in node_to_key.items() if k in shape
-    }
-    return shape
 
 
 def _conv2d_layout(shape, is_weight=False, do_transpose=False):

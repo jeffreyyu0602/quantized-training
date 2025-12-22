@@ -189,15 +189,15 @@ def transform(
     # -------------------------------------------------------------------------
     # 5. Vector Operation Tiling
     # -------------------------------------------------------------------------
-    # Apply L2 tiling logic for vector-based operations.
-    if cache_size is not None:
-        run_vector_op_l2_tiling(model, unroll_dims[1], cache_size, num_banks)
-
     # TODO: Used for unit test. Will be removed in the future
     from .codegen.passes.lowering import split_dense_spmm_node
 
     if split_spmm:
         split_dense_spmm_node(model)
+
+    # Apply L2 tiling logic for vector-based operations.
+    if cache_size is not None:
+        run_vector_op_l2_tiling(model, unroll_dims[1], cache_size, num_banks)
 
     # -------------------------------------------------------------------------
     # 6. Operator Fusion
