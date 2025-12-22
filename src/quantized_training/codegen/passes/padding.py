@@ -105,13 +105,13 @@ def slice_output(model, output_node, slice_args):
         ]:
             bs = get_arg_or_kwarg(user, 4, "block_size")
             if bs is None:
-                slice_output(user, slice_args)
+                slice_output(model, user, slice_args)
                 continue
 
         if is_elementwise_op(user):
             if len(user.all_input_nodes) == 1:
                 propagate_shape(user)
-                slice_output(user, slice_args)
+                slice_output(model, user, slice_args)
                 continue
 
             # If all inputs have the same slice args, strip the redundant slice.
@@ -128,7 +128,7 @@ def slice_output(model, output_node, slice_args):
                         user.replace_input_with(n, n.args[0])
 
                 propagate_shape(user)
-                slice_output(user, slice_args)
+                slice_output(model, user, slice_args)
                 continue
 
         sliced_output_users.append(user)
@@ -139,11 +139,11 @@ def slice_output(model, output_node, slice_args):
                 torch.ops.aten.slice.Tensor, (output_node, *slice_args),
             )
 
-        for n in sliced_output_users:
-            n.replace_input_with(output_node, slice_node)
-
         propagate_shape(slice_node)
         slice_node.meta["dtype"] = output_node.meta.get("dtype")
+
+        for n in sliced_output_users:
+            n.replace_input_with(output_node, slice_node)
 
 
 def pad_matrix_op_dimensions(
